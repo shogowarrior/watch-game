@@ -164,6 +164,22 @@ def test_peer_offset_learnt():
     assert abs(e.rssi_f + 70.0) < 1.0 and abs(e.peer_bias - 6.0) < 1.0
 
 
+def test_first_peer_reports_only_learn_offset():
+    """peer_bias is learnt against rssi_f, so the first peer reports after a reset
+    (a fade, or a stale value from before a relink) only teach it: rssi_f matches
+    an own-only filter for the first 2 s (PEER_MIN_N reports) and stays close after."""
+    assert kalman2.PEER_MIN_N >= 20
+    own = lambda i: -70.0 + (3.0 if i & 1 else -3.0)
+    a = Estimator()
+    b = Estimator()
+    feed(a, 0, 20, own, walking=False)
+    feed(b, 0, 20, own, walking=False, peer=lambda i: -95.0 if i < 2 else -68.0)
+    assert a.rssi_f == b.rssi_f and a.p00 == b.p00, (a.rssi_f, b.rssi_f)
+    feed(a, 2000, 30, own, walking=False)
+    feed(b, 2000, 30, own, walking=False, peer=lambda i: -68.0)
+    assert abs(b.rssi_f - a.rssi_f) < 1.0, (a.rssi_f, b.rssi_f)   # was 2.6 dB off
+
+
 def test_sim_approach_beats_chance():
     from tools import bakeoff
     m = bakeoff.evaluate(Estimator, bakeoff.record("approach", "typical", 0, duration=20.0))

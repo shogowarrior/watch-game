@@ -5,9 +5,11 @@ counters allow, |d rssi/dt| <= 10 n / ln10 * (v_me + v_peer) / d, with a hard
 clamp at CAP_K times that bound. Both watches still -> the rate is pinned to 0
 and the RSSI is averaged hard. The IMU is never integrated, so step-counter
 drift only loosens or tightens the bound. Peer-reported RSSI is a second
-measurement (own bias learnt slowly). Innovations are Huber-clipped, tighter on
-the fade side. Measurement noise is the shared packet-to-packet noise_db (base,
-ui-spec 5.5) clamped to [SIG_MIN, SIG_MAX], which also sets the body/fade bias.
+measurement once its offset has been averaged over PEER_MIN_N reports (earlier
+it would only echo rssi_f, and a first fade or stale value would skew the start).
+Innovations are Huber-clipped, tighter on the fade side. Measurement noise is
+the shared packet-to-packet noise_db (base, ui-spec 5.5) clamped to
+[SIG_MIN, SIG_MAX], which also sets the body/fade bias.
 """
 
 import math
@@ -35,6 +37,7 @@ SIG_MAX = 8.0
 K_UP = 2.5          # Huber clip (sigmas) for innovations above the prediction
 K_DOWN = 1.0        # ... and below it (fades, blocking)
 PEER_ALPHA = 0.02   # bias learning for peer-reported RSSI
+PEER_MIN_N = 20     # peer reports averaged into peer_bias (vs rssi_f) before the peer RSSI is used
 Z_ON = 0.05         # |rate|/sd to start a trend while moving
 Z_FLIP = 0.3        # opposite-sign |rate|/sd to flip it
 MAX_GAP_MS = 3000   # longer silence -> trend unsure, rate reset
@@ -134,7 +137,8 @@ class Estimator(RangeEstimator):
             else:
                 a = PEER_ALPHA
             self.peer_bias += a * ((peer_rssi - self.rssi_f) - self.peer_bias)
-            self._correct(peer_rssi - self.peer_bias, rv)
+            if self.peer_n >= PEER_MIN_N:
+                self._correct(peer_rssi - self.peer_bias, rv)
         self._trend()
         self._publish()
 

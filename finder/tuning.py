@@ -6,7 +6,7 @@ Plain constants only; blocks marked 'ui-spec only' come from ui-spec.md.
 """
 
 TOKENS_VERSION = '0.2.0'
-TOKENS_HASH = '8592ae02c742664d'
+TOKENS_HASH = '5dc7468eb630ab03'
 
 # ---- Zones (thresholds.zones_m): boundary k is between zone k and k+1
 ZONE_FAR = 0
@@ -244,8 +244,8 @@ CORE_DOT_LEVEL = 6.0
 # ---- Typography (typography)
 WORD_MAX_CHARS = 10
 LABEL_MAX_CHARS = 18
-WORD_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!'=:+%~<"  # tokens subset (no space)
-LABEL_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ~<>+%:-'  # tokens subset
+WORD_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 !'=:+%~<"
+LABEL_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ~<>+%:-?,/'
 
 # ---- Motion (motion)
 FPS_TARGET = 20
@@ -427,7 +427,3 @@ MENU_AUTOCLOSE_MS = 8000
 MENU_CONFIRM_MS = 3000
 MENU_ROWS_Y = (32, 76, 120, 164)
 MENU_ROW_H = 40
-
-# ---- ui-spec only: Copy glyph extras (ui-spec copy needs chars missing from tokens subsets)
-WORD_EXTRA_CHARS = ' '  # e.g. 'TURN RIGHT', "4 O'CLOCK"
-LABEL_EXTRA_CHARS = '?,/'  # e.g. 'SAME RUNES?', 'NO FIX, TRY AGAIN', 'SUN: ON/OFF'

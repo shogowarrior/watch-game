@@ -329,6 +329,7 @@ def test_link_lost_hides_grows_and_restores():
 
 def test_link_lost_too_long_or_too_wide_ends_silently():
     a, t = _locked(0, 20)
+    t, hs, ts = _run(a, t, 10000, hidden=True)       # hiding does not start the 20 s
     t, hs, ts = _run(a, t, 20000, link_ok=False)
     assert not a.done                                # exactly 20 s: still restorable
     t, hs2, ts2 = _run(a, t, 200, link_ok=False)
@@ -356,6 +357,22 @@ def test_link_lost_pauses_turn():
     a.update(5600)                     # lost 3 s: pacer resumes from 30 deg
     assert a.phase == A.PH_TURN and _near(a.pacer, 33.0)
     assert a.haptic is None            # a tap before the loss was dropped
+
+
+def test_hidden_pauses_turn_and_face_without_relink_limit():
+    a = A.make(170, 20, 0)
+    a.update(1500)
+    a.update(2500)
+    t, hs, ts = _run(a, 2500, 25000, hidden=True)   # hidden past the turn and the 20 s
+    assert hs == [] and ts == [] and a.phase == A.PH_TURN and _near(a.pacer, 30.0)
+    a.update(ticks_add(t, 100))
+    assert a.phase == A.PH_TURN and _near(a.pacer, 33.0) and a.word == "TURN RIGHT"
+    b = A.make(100, 25, 0, mode=A.MODE_STATIC)
+    b.update(1500)
+    t, hs, _ = _run(b, 1500, A.FACE_MS + 1000, steps=0, hidden=True)
+    assert hs == [] and b.phase == A.PH_FACE         # no auto-lock under the MENU
+    b.update(ticks_add(t, 100), steps=80, hidden=True)
+    assert b.done and b.haptic == "FARTHER" and b.toast == "SCAN AGAIN"   # not silent
 
 
 def test_ticks_wrap():

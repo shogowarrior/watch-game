@@ -26,10 +26,12 @@ One ``step(now)`` does, in order:
   button  AXP202 PEK -> ``game.on_button`` (short / long; wakes when off)
   logic   every 100 ms: tracker + battery (every 10 s) -> ``game.tick``
           -> RenderParams; screen power; AXP202 shutdown only once
-          ``game.power_off``. A shutdown-level battery reading reaches
-          the game only off USB and after ``BATT_LOW_READS`` in a row (1 s
-          apart); until then the game keeps its last value, so one sagging
-          reading never alarms or powers the watch off
+          ``game.power_off``. A reading at or under BATT_WARN_PCT that is
+          lower than the game's value reaches the game only after
+          ``BATT_LOW_READS`` such readings in a row (1 s apart), and a
+          shutdown-level one never on USB; until then the game keeps its
+          last value, so one sagging reading never alarms, turns the saver
+          on or powers the watch off
   render  at ``params.fps_cap`` (20, saver 15): strips -> ``display.push_strip``.
           With the screen off the renderer still runs state-only
           (``display=None``) so heartbeats keep their time grid (ui-spec §7).
@@ -81,7 +83,7 @@ TICK_MS = T.LOGIC_MS       # game logic rate (10 Hz)
 INPUT_MS = 20              # touch/button/imu poll when nothing else is due
 HAPTIC_SLICE_MS = 1        # ``idle`` motor tick while a pattern plays
 BATTERY_MS = 10000
-BATT_LOW_READS = 3         # shutdown-level readings in a row before the game sees one
+BATT_LOW_READS = 3         # falling readings <= 20 % in a row before the game sees one
 BATT_RECHECK_MS = 1000     # ... taken this far apart
 IMU_OUT_HZ = 25            # MotionTracker rate (25-50 Hz; 25 halves its float work)
 CHIP_MS = 1000             # BMA423 feature engine (steps/activity/wrist) poll
@@ -443,12 +445,20 @@ class Runtime:
         start = getattr(self.imu, "start_features", None)   # absent on a bare FIFO imu
         if start is None:
             return
-        try:
-            if start():
-                self._chip = CHIP_PENDING
+        for _ in range(3):                    # a bus error mid-upload leaves INIT_CTRL unset
+            try:
+                ok = start()
+                break
+            except OSError as e:
+                self.errors["imu_features"] = e
+        else:
+            return
+        if ok:
+            self._chip = CHIP_PENDING
+            try:
                 self._chip_poll()
-        except OSError as e:
-            self.errors["imu_features"] = e
+            except OSError as e:
+                self.errors["imu_features"] = e     # retried by the 1 s poll
 
     def _chip_poll(self):
         st = self.imu.poll_features()
@@ -560,17 +570,15 @@ class Runtime:
         if wd is not None and vb is not None and not usb and wd.mode == MODE_SOFT:
             wd.stop()                         # unplugged: hardware WDT from now on (one way)
             self.wd = self._make_watchdog(usb=False)
-        low = pct is not None and pct <= T.BATT_SHUTDOWN_PCT
-        if low and usb:
-            low = False                       # on USB: never an automatic power-off
-            pct = T.BATT_SHUTDOWN_PCT + 1
-        if low:
-            self._low_n += 1
+        if usb and pct is not None and pct <= T.BATT_SHUTDOWN_PCT:
+            pct = T.BATT_SHUTDOWN_PCT + 1     # on USB: never an automatic power-off
+        b = self.game.battery
+        if pct is not None and pct <= T.BATT_WARN_PCT and (b is None or pct < b):
+            self._low_n += 1                  # a drop on the LOW-BATTERY ladder: confirm it
             if self._low_n < BATT_LOW_READS:  # hold back (game keeps its last value); re-read soon
                 self._t_batt = ticks_add(now, BATT_RECHECK_MS)
                 return
-        else:
-            self._low_n = 0
+        self._low_n = 0
         self.game.set_battery(now, pct)
 
     def _screen(self, now, p):

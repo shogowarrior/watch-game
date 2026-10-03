@@ -313,6 +313,9 @@ def test_heartbeat_on_live_spawns_only():
     ev = _run(r, cap, _warm(pulse_period_ms=500, heartbeat="TICK", ring_live=False), 2000)
     assert ev == []                           # ghost rings: no haptic
     assert r.field.ghosts == 1
+    r.reset()                                 # LINK-LOST: no packets, yet its inward
+    ev = _run(r, cap, rs._lost, 2000)         # rings listen (§4 rule 4): never ghosts
+    assert ev == [] and r.field.ghosts == 0 and any(r.field.r_on)
     r.reset()
     ev = _run(r, cap, _warm(pulse_period_ms=500, heartbeat="TICK", heartbeat_every=2), 2000)
     assert len(ev) == 2                       # FAR-style: every 2nd ring
@@ -715,6 +718,20 @@ def test_calibrate_fill_follows_countdown_not_clock():
         cal["countdown"] = cd
         _run(r, cap, cal, 950, t0=T0 + 7650 + 1000 * k)
     assert r.field.prm[fld.P_FILL_R] >= 166
+    # another calibrate.window_ms: digits n..1 (Calibrator.digit), the fill only grows
+    from ui import renderer as R
+    saved = R.CAL_MS, R.CAL_N
+    R.CAL_MS, R.CAL_N = 5000, 5
+    try:
+        r.reset()
+        fr = []
+        for k in range(5):
+            cal["countdown"] = 5 - k
+            _run(r, cap, cal, 950, t0=T0 + 1000 * k)
+            fr.append(r.field.prm[fld.P_FILL_R])
+    finally:
+        R.CAL_MS, R.CAL_N = saved
+    assert fr == sorted(fr) and fr[-1] >= 166, fr
 
 
 def test_unreliable_status_bars_warn():
@@ -968,7 +985,9 @@ def _luma(c):
 
 def test_sun_ghost_rings_lifted_with_field():
     # §8 sun mode lifts the ramp LUT one stop; a ghost ring (§4 rule 5: drawn
-    # where v_ghost > v) must be lifted too, or it is a dark notch in the field
+    # where v_ghost > v) must be lifted too, or it is a dark notch in the field.
+    # An outward ghost (inward rings never are) over a grey field, so the luma
+    # compare is like for like: grey over green differs in hue, sun or not.
     _need_fb()
     orig = fld.pal_kernel
     won = []
@@ -989,9 +1008,7 @@ def test_sun_ghost_rings_lifted_with_field():
     fld.pal_kernel = probe
     try:
         _run(Renderer(), FrameCapture(),
-             dict(screen="SEARCHING", zone=None, ramp="grey", intensity=0.15, speed_px_s=-36,
-                  pulse_period_ms=3200, glow_r_px=18, ring_live=False, glyph="seeker", sun=True),
-             5000)
+             _warm(ring_live=False, ramp="grey", sun=True), 5000)
     finally:
         fld.pal_kernel = orig
     assert won and not darker, (len(won), darker[:10])

@@ -23,9 +23,9 @@ The look borrows the feel of an ancient-tech proximity sensor: a green glow and 
 ## 2. Render model (the constraint behind every token)
 
 ```
-ring_map  GS8 index map   idx = min(255, floor(hypot(x-119.5, y-119.5)))  -> 0..168
+ring_map  GS8 index map   idx = floor(hypot(x-119.5, y-119.5))  -> 0..168
           (top half only, 28.8 KB; the bottom strips mirror it row by row)
-palette   RGB565 FrameBuffer 256x1  rebuilt every frame (entries 0..168 only)
+palette   RGB565 FrameBuffer 256x1  rebuilt every frame (entries 0..169; the map uses 0..168)
 strip     RGB565 FrameBuffer 240x24 (11,520 B), reused for all 10 strips
 
 per frame:

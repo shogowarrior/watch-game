@@ -188,7 +188,7 @@ fallback is both short presses within 3 s in HOT.
 | Motion tracker | 25 Hz | `app.runtime.IMU_OUT_HZ` |
 | Feature engine poll | 1 Hz | `app.runtime.CHIP_MS` |
 | Touch / button poll | touch: every loop and after every 2nd display strip (about 8 ms apart while a frame renders); button: every loop, at least every 20 ms | `app.runtime.INPUT_MS` |
-| Battery | every 10 s; a shutdown-level reading must repeat 3 times, 1 s apart, off USB | `BATTERY_MS`, `BATT_LOW_READS` |
+| Battery | every 10 s; a falling reading at or under 20 % must repeat 3 times, 1 s apart; on USB a shutdown-level reading never reaches the game | `BATTERY_MS`, `BATT_LOW_READS` |
 | Haptics | pulses and gaps >= 60 ms; motor serviced every strip and every 1 ms while a pattern plays | `finder.haptic_patterns` |
 | Link loss | 5 s with no packet after a fix -> LINK_LOST | `finder.game`, ui-spec §6 |
 

@@ -103,6 +103,20 @@ def test_noise_db_ignores_pairs_over_1s():
         assert abs(e.noise_db - SD_PER_STEP * JIT_INIT) < 1e-9, (n, e.noise_db)
 
 
+def test_noise_db_survives_reset():
+    """est.reset() (relink, SEARCHING) forgets the range, not the channel roughness:
+    a rough channel reads unreliable (ui-spec 5.5) from the first packet after it."""
+    for n in estimators.NAMES:
+        e = estimators.make(n)
+        for i in range(300):
+            e.update(100 * i, -70.0 + (10.0 if i & 1 else -10.0), None, STILL, STILL)
+        nz = e.noise_db
+        e.reset()
+        assert e.noise_db is None and e.dist_m is None, n
+        e.update(60000, -70.0, None, STILL, STILL)
+        assert nz > UNRELIABLE_SD_DB and abs(e.noise_db - nz) < 1e-9, (n, nz, e.noise_db)
+
+
 # ---- shared contract (every name in NAMES) ---------------------------------
 
 def test_contract_ticks_wrap():

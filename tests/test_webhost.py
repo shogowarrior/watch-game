@@ -249,6 +249,13 @@ def test_manual_pairing_without_auto_pair():
 def test_auto_pair_starts_quickly():
     s = TwoWatchSim()
     split = [None, None]
+    peer = []                             # peer RSSI fed to the estimators off the proxy
+    for g in s.games:
+        def upd(t, rssi, p=None, me=None, pm=None, _up=g.est.update):
+            if p is not None and not s._was_proxy:
+                peer.append(p)
+            return _up(t, rssi, p, me, pm)
+        g.est.update = upd
     while s.t_ms < 20000 and not (s.games[0].mode != "PAIRING" and s.games[1].mode != "PAIRING"):
         s.step(50)
         for i in (0, 1):
@@ -263,6 +270,7 @@ def test_auto_pair_starts_quickly():
     # the proxy pairing never leaks 1 m packets: nobody opens HOT 36 m away
     for g in s.games:
         assert g.px.zone != 3, g.px.zone
+    assert peer and max(peer) < -60, max(peer)    # ... nor a stale 1 m rssi_last in a beacon
     p0 = s.sim.radio.p0_link
     for k in (0, 1):                      # both 1 m calibrations finish on the proxy (held split/calibrate)
         assert abs(s.games[k].pair.p1m - p0[k]) <= 1.0, (k, s.games[k].pair.p1m, p0[k])

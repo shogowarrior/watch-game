@@ -8,8 +8,8 @@ exist only in docs/design/ui-spec.md; they live in ``SPEC`` below with their
 section reference and are emitted in their own clearly marked blocks. Strings
 in tokens.json that carry numbers (intensity map, sigma model, proximity,
 FOUND gate, standing wave, ghost rings, iris rim, temporal AA, flash limit,
-haptic queue, typography subsets) must match their whole template: if their
-wording changes this script fails loudly instead of emitting a stale number.
+haptic queue) must match their whole template: if their wording changes this
+script fails loudly instead of emitting a stale number.
 Tokens that repeat a value (backlight, sweep rate, breathing, crossfade, link
 bars, preset wavelengths, FOUND glow_r) must agree.
 """
@@ -136,10 +136,6 @@ SPEC = (
         ("MENU_CONFIRM_MS", 3000, None),
         ("MENU_ROWS_Y", (32, 76, 120, 164), None),
         ("MENU_ROW_H", 40, None),
-    )),
-    ("Copy glyph extras (ui-spec copy needs chars missing from tokens subsets)", (
-        ("WORD_EXTRA_CHARS", " ", "e.g. 'TURN RIGHT', \"4 O'CLOCK\""),
-        ("LABEL_EXTRA_CHARS", "?,/", "e.g. 'SAME RUNES?', 'NO FIX, TRY AGAIN', 'SUN: ON/OFF'"),
     )),
 )
 
@@ -531,16 +527,11 @@ def build(tok):
 
     # typography
     ty = tok["typography"]
-    wm = _match(r"same bold 16x32 bitmap family as numeral, uppercase A-Z 0-9 and (\S+)",
-                ty["word"]["source"], "typography.word.source")
-    lm = _match(r"8x16 VGA-style bitmap face, pre-rasterized to MONO_HLSB, uppercase A-Z 0-9 space "
-                r"and (\S+)", ty["label"]["source"], "typography.label.source")
-    az09 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     sec("Typography (typography)", [
         ("WORD_MAX_CHARS", int(ty["word"]["max_chars"]), None),
         ("LABEL_MAX_CHARS", int(ty["label"]["max_chars_toast"]), None),
-        ("WORD_CHARS", az09 + wm.group(1), "tokens subset (no space)"),
-        ("LABEL_CHARS", az09 + " " + lm.group(1), "tokens subset"),
+        ("WORD_CHARS", ty["word"]["chars"], None),
+        ("LABEL_CHARS", ty["label"]["chars"], None),
     ])
 
     # motion
@@ -587,7 +578,8 @@ def build(tok):
                          "field.intensity_map glow_r_px FOUND disagree")
     if int(mo["duration_ms"]["breathe_found"]) != int(m.group(6)):
         raise ValueError("tokens.json motion.duration_ms.breathe_found != field.standing_wave period")
-    gh = _match(r"ring spawned with ring_live=False adds ([\d.]+)\*pulse_amp to a grey channel; "
+    gh = _match(r"outward ring \(speed_px_s > 0\) spawned with ring_live=False adds "
+                r"([\d.]+)\*pulse_amp to a grey channel; "
                 r"colour = LUT\.grey where v_ghost > v_green; no haptic", fld["ghost_rings"],
                 "field.ghost_rings")
     fb = st["FOUND"]["burst"]

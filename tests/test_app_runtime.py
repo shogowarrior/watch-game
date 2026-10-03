@@ -642,9 +642,16 @@ class _AxpBus:
 
 
 def _run(rt, clock, ms):
+    """Step ``ms``; return the haptic names the logic ticks raised."""
+    haps = []
+    n = rt.ticks
     t_end = clock.now + ms
     while clock.now < t_end and not rt.powered_off:
         clock.sleep(max(1, rt.step(clock.now)))
+        if rt.ticks != n and rt.params.haptic:
+            haps.append(rt.params.haptic)
+        n = rt.ticks
+    return haps
 
 
 def test_low_battery_shutdown_needs_confirmation_and_no_usb():
@@ -694,15 +701,36 @@ def test_one_low_battery_reading_is_ignored():
     while not rt._low_n:
         clock.sleep(max(1, rt.step(clock.now)))
     pmu.pct = 60
-    haps = []
-    t_end = clock.now + 3000
-    while clock.now < t_end:
-        clock.sleep(max(1, rt.step(clock.now)))
-        if rt.params.haptic:
-            haps.append(rt.params.haptic)
+    haps = _run(rt, clock, 3000)
     assert g.battery == 60 and not g.saver and g._toast is None, (g.battery, g._toast)
     assert "BATT" not in haps, haps
     assert not rt.powered_off and not pmu.off and g._bye_t is None
+
+
+def test_one_sagging_ladder_reading_is_ignored():
+    """One falling reading on the LOW-BATTERY ladder (5 % from a cell at 8 %)
+    neither alarms nor latches the 5 % step, so the real 5 % still buzzes."""
+    fakes.install()
+    from hal.radio import SimRadio
+    clock = Clock(1000)
+    rt = _watch(clock, SimRadio(MAC_A).begin())
+    pmu = rt.board.pmu
+    pmu.pct = 8
+    rt.begin(clock.now)
+    _run(rt, clock, 11000)
+    g = rt.game
+    assert g.battery == 8, g.battery
+    pmu.pct = 5                            # one sag at a later 10 s reading
+    rt._t_batt = clock.now
+    haps = _run(rt, clock, 500)
+    assert rt._low_n == 1 and g.battery == 8, (rt._low_n, g.battery)
+    pmu.pct = 8
+    haps += _run(rt, clock, 12000)
+    assert g.battery == 8 and g._toast is None, (g.battery, g._toast)
+    assert "BATT" not in haps, haps
+    pmu.pct = 5                            # the real 5 %
+    haps = _run(rt, clock, 15000)
+    assert haps.count("BATT") == 1 and g.battery == 5, (haps, g.battery)
 
 
 def test_power_off_survives_panel_and_bus_errors():
@@ -942,6 +970,56 @@ def test_finger_spike_after_a_mid_frame_touch_down():
     ev = [json.loads(s) for s in rt.tele.lines()]
     assert [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"] == [(5030, False)], ev
     assert rt.game.bump_t is None
+
+
+def _bump_in_hot(t0, finger):
+    """Two Runtimes on connected SimRadios, paired and both in HOT; both
+    accelerometers spike at ``t0`` and, with ``finger``, A's screen is tapped
+    then (touch-down 70 ms after the spike). Runs to ``t0`` + 1.2 s."""
+    fakes.install()
+    from hal.radio import SimRadio
+    from hal.axp202 import EV_SHORT
+    from finder.game import BUZZ_OFF, M_HUNT
+    from finder.proximity import HOT
+    clock = Clock(0)
+    ra = SimRadio(MAC_A, seed=11).begin()
+    rb = SimRadio(MAC_B, seed=22).begin()
+    ra.connect(rb, rssi=-50)
+    a = _watch(clock, ra, imu_spikes=((t0, 2, 3000),), buttons=((1000, EV_SHORT),),
+               touches=((t0 + 70, t0 + 160, 120, 120),) if finger else ())
+    b = _watch(clock, rb, imu_spikes=((t0, 2, 3000),), buttons=((1100, EV_SHORT),))
+    rts = (a, b)
+    for rt in rts:
+        rt.begin(0)
+        rt.game.pair.split_s = 1           # short split countdown
+        rt.game.buzz = BUZZ_OFF            # no motor pulse can blank a spike
+    hot = False
+    while clock.now < t0 + 1200:
+        if not hot and clock.now >= t0 - 50:
+            hot = True
+            for rt in rts:
+                assert rt.game.mode == M_HUNT and rt.game.px.zone == HOT, rt.game.mode
+        w = 1000
+        for rt in rts:
+            d = rt.step(clock.now)
+            if d < w:
+                w = d
+        clock.sleep(w if w > 0 else 1)
+    assert a.feed.n_taps == 1 and b.feed.n_taps == 1, (a.feed.n_taps, b.feed.n_taps)
+    return a.game, b.game
+
+
+def test_withdrawn_finger_spike_never_reaches_the_partner():
+    """ui-spec §6, rule 10: a spike withdrawn by a touch-down that follows it
+    was never a bump, on either watch. It is neither matched nor sent in
+    beacons until it is 100 ms old, so the partner's own knock 0 ms apart
+    finds nothing to match; without the finger, both watches enter FOUND."""
+    from finder.game import M_FOUND
+    ga, gb = _bump_in_hot(7960, finger=True)
+    assert ga.mode != M_FOUND and gb.mode != M_FOUND, (ga.mode, gb.mode)
+    assert ga.bump_t is None and gb.peer.tap_t is None, (ga.bump_t, gb.peer.tap_t)
+    ga, gb = _bump_in_hot(7960, finger=False)
+    assert ga.mode == M_FOUND and gb.mode == M_FOUND, (ga.mode, gb.mode)
 
 
 def test_touch_down_seen_when_a_press_follows_a_gap():
@@ -1263,6 +1341,38 @@ def test_bma423_feature_bus_error_is_retried():
     assert rt._chip == CHIP_ON and "imu_features" not in rt.errors, rt.errors
     assert dev.feat[0x3B] & 0x30 == 0x30   # STEP_COUNTER_EN | STEP_ACTIVITY_EN
     assert dev.feat[0x40] & 0x01           # FEAT_WRIST_WEAR enabled
+
+
+def test_bma423_feature_upload_bus_error_is_retried():
+    """A NACK during the boot-time blob upload is retried: the chip ends ON."""
+    from tests.test_hal_bma423 import _imu, _tmp, _write, _blob, _rm, _w
+    from app.runtime import Runtime, CHIP_ON
+    m, dev, bmod, imu = _imu()
+    p = _tmp("t_rt_bma423_upload.bin")
+    _write(p, _blob())
+    dev.init_status = 1
+    start = imu.start_features
+    imu.start_features = lambda: start(path=p, expect_sha256=None)
+    real = dev.write
+    fail = [True]
+
+    def write(reg, data):
+        if reg == 0x5E and fail[0]:        # the first blob chunk NACKs
+            fail[0] = False
+            raise OSError(5)
+        return real(reg, data)
+    dev.write = write
+    clock = Clock(0)
+    rt = Runtime(Board(imu=imu, display=FakeDisplay()), parts=("imu", "display"),
+                 clock=clock, sleep_ms=clock.sleep, renderer=_renderer(),
+                 gc_collect=lambda: None)
+    try:
+        rt.begin(0)
+        rt.run(max_ms=3000)
+    finally:
+        _rm(p)
+    assert rt._chip == CHIP_ON and "imu_features" not in rt.errors, rt.errors
+    assert _w(dev, 0x59)[-1] == 1 and _w(dev, 0x59).count(1) == 1   # INIT_CTRL=1 once
 
 
 def test_bma423_feature_engine_pending_then_missing():

@@ -98,7 +98,8 @@ W_BUMP = "BUMP!"                     # word in prox.7
 
 # token values (finder/tuning.py) as plain ints; Q8 = 256 per ramp step
 LOGIC_MS = T.LOGIC_MS      # params arrive at 10 Hz (§3)
-CAL_MS = T.CAL_WINDOW_MS   # calibrate fill r 64 -> 168 over 3 s
+CAL_MS = T.CAL_WINDOW_MS   # calibrate fill r 64 -> 168 over the calibrate window
+CAL_N = (CAL_MS + 999) // 1000   # countdown digits, as finder.pairing.Calibrator.digit
 FILL_R0 = T.IRIS_R["scan"]
 R_MAX = T.FIELD_R_MAX      # ring-map max index: inward rings spawn and the fill ends here
 ARROW_IN_MS = T.ARROW_APPEAR_MS
@@ -317,7 +318,8 @@ class Renderer:
         if (v != 0 and period > 0 and not menu and scr != S_FOUND and
                 not (scr == S_SCANNING and sub != "ready" and sub is not None)):
             r0 = (f.iris_to << 8) if v > 0 else (R_MAX << 8)
-            if (f.schedule(t, period, r0, v, lead, trail, p.ring_live, first) and
+            # inward rings are listening rings (§4 rule 4): never ghosts
+            if (f.schedule(t, period, r0, v, lead, trail, p.ring_live or v < 0, first) and
                     p.heartbeat and f.spawns % (p.heartbeat_every or 1) == 0):
                 hb = 1
         elif not menu:
@@ -339,7 +341,7 @@ class Renderer:
     def _cal_fill(self, p, t, prev_t, restart):
         """PAIRING calibrate fill clock: advances with frame time except while
         the logic shows the pause chip, and is held inside the second the
-        countdown digit names (digit d: (3-d) s .. (4-d) s)."""
+        countdown digit names (digit d of n: (n-d) s .. (n-d+1) s)."""
         if restart:
             c = 0
         else:
@@ -348,8 +350,8 @@ class Renderer:
                 d = ticks_diff(t, prev_t)
                 c += 0 if d < 0 else (250 if d > 250 else d)
         cd = p.countdown
-        if cd is not None and 1 <= cd <= 3:
-            lo = (3 - cd) * 1000
+        if cd is not None and 1 <= cd <= CAL_N:
+            lo = (CAL_N - cd) * 1000
             if c < lo:
                 c = lo
             elif c > lo + 1000:

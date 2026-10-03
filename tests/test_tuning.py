@@ -57,6 +57,7 @@ def test_generator_rejects_changed_token_strings():
                  ("motion", "flash_limit"), ("motion", "temporal_aa"), ("haptics", "queue")):
         assert fails(squared(*path)), path
     assert fails(lambda t: t["thresholds"]["calibrate"].pop("n_indoor"))
+    assert fails(lambda t: t["typography"]["word"].pop("chars"))
     assert fails(lambda t: t["thresholds"]["found"].update(
         requires=t["thresholds"]["found"]["requires"].replace("~5", "~7")))     # not a band label
 
@@ -87,13 +88,19 @@ def test_generator_rejects_disagreeing_copies():
 def test_tokens_keep_no_spec_copies():
     """tokens.json wins over ui-spec (AGENTS rule 8), so it holds no stale copies:
     per-screen glyphs, copy and haptics live in ui-spec §6/§7, iris radii in
-    layout, and the iris rim floor comes from field.iris."""
+    layout, the iris rim floor comes from field.iris, and the copy charsets
+    from typography.*.chars (the font prose is free text)."""
     gen, tok = _gen()
     for name, st in tok["states"].items():
         assert not set(st) & {"glyph", "text", "haptic", "iris_r"}, name
     tok["field"]["iris"] = tok["field"]["iris"].replace("max(5,", "max(6,")
+    tok["typography"]["word"]["source"] = tok["typography"]["label"]["source"] = "reworded"
     built = dict((n, v) for _title, rows in gen.build(tok) for n, v, _c in rows)
     assert built["IRIS_RIM_MIN_LEVEL"] == 6.0 and T.IRIS_RIM_MIN_LEVEL == 5.0
+    assert built["WORD_CHARS"] == T.WORD_CHARS and built["LABEL_CHARS"] == T.LABEL_CHARS
+    # ui-spec copy: "TURN RIGHT", "SAME RUNES?", "NO FIX, TRY AGAIN", "SUN: ON/OFF"
+    assert " " in T.WORD_CHARS and set(" ?,/:") <= set(T.LABEL_CHARS)
+    assert not hasattr(T, "WORD_EXTRA_CHARS") and not hasattr(T, "LABEL_EXTRA_CHARS")
 
 
 def test_header_and_version():

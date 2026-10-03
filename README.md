@@ -43,7 +43,8 @@ The code has been tested on the computer and in a two-watch simulator, but
   [docs/hardware-setup.md](docs/hardware-setup.md).
 - A USB cable and a computer with Python 3, `esptool` and `mpremote`
   (`pip install -r requirements.txt`).
-- Node.js is only needed to run the MicroPython tests and build the browser
+- Node.js (plus a one-time `cd tools/mpy && npm install`) is only needed to run
+  the MicroPython tests, render the screen snapshots and build the browser
   simulator.
 
 ## Quick start
@@ -69,7 +70,8 @@ button and radio on a real watch still need confirming), and finish with
 reboots into the game. To play:
 
 1. **Pair.** Hold the two watches close. When both show the same three runes,
-   tap the screen (or press the side button) on each.
+   tap the screen (or press the side button) on each, or bump the watches
+   together.
 2. **Calibrate.** Stand one step apart and hold still for 3 seconds.
 3. **Split up.** A 30 s countdown gives you time to hide.
 4. **Hunt.** Follow the glow. Tap the screen to run a direction scan, then turn

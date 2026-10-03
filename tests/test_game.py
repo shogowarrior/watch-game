@@ -893,6 +893,9 @@ def test_link_loss_during_a_scan_brings_the_hidden_arrow_to_link_lost():
     t0 = r.t
     r.run(5200, packets=False)
     assert g.mode == M_LINK_LOST and g.arrow is a and "LOST" in r.haptics(t0)
+    r.run(17000, packets=False)                 # the 20 s window starts at LINK_LOST
+    r.run(3000)
+    assert g.mode == M_HUNT and g.arrow is a and r.p.glyph == "arrow"
 
 
 def test_opening_the_menu_cancels_a_scan():
@@ -1538,8 +1541,8 @@ def test_peer_view_expire_caps_age_and_drops_old_tap():
 
 
 # ---- round-2 review: arrow vs scan, turn heartbeat, ready timeout -------------
-def _arrow_rig(theta=10.0, mode=A.MODE_GUIDED):
-    r = paired_rig(d=20.0)
+def _arrow_rig(theta=10.0, mode=A.MODE_GUIDED, **kw):
+    r = paired_rig(d=20.0, **kw)
     r.state = SC_NEAR
     r.run(1000)
     g = r.g
@@ -1567,6 +1570,24 @@ def test_turn_and_face_phases_carry_no_zone_heartbeat():
     r.g.arrow = A.make(120.0, 20.0, r.t)
     r.run(2000)
     assert r.g.arrow.phase == A.PH_TURN and r.p.backlight == T.BACKLIGHT_NORMAL
+
+
+def test_menu_and_saver_interstitial_pause_the_turn_pacer():
+    r = _arrow_rig(150.0, battery=15)
+    g = r.g
+    r.run(1600)
+    t0 = r.t
+    g.on_button(r.t, long=True)
+    r.run(6000)                                 # a 150 deg turn takes 5 s
+    g.on_button(r.t, long=True)                 # RESUME
+    r.run(100)
+    a = g.arrow
+    assert a.phase == A.PH_TURN and a.pacer < 150.0 and r.p.sub == "turn"
+    assert "DOUBLE" not in r.haptics(t0)
+    p0 = a.pacer
+    g.set_battery(r.t, 10)
+    r.run(2000)
+    assert r.p.word == "SAVER ON" and a.phase == A.PH_TURN and a.pacer <= p0 + 3.5
 
 
 def test_accidental_tap_keeps_the_arrow_and_sweep_spends_it():
@@ -1718,6 +1739,7 @@ def test_new_round_split_is_not_taken_by_a_partner_that_left():
             assert w.a.pair.sub == "looking", (how, w.a.pair.sub)
         t0 = w.t
         while w.b.mode != M_PAIRING:
+            assert w.b.mode == M_SEARCHING, (how, w.b.mode)
             w.run(100)
             assert w.t - t0 <= 2600, how
         assert w.b.params.banner == ("FRIEND LEFT", "warn", False), how

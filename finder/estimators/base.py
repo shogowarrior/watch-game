@@ -72,13 +72,15 @@ class RangeEstimator:
 
     def __init__(self, path_loss=None):
         self.pl = path_loss or PathLoss()
+        # mean |rssi_k - rssi_k-1| of own packets, dB (noise_db's source). Kept across
+        # reset(): relink/SEARCHING forget the range, not the channel roughness.
+        self.jit = JIT_INIT
         self.reset()
 
     def reset(self):
         self.rssi_f = None      # filtered RSSI, dBm
         self.rssi_var = 100.0   # variance of rssi_f, dB^2 (some add shadowing for dist_lo/hi)
         self.noise_db = None    # learnt packet-to-packet RSSI noise sd, dB (channel roughness)
-        self.jit = JIT_INIT     # mean |rssi_k - rssi_k-1| of own packets, dB (noise_db's source)
         self._jz = None         # last own RSSI and its time, for the next pair
         self._jt = 0
         self.rate_db_s = 0.0    # d(rssi_f)/dt, + means getting closer

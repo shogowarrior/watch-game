@@ -397,16 +397,12 @@ def test_start_and_poll_features():
     assert imu.poll_features() == b.FEAT_NONE
 
 
-def test_poll_features_retries_after_bus_error():
-    # A NACK while switching the features on must not leave them off for good.
+def test_features_retry_after_bus_error():
+    # A NACK while uploading the blob or switching the features on must not
+    # leave them off for good: both calls may simply be made again.
     m, dev, b, imu = _imu()
     p = _tmp("t_bma423_retry.bin")
     _write(p, _blob())
-    try:
-        assert imu.start_features(path=p, expect_sha256=None) is True
-    finally:
-        _rm(p)
-    dev.regs[0x2A] = 1                                # engine up
     real = dev.write
     fail = [True]
 
@@ -417,6 +413,18 @@ def test_poll_features_retries_after_bus_error():
         return real(reg, data)
 
     dev.write = write
+    try:
+        try:
+            imu.start_features(path=p, expect_sha256=None)
+            assert False, "NACK swallowed"
+        except OSError:
+            pass
+        assert imu.start_features(path=p, expect_sha256=None) is True
+    finally:
+        _rm(p)
+    assert _w(dev, 0x59) == [0x00, 0x00, 0x01]        # INIT_CTRL=1 once, after a whole upload
+    dev.regs[0x2A] = 1                                # engine up
+    fail[0] = True
     try:
         imu.poll_features()
         assert False, "NACK swallowed"

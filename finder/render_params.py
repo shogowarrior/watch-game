@@ -54,8 +54,6 @@ _CHEVRON_SCREENS = ("FAR", "NEAR", "WARM")
 _RAMP_FOR = {"FOUND": "gold", "SEARCHING": "grey", "LINK_LOST": "grey",
              "PAIRING": "green", "SCANNING": "green",
              "FAR": "green", "NEAR": "green", "WARM": "green", "HOT": "green"}
-_WORD_CHARS = T.WORD_CHARS + T.WORD_EXTRA_CHARS
-_LABEL_CHARS = T.LABEL_CHARS + T.LABEL_EXTRA_CHARS
 _MENU_VISIBLE = len(T.MENU_ROWS_Y)          # rows on screen
 
 
@@ -312,8 +310,8 @@ def validate(rp):
         e("dist_stale: must be bool")
     elif rp.dist_stale and sc != "LINK_LOST":
         e("dist_stale: only in LINK_LOST")
-    _text(out, "word", rp.word, T.WORD_MAX_CHARS, _WORD_CHARS)
-    _text(out, "top_text", rp.top_text, T.LABEL_MAX_CHARS, _LABEL_CHARS)
+    _text(out, "word", rp.word, T.WORD_MAX_CHARS, T.WORD_CHARS)
+    _text(out, "top_text", rp.top_text, T.LABEL_MAX_CHARS, T.LABEL_CHARS)
     if sc == "SCANNING" and sub == "sweep" and (rp.word is not None or rp.top_text is not None):
         e("word/top_text: both slots are suppressed during the sweep")
     if sub == "turn" and rp.top_text is not None:
@@ -323,7 +321,7 @@ def validate(rp):
         if not isinstance(bn, tuple) or len(bn) != 3:
             e("banner: must be (text, severity, sticky)")
         else:
-            _text(out, "banner", bn[0], T.LABEL_MAX_CHARS, _LABEL_CHARS)
+            _text(out, "banner", bn[0], T.LABEL_MAX_CHARS, T.LABEL_CHARS)
             if bn[0] is None:
                 e("banner: text missing")
             if bn[1] not in T.BANNER_SEVERITIES:
@@ -356,7 +354,7 @@ def validate(rp):
             for row in mr:
                 if row is None:
                     e("menu_rows: row text missing")
-                _text(out, "menu_rows", row, T.LABEL_MAX_CHARS, _LABEL_CHARS)
+                _text(out, "menu_rows", row, T.LABEL_MAX_CHARS, T.LABEL_CHARS)
 
     # scanning
     sw = rp.sweep

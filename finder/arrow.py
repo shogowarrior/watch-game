@@ -24,8 +24,11 @@ Design choices where the spec is silent (all calibration starting values):
     stays at theta (it is relative to the current heading)
   * the +15 deg unreliable widening is display only: it can drop the tier to
     ``outline`` but never hides or expires the arrow
-  * link loss pauses reveal/turn/face clocks; an arrow that cannot come back
-    (lost > 20 s, sigma > 60, age > 120 s) ends silently (no toast/haptic)
+  * link loss and ``hidden`` (MENU open, SAVER ON interstitial, or stashed
+    under a scan) pause the reveal/turn/face clocks: the pacer cannot be seen
+    or felt there. Only link loss starts the 20 s relink limit; a lost arrow
+    that cannot come back (lost > 20 s, sigma > 60, age > 120 s) ends
+    silently (no toast/haptic), a hidden one expires as usual
   * the WRONG WAY chip after a colder hit lasts the hint-chip time (4 s)
 """
 
@@ -166,6 +169,7 @@ class Arrow:
         self._last_t = t_ms
         self._steps_ref = None
         self._lost_t = None
+        self._hold_t = None       # hidden or lost since (phase clocks paused)
         self._cold_t = None
         self._hit_t = None
         self._lock_t = None
@@ -198,8 +202,9 @@ class Arrow:
         return False
 
     def update(self, t_ms, activity=0, steps=None, trend=0, partner_walking=False,
-               link_ok=True, unreliable=False):
-        """Advance to ``t_ms``. ``steps`` is the own cumulative step counter."""
+               link_ok=True, unreliable=False, hidden=False):
+        """Advance to ``t_ms``. ``steps`` is the own cumulative step counter.
+        ``hidden`` pauses the phase clocks like link loss, without a relink limit."""
         self.haptic = None
         self.toast = None
         if self.phase == PH_DONE:
@@ -220,15 +225,18 @@ class Arrow:
                 self.steps_walked += d
         if activity == ACT_STILL:
             self.still_s += dt / 1000.0
-        if not link_ok:
-            self._update_lost(t_ms)
-            return
-        if self._lost_t is not None:
-            lost = ticks_diff(t_ms, self._lost_t)
+        if link_ok:
             self._lost_t = None
+        elif self._lost_t is None:
+            self._lost_t = t_ms
+        self.link_ok = link_ok
+        if hidden or not link_ok:
+            self._update_hidden(t_ms)
+            return
+        if self._hold_t is not None:
             if self.phase in (PH_REVEAL, PH_TURN, PH_FACE):
-                self._ph_t = ticks_add(self._ph_t, lost)
-        self.link_ok = True
+                self._ph_t = ticks_add(self._ph_t, ticks_diff(t_ms, self._hold_t))
+            self._hold_t = None
         self._step(t_ms, trend, partner_walking)
         if self._stale(t_ms):
             self._expire()
@@ -238,14 +246,19 @@ class Arrow:
     def _stale(self, t_ms):
         return self.sigma_true() > CONE_MAX or ticks_diff(t_ms, self.t0) > MAX_AGE_MS
 
-    def _update_lost(self, t_ms):
-        self.link_ok = False
+    def _update_hidden(self, t_ms):
         self._cold_t = None
         self._tap = False
-        if self._lost_t is None:
-            self._lost_t = t_ms
-        if self._stale(t_ms) or ticks_diff(t_ms, self._lost_t) > RELINK_RESTORE_MS:
+        if self._hold_t is None:
+            self._hold_t = t_ms
+        lt = self._lost_t
+        if lt is not None and ticks_diff(t_ms, lt) > RELINK_RESTORE_MS:
             self.phase = PH_DONE
+        elif self._stale(t_ms):
+            if self.link_ok:
+                self._expire()        # under the MENU: SCAN AGAIN waits for it to close
+            else:
+                self.phase = PH_DONE
         self._render(t_ms)
 
     def _lock(self, t_ms):

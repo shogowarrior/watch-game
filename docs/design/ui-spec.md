@@ -114,7 +114,7 @@ RenderParams = namedtuple("RenderParams", (
     "pulse_period_ms", # int 400..4000; ring spawn period = haptic heartbeat base period
     "wavelength_px",   # float 0..140; == abs(speed_px_s) * pulse_period_ms / 1000 (±1 px)
     "glow_r_px",       # float 0..96; centre glow (or halo outside the iris) radius
-    "ring_live",       # bool: >= 1 packet in the last 1000 ms. False -> next ring is a grey ghost with no haptic
+    "ring_live",       # bool: >= 1 packet in the last 1000 ms. False -> next outward ring is a grey ghost with no haptic
     "burst",           # bool: spawn one extra bright ring this frame (zone closer, FOUND, relink)
     # --- centre glyph ---
     "glyph",           # "glow"|"seeker"|"chevrons"|"arrow"|"countdown"|"turn"|"check"|"runes"|"battery"
@@ -156,7 +156,7 @@ RenderParams = namedtuple("RenderParams", (
 | `status` | `unreliable` implies `visible`: an unreliable signal pins the StatusStrip with warn-coloured link bars (§5.5) |
 | `sweep` | SCANNING `ready` / `sweep` / `result`. In SCANNING `result` (fix), slot 0 is θ, the angle the best bin morphs into (no wedge is drawn), and `active_bin` is the best bin while its blink is on. In the DIRECTION `turn` phase it carries the pacer wedge: (pacer_deg, 12×None, None, False). None everywhere else |
 | `dist_band` | Always one of the six labels. Never a raw number. None in PAIRING, SEARCHING, SCANNING and FOUND |
-| `word` / `top_text` | Uppercase. Glyph subsets are in `tokens.typography`. Length is checked in the logic, not truncated in the renderer |
+| `word` / `top_text` | Uppercase. Characters come from `tokens.typography.word.chars` / `label.chars` (`label` also for banners and menu rows). Length is checked in the logic, not truncated in the renderer |
 | `haptic` | One of the 9 named patterns (§7). The `HapticPlayer` (`finder/haptic_patterns.py`) plays it once and applies priority; the renderer returns only the heartbeats, locked to ring spawns |
 
 Example: WARM, locked arrow, getting warmer.
@@ -201,7 +201,7 @@ This version adds five rules.
 2. **Core dot.** When `iris_r = 0`, indices 0–6 get `core = max(0, 6 − v_rest)`, so the centre is never dimmer than `prox.6`.
 3. **Temporal anti-aliasing.** `lead_eff = max(lead_px, 1.5·|speed|/fps_measured)`, and profiles are evaluated at fractional `r_k`. In HOT at 20 fps that is 9 px of leading edge, so crests never jump their own width. This fixes the judder and flicker findings.
 4. **Direction.** With `speed_px_s < 0`, rings spawn at r = 168 and are absorbed at the iris edge. Inward rings mean "listening, no data".
-5. **Ghost rings.** A ring spawned with `ring_live = False` contributes `0.6·pulse_amp` to a separate grey channel. `color(i) = LUT.grey[v_ghost]` wherever `v_ghost > v_green`. No haptic fires for a ghost ring.
+5. **Ghost rings.** An outward ring (`speed_px_s > 0`) spawned with `ring_live = False` contributes `0.6·pulse_amp` to a separate grey channel. `color(i) = LUT.grey[v_ghost]` wherever `v_ghost > v_green`. No haptic fires for a ghost ring. Inward rings are always listening rings in the field's ramp.
 
 The `burst` ring has amplitude 7 and speed 2× the zone speed, with the same lead rule. It is a travelling ring, not a flash.
 
@@ -312,7 +312,7 @@ The estimator already exposes `trend` and `trend_conf` (`finder/estimators/base.
 - **`trend_strong`:** `trend_conf ≥ 0.85` and |ΔRSSI over 8 s| ≥ 6 dB.
 - **Flip limit:** the sign may not reverse within 5 s of the last change. There is no "steady" glyph: `trend = 0` shows the plain glow. That avoids overclaiming "unchanged", and avoids the pause icon.
 - **Unreliable:**
-  - Condition: the estimator's learnt packet-to-packet RSSI noise (`noise_db`: 0.886 × an EMA, α 0.02, of the |RSSI step| between own packets under 1 s apart, the same in every estimator) is above 7.5 dB, or packet delivery is below 50 % over 5 s (R-14).
+  - Condition: the estimator's learnt packet-to-packet RSSI noise (`noise_db`: 0.886 × an EMA, α 0.02, of the |RSSI step| between own packets under 1 s apart, the same in every estimator) is above 7.5 dB, or packet delivery is below 50 % over 5 s (R-14). The learnt noise is kept across an estimator reset (relink, SEARCHING) and republished with the first packet after it, so a rough channel stays unreliable after a relink.
   - Effect: trend forced to 0, cone +15° (display only), and the StatusStrip is pinned with the link bars in `status.warn`.
 - **Partner walking** (from `peer_motion` in their beacon): the trend is still shown, because the gap really is closing. It does **not** tighten or crack the arrow (§5.6).
 - **Tuning target:** fewer than 5 % false verdicts on a tangential walk (constant distance) under the `typical` and `harsh` profiles. `tools/bakeoff.py` measures it as `false_verdict` on the `orbit` scenario. Starting thresholds are +1 at ≥ 3 dB / 8 s and +2 at ≥ 6 dB / 8 s. Raise them if the target fails.
@@ -367,7 +367,7 @@ The field table in each screen uses: ramp | I | speed | period | λ | glow_r | n
 | `calibrate` (3 s) | green; the fill disc levels r 64→168 go to 4 as R(t) = 64 + 104·t/3 s, with a 3 px edge at level 6 | iris r 64, countdown `3 2 1` (`type.display`, x 108–132, y 96–144) | chip `STAND 1 STEP APART` | word `HOLD STILL` | `TICK` each second; `CLOSER` when done |
 | `split` (30 s) | **Live** hunt field from real packets (zone tempo, with the §5.3 lead / trail), heartbeat muted | iris r 64, countdown `30…0` (2 digits `type.display`, x 96–144) | chip `NO PEEKING` | word `SPLIT UP` | `TICK` at 3, 2, 1; `CLOSER` at 0 (word `GO` for 1 s) |
 
-- **Confirm:** the target is the whole iris (a 184 px disc) or a short press of the button (R-11 asks for 80 px or more). One action per player.
+- **Confirm:** the target is the whole iris (a 184 px disc) or a short press of the button (R-11 asks for 80 px or more). One action per player. A matched bump (both watches' accelerometer spikes within 400 ms, as in the HOT bump rule) in `seen` or `confirmed` confirms both sides at once and goes straight to `calibrate`; it skips the rune check (`finder/pairing.py`).
 - **Candidates:** only a watch that shows PAIRING (`looking`, `seen`, `confirmed`) is taken; one in `calibrate` or `split` (screen code `PAIRED`) is never a candidate. `seen` / `confirmed` return to `looking` when the partner is silent for 5 s or has not shown PAIRING for 2 s (it paired with someone else, or its round started without this watch).
 - **Calibration gate:** if the RSSI sd over 1 s is > 4 dB, the fill pauses and the top chip reads `HOLD STILL`. After 10 s the watch uses the nominal p₁ₘ and moves on (toast `CAL SKIPPED`).
 - **Runes:** chips overlap the iris rim in PAIRING. That is acceptable because no rings run behind them.
@@ -425,7 +425,7 @@ The field table in each screen uses: ramp | I | speed | period | λ | glow_r | n
 
 - Both watches are in HOT, and each made its spike in HOT (the beacon's `ST_TAP_HOT` bit says so for the partner's).
 - Both watches see an accelerometer bump spike within 400 ms of each other. A spike is the gravity-removed |a| above 2.5 g for 10–20 ms in the 100 Hz FIFO, with 200 ms refractory time (`app/imu_feed.py`). Each beacon carries `bump_ago_ms` (time since the sender's last spike), so the receiver places the partner's spike on its own clock as t_rx − `bump_ago_ms` − air time (`finder/session.py`). No clock offset is needed.
-- No spike counts from 100 ms before a screen touch-down until 300 ms after it (the finger's own spike: one accepted up to 100 ms before the touch-down is withdrawn), or inside the haptic blanking window (§7).
+- No spike counts from 100 ms before a screen touch-down until 300 ms after it (the finger's own spike: one accepted up to 100 ms before the touch-down is withdrawn), or inside the haptic blanking window (§7). So a spike is neither matched nor sent in beacons (`bump_ago_ms`) until it is 100 ms old.
 
 **Fallback:** both players short-press within 3 s while in HOT with band ≤ `~5`. In HOT a short press is this fallback press; a second short press within 1 s (partner not pressing) starts a scan instead.
 
@@ -510,7 +510,8 @@ A wide beam is the uncertainty, drawn at the pointer itself (this fixes RUNEWELL
 
 - The TURN phase is paced dead reckoning: the pacer assumes the player follows it, just as the scan does, and its error is paid for in σ.
 - `arrow_mode = "guided" | "static"` in the logic lets the simulator and field tests A/B this against a plain arrow with a `FACE IT` prompt (R-04). Only the guided turn (with its pacer wedge) has the live-mirror halo; static `FACE IT` keeps the zone levels.
-- On LINK_LOST the arrow is hidden at once, but σ keeps growing. If the link returns within 20 s and σ ≤ 60°, the arrow comes back.
+- On LINK_LOST the arrow is hidden at once, but σ keeps growing. If the link returns within 20 s and σ ≤ 60°, the arrow comes back. The 20 s count starts at LINK_LOST, also for an arrow that was hidden under a scan.
+- While the arrow is hidden under the MENU, the 10 % `SAVER ON` interstitial or a scan's `ready` countdown, its `reveal` / `turn` / `FACE IT` clock pauses (σ keeps growing), so the pacer never runs unseen or unfelt. It resumes where it was.
 
 ### LINK-LOST (no packet for 5 s after a fix)
 
@@ -532,11 +533,13 @@ A wide beam is the uncertainty, drawn at the pointer itself (this fixes RUNEWELL
 | 5 % | Toast (critical) `BATTERY 5%` once | Screen only on wrist raise, off 3 s after lowering; haptics carry the game | `BATT` |
 | 3 % | Word `BYE` for 2 s; one inward ring at −120 px/s closes into C (not built: outside the §3 speed range) | Goodbye beacon ×3, then AXP202 power-off. Power-off follows 1 s after the `BYE` word even if the goodbye beacons could not be sent. The MENU and a running scan close, and input is ignored until power-off (a press still wakes the screen). Partner shows `FRIEND IS OFF` | `NOPE` |
 
+The 20 %, 10 % and 5 % alerts (and the partner's `FRIEND BATT 20%`) each fire once per discharge; one re-arms only after the battery charges more than 3 % above its level.
+
 The game never dies silently (R-12), and a modal never takes over every glance.
 
 ### MENU (screen long-press ≥ 800 ms or button long-press 1.5 s; auto-closes after 8 s)
 
-- **Field:** frozen and dimmed (palette ×0.5, no rings; the FOUND standing wave stops breathing too). Haptics are paused.
+- **Field:** frozen and dimmed (palette ×0.5, no rings; the FOUND standing wave stops breathing too). Haptics are paused, and so is a DIRECTION turn (see DIRECTION).
 - **Rows:** a scrolling list of 5 rows, 4 visible at a time (44 px pitch: x 24–215, y 32, 76, 120, 164; each h 40, `surface.toast`, `type.label`):
   1. `RESUME`
   2. `SUN: ON/OFF`
@@ -586,6 +589,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 |---|---|---|
 | **Tap** (touch down→up 60–400 ms, one finger, moving ≤ 12 px, inside r ≤ 92 of C) | FAR–HOT | Start SCANNING. The 3 s `ready` countdown is the confirmation window, so an accidental tap costs nothing and any second tap cancels |
 | Tap | PAIRING `seen` | Confirm runes |
+| Bump watches | PAIRING `seen` / `confirmed` | Confirm both sides at once |
 | Tap | DIRECTION `turn` | "I'm facing it": lock now |
 | Tap | FOUND `result` | New round |
 | Tap | SCANNING | Cancel |

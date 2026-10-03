@@ -24,7 +24,9 @@ Pure logic: no hardware. The main loop (or the simulator) feeds it
 It never declares FOUND from RSSI: only a matched bump (both accelerometer
 taps within 400 ms, each made in HOT - the beacon's ``ST_TAP_HOT`` bit says so
 for the partner's - while both watches are in HOT) or the fallback (both short
-presses within 3 s in HOT with band <= ~5).
+presses within 3 s in HOT with band <= ~5). A spike is neither matched nor
+sent in beacons until it is BUMP_TOUCH_LEAD_MS (100 ms) old, because a
+touch-down can still withdraw it as the finger's own (ui-spec §6).
 
 Choices where the spec is silent (all starting values):
   * the expected partner beacon rate mirrors the partner's ``beacon_hz``
@@ -44,8 +46,9 @@ Choices where the spec is silent (all starting values):
     the 600 ms shrink itself when ``arrow_deg`` goes None
   * the static ``face`` phase (``arrow_mode`` static) counts as ``turn``:
     zone heartbeat muted, screen kept on with the wrist down
-  * an arrow hidden by a scan keeps aging like a lost-link arrow (steps and
-    still time grow sigma, the phase clock pauses)
+  * an arrow hidden by a scan, the MENU or the SAVER ON interstitial keeps
+    aging (sigma grows) while its reveal/turn/face clock pauses; its 20 s
+    relink limit starts only at LINK_LOST
   * ``ready`` cancels silently after WRIST_DOWN_MS face-down or 15 s without
     completing, so an accidental tap never pins the screen on and 20 Hz
     beacons; the screen stays on in ``ready`` only while face-up
@@ -298,6 +301,15 @@ class Game:
         self.taps = (self.taps + 1) & 7
         self._tap_hot = self.mode == M_HUNT and self.px.zone == HOT
         return True
+
+    def _tap(self, t_ms):
+        """``bump_t`` once a touch-down can no longer withdraw it (ui-spec §6: the
+        finger's own spike lands up to BUMP_TOUCH_LEAD_MS before its touch-down),
+        else None."""
+        bt = self.bump_t
+        if bt is not None and ticks_diff(t_ms, bt) <= T.BUMP_TOUCH_LEAD_MS:
+            return None
+        return bt
 
     def on_touch_down(self, t_ms):
         """A finger lands (every touch, even one the gesture recognizer drops): it
@@ -623,7 +635,7 @@ class Game:
             self._update_px(t_ms)
         elif pr.sub == P.DONE:
             self.round_t0 = t_ms
-            if self.peer.live3(t_ms) and self.px.zone is not None:
+            if self.peer.live3(t_ms) and self.px.zone is not None and not self._peer_gone():
                 self._enter_hunt(t_ms, False)
             else:
                 self._enter_searching(t_ms)
@@ -684,20 +696,21 @@ class Game:
                     self._hint = None
                 if z == FAR or z == NEAR:
                     self._scan_hint(t_ms)
-        self._update_arrow(t_ms, True)
+        # hidden by the MENU or SAVER ON: the pacer must not run unseen (clock pauses)
+        self._update_arrow(t_ms, True, self.menu.is_open or self._inter_until is not None)
         self._update_bump_ready(t_ms)
         self._update_still_hint(t_ms)
         self._update_peer_scan(t_ms)
         self._check_found(t_ms)
 
-    def _update_arrow(self, t_ms, link_ok):
+    def _update_arrow(self, t_ms, link_ok, hidden=False):
         a = self.arrow
         if a is None:
             return
         was = a.phase
         pv = self.peer
         a.update(t_ms, self.me.activity, self.me.steps, self.px.trend,
-                 pv.fresh(t_ms) and pv.walking, link_ok, self.px.unreliable)
+                 pv.fresh(t_ms) and pv.walking, link_ok, self.px.unreliable, hidden=hidden)
         if a.phase == A.PH_TURN and was != A.PH_TURN:
             self.mirror.reset(t_ms)
         self._emit(t_ms, a.haptic)
@@ -751,7 +764,7 @@ class Game:
 
     # bump / FOUND
     def _bump_match(self, t_ms):
-        m = self.bump_t
+        m = self._tap(t_ms)
         q = self.peer.tap_t
         if m is None or q is None or m == self._used_my or q == self._used_peer:
             return False
@@ -787,7 +800,7 @@ class Game:
             self._enter_found(t_ms)
             return
         if ps == SC_FOUND:
-            bt = self.bump_t
+            bt = self._tap(t_ms)
             if (self._tap_hot and bt is not None and bt != self._used_my
                     and 0 <= ticks_diff(t_ms, bt) <= PEER_FOUND_TAP_MS) or self._pressed(t_ms):
                 self._consume_bump()
@@ -849,7 +862,7 @@ class Game:
         me = self.me
         st = self._stash
         if st is not None:        # hidden: sigma keeps growing, the phase clock pauses
-            st.update(t_ms, me.activity, me.steps, 0, False, False, self.px.unreliable)
+            st.update(t_ms, me.activity, me.steps, 0, False, True, self.px.unreliable, True)
             if st.done:
                 self._stash = None
         tilt = me.tilt_deg
@@ -1092,7 +1105,7 @@ class Game:
         b.steps = self.me.steps & 0xFFFF
         b.activity = self.me.activity
         b.battery = proto.BATT_UNKNOWN if self.battery is None else self.battery
-        b.set_bump(now, self.bump_t)
+        b.set_bump(now, self._tap(now))
         if self._bye_t is not None and self.goodbye_left > 0:
             self.goodbye_left -= 1
         return b

@@ -39,11 +39,12 @@ Demo helpers (page settable attributes):
     loss is 0 dB; no shadowing, 1 dB fading, no outliers: still hands), so
     both calibrations finish together -- and each watch presses its button
     0.8 s after ``seen`` (auto-confirm; it waits while that watch's MENU is
-    open). When the proxy ends, a watch already in its split restarts its
-    estimate so no 1 m packet leaks into the first zone. The 30 s split
-    countdown is cut to 5 s (``Pairing.split_s``), for every split including
-    new rounds. With ``auto_pair`` off the watches must really be brought
-    within ~5 m and confirmed with ``tap``/``button``.
+    open). When the proxy ends, both watches forget their last RSSI (so no
+    beacon reports a 1 m ``rssi_last``) and a watch already in its split
+    restarts its estimate, so no 1 m packet leaks into the first zone. The
+    30 s split countdown is cut to 5 s (``Pairing.split_s``), for every split
+    including new rounds. With ``auto_pair`` off the watches must really be
+    brought within ~5 m and confirmed with ``tap``/``button``.
   * ``auto_turn`` (default True): an idle walker (no walk_to in progress)
     turns clockwise at the scan's sweep rate during its SCANNING sweep (held
     while the sweep is paused) and follows the DIRECTION turn pacer (turns to
@@ -264,8 +265,10 @@ class TwoWatchSim:
         self._pk[1] += len(pks[1])
 
     def _proxy_done(self):
-        """Proxy just ended: a split that heard 1 m packets starts its estimate afresh."""
+        """Proxy just ended: a split that heard 1 m packets starts its estimate afresh, and
+        no beacon reports a 1 m ``rssi_last`` (both games forget their last RSSI)."""
         for g in self.games:
+            g.rssi_last = None
             if g.mode == M_PAIRING and g.pair.sub == P.SPLIT:
                 g.restart_estimate()
 

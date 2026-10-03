@@ -113,6 +113,10 @@ and then call `begin()` and poll `ready()`.
   loop uses `start_features()` (a non-blocking `load_config`) and then polls
   `poll_features()`: the first FEAT_OK after each reset switches on the step
   counter, activity and wrist-wear, latched on INT1 (a soft reset wipes them).
+  A bus error mid-upload leaves INIT_CTRL unset, so `app/runtime.py` retries
+  `start_features()` up to 3 times at boot; a bus error in `poll_features()` is
+  retried by the 1 s poll. The wrist-wear gesture runs with Bosch's default axes
+  remap, which is unverified on the T-Watch (`docs/hardware-setup.md` §6).
   `load_config()` alone starts the engine but switches no feature on, so
   `steps()` reads 0 until `poll_features()` runs. `Board()` soft-resets the
   chip, so nothing loads the blob until one of these runs.

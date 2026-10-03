@@ -87,7 +87,10 @@ _found = dict(screen="FOUND", zone=3, ramp="gold", intensity=1.0, speed_px_s=0,
 _result = dict(_scan, sub="result", glyph="turn", intensity=0.6, glow_r_px=12)
 
 FIXTURES = [
-    ("pairing_looking", [(0, dict(_pair, sub="looking", top_text="PAIR", word="LOOKING"))], 2000),
+    # no partner yet, so Game sends ring_live False; inward rings are
+    # listening rings all the same (§4 rule 4), never ghosts
+    ("pairing_looking", [(0, dict(_pair, sub="looking", top_text="PAIR", word="LOOKING",
+                                  ring_live=False))], 2000),
     ("pairing_seen", [(0, dict(_pair, sub="seen", speed_px_s=0, wavelength_px=0, runes=RUNES,
                                top_text="SAME RUNES?", word="TAP = YES"))], 1200),
     ("pairing_confirmed", [(0, dict(_pair, sub="confirmed", speed_px_s=0, wavelength_px=0,

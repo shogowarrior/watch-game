@@ -28,13 +28,15 @@ The candidates (`finder/estimators/`):
 exponent per environment, the game's own zones and trend gate), it ties with
 `particle` on overall score: it leads on the held-out seeds 100–129 (+0.012 ±
 0.005 per run), and `particle` leads on the tuning seeds 0–9 and on a second
-unseen block, 200–229 (−0.001 ± 0.005). It is the default because it has the
-lowest distance error on every block (0.507 vs 0.609 on 100–129, 0.512 vs 0.585
-on 200–229), is expected to fit the 2 ms budget (0.3–1.0 ms extrapolated, §2
-and §4), allocates 11× less per packet than `particle`, and has no internal
-randomness. `particle` still follows trends best (higher trend accuracy, shorter
-reversal lag) at about 5–6× the cost; see
-[When to switch to `particle`](#when-to-switch-to-particle).
+unseen block, 200–229 (−0.002 ± 0.005). It is the default because it has the
+best overall score of the cheap estimators (+0.007 ± 0.002 per run over
+`median_ema`, +0.006 ± 0.003 over `kalman1d` on 100–129), lower distance error
+than `particle` on every block (0.506 vs 0.609 on 100–129, 0.512 vs 0.585 on
+200–229; `median_ema` and `kalman1d` are about as good on distance), is expected
+to fit the 2 ms budget (0.3–1.0 ms extrapolated, §2 and §4), allocates 11× less
+per packet than `particle`, and has no internal randomness. `particle` still
+follows trends best (higher trend accuracy, shorter reversal lag) at about 5–6×
+the cost; see [When to switch to `particle`](#when-to-switch-to-particle).
 
 Reproduce:
 
@@ -149,17 +151,17 @@ which were never used for tuning. That is 30 seeds × 4 profiles × 10 scenarios
 
 | estimator | score | dist_log_rmse | dist_cov | trend_acc | trend_cov | false_trend | false_verdict | gated_acc | gated_cov | reversal_lag_s | zone_flips/min | us/update | us/pkt |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| kalman2 | **0.660** | **0.507** | 0.92 | 0.643 | 0.78 | 0.208 | 0.041 | **0.177** | **0.18** | 3.78 | 0.46 | 1.1 | 2.3 |
+| kalman2 | **0.660** | **0.506** | 0.92 | 0.643 | 0.78 | 0.208 | 0.042 | **0.175** | **0.18** | 3.74 | 0.46 | 1.1 | 2.3 |
 | particle | 0.653 | 0.609 | 0.92 | **0.729** | **0.86** | 0.222 | **0.010** | 0.090 | 0.09 | **2.13** | 0.39 | 4.8 | 13.7 |
 | kalman1d | 0.649 | 0.521 | 0.92 | 0.621 | 0.78 | 0.210 | 0.022 | 0.097 | 0.10 | 4.81 | **0.32** | 1.8 | 3.3 |
-| median_ema | 0.643 | 0.506 | 0.92 | 0.572 | 0.73 | **0.164** | 0.032 | 0.160 | 0.16 | 3.55 | 0.37 | 1.8 | 4.3 |
+| median_ema | 0.643 | **0.506** | 0.92 | 0.572 | 0.73 | **0.164** | 0.032 | 0.160 | 0.16 | 3.55 | 0.37 | 1.8 | 4.3 |
 | ema (baseline) | 0.519 | 0.533 | 0.92 | 0.526 | 0.74 | 0.807 | 0.031 | 0.090 | 0.09 | 3.66 | 0.50 | 0.5 | 1.0 |
 
 Timings are CPython on the dev Mac. `rev_miss` is 0 for every estimator.
 
 **Other seed blocks:** on the tuning seeds (0–9) the scores are particle
-0.677, kalman1d 0.655, kalman2 0.649, median_ema 0.643 and ema 0.510. On a
-second unseen block, 200–229, the order is particle 0.655, kalman2 0.648,
+0.677, kalman1d 0.655, kalman2 0.648, median_ema 0.643 and ema 0.510. On a
+second unseen block, 200–229, the order is particle 0.655, kalman2 0.647,
 kalman1d 0.645, median_ema 0.633 (ema 0.517). So the order of the top two flips
 between seed blocks and is within noise.
 
@@ -167,11 +169,11 @@ between seed blocks and is within noise.
 
 | comparison | mean Δ | s.e. | runs won |
 |---|---|---|---|
-| kalman2 − particle | +0.012 | 0.005 | 674/1200 |
-| kalman2 − kalman1d | +0.007 | 0.003 | 597/1200 |
-| kalman2 − median_ema | +0.007 | 0.002 | 688/1200 |
+| kalman2 − particle | +0.012 | 0.005 | 668/1200 |
+| kalman2 − kalman1d | +0.006 | 0.003 | 590/1200 |
+| kalman2 − median_ema | +0.007 | 0.002 | 695/1200 |
 | particle − kalman1d | −0.005 | 0.004 | 566/1200 |
-| kalman2 − particle (seeds 200–229) | −0.001 | 0.005 | 595/1200 |
+| kalman2 − particle (seeds 200–229) | −0.002 | 0.005 | 595/1200 |
 
 The per-seed composite scores have a spread of about 0.03–0.04 (SD) for every
 estimator.
@@ -182,7 +184,7 @@ right: particle 0.849, kalman2 0.820, kalman1d 0.794, median_ema 0.788, ema 0.71
 **The gated trend** (what the player sees) is much more careful than the raw
 one: false verdicts drop to 1–4 %, but a trend shows on only 9–18 % of the
 moving ticks. On `orbit` it still misses the ui-spec §5.5 target under
-`typical` for every estimator (`kalman2` 0.275); see ui-spec §5.5.
+`typical` for every estimator (`kalman2` 0.282); see ui-spec §5.5.
 
 **Reversal lag in `walk_away_back`** (120 runs), in seconds:
 
@@ -190,7 +192,7 @@ moving ticks. On `orbit` it still misses the ui-spec §5.5 target under
 |---|---|---|---|
 | particle | 0.88 | 6.65 | 14.3 |
 | median_ema | 2.00 | 8.95 | 21.0 |
-| kalman2 | 2.03 | 9.35 | 15.6 |
+| kalman2 | 2.03 | 8.85 | 15.6 |
 | kalman1d | 2.75 | 11.75 | 21.6 |
 
 **False trends in truly static scenes:**
@@ -213,7 +215,7 @@ Each cell is the score, with false_trend in brackets.
 |---|---|---|---|---|---|
 | ideal | 0.519 (0.81) | 0.644 (0.15) | 0.653 (0.18) | 0.662 (0.18) | 0.659 (0.19) |
 | typical | 0.519 (0.81) | 0.643 (0.16) | 0.649 (0.21) | 0.660 (0.21) | 0.653 (0.22) |
-| drifty | 0.519 (0.81) | 0.635 (0.22) | 0.633 (0.31) | 0.647 (0.29) | 0.635 (0.33) |
+| drifty | 0.519 (0.81) | 0.635 (0.22) | 0.633 (0.31) | 0.648 (0.29) | 0.635 (0.33) |
 
 No estimator integrates steps into a position, so drift in stride or step count
 costs at most 0.02. Phantom-step bursts in `drifty` raise false trends everywhere,
@@ -225,12 +227,12 @@ Each cell is score / dist_log_rmse / trend_acc / false_trend.
 
 | est | approach | both_approach | stationary | walk_away_back | orbit | rotate_in_place | zigzag_search | nlos_wall | far_edge | pause_and_go |
 |---|---|---|---|---|---|---|---|---|---|---|
-| kalman2 | 0.70 / 0.54 / 0.76 / 0.19 | 0.77 / 0.44 / 0.86 / 0.17 | 0.72 / 0.49 / - / 0.02 | 0.71 / 0.50 / 0.76 / 0.17 | 0.52 / 0.42 / - / 0.87 | 0.72 / 0.47 / - / 0.01 | 0.66 / 0.48 / 0.62 / 0.21 | 0.61 / 0.66 / 0.64 / 0.23 | 0.54 / 0.58 / 0.31 / 0.09 | 0.64 / 0.51 / 0.55 / 0.12 |
+| kalman2 | 0.70 / 0.54 / 0.76 / 0.19 | 0.77 / 0.44 / 0.85 / 0.17 | 0.72 / 0.49 / - / 0.02 | 0.71 / 0.50 / 0.77 / 0.17 | 0.52 / 0.43 / - / 0.87 | 0.72 / 0.47 / - / 0.01 | 0.66 / 0.47 / 0.61 / 0.21 | 0.61 / 0.66 / 0.64 / 0.23 | 0.54 / 0.58 / 0.31 / 0.09 | 0.65 / 0.51 / 0.55 / 0.12 |
 | particle | 0.70 / 0.62 / 0.84 / 0.16 | 0.70 / 0.68 / 0.88 / 0.15 | 0.74 / 0.45 / - / 0.05 | 0.70 / 0.55 / 0.76 / 0.16 | 0.41 / 0.58 / - / 0.99 | 0.75 / 0.43 / - / 0.03 | 0.64 / 0.64 / 0.71 / 0.24 | 0.75 / 0.43 / 0.79 / 0.20 | 0.40 / 1.33 / 0.38 / 0.10 | 0.67 / 0.64 / 0.76 / 0.13 |
 
 | est | clean | typical | harsh | indoor |
 |---|---|---|---|---|
-| kalman2 | 0.77 / 0.39 / 0.85 / 0.24 | 0.68 / 0.50 / 0.72 / 0.23 | 0.61 / 0.55 / 0.53 / 0.20 | 0.57 / 0.60 / 0.46 / 0.17 |
+| kalman2 | 0.77 / 0.39 / 0.85 / 0.24 | 0.68 / 0.50 / 0.73 / 0.23 | 0.61 / 0.55 / 0.53 / 0.20 | 0.57 / 0.60 / 0.46 / 0.17 |
 | particle | 0.70 / 0.62 / 0.87 / 0.23 | 0.64 / 0.70 / 0.79 / 0.23 | 0.60 / 0.68 / 0.65 / 0.22 | 0.68 / 0.42 / 0.61 / 0.20 |
 
 `kalman2` is ahead on `clean` and `typical`, the two are tied on `harsh`, and
@@ -240,7 +242,7 @@ Each cell is score / dist_log_rmse / trend_acc / false_trend.
 
 `node tools/mpy/run.mjs tools/bakeoff.py --quick --est particle,kalman2,ema` runs on
 MicroPython 1.29 (WebAssembly). The metric columns match CPython exactly: kalman2
-0.776, particle 0.735, ema 0.601. Only the timings differ:
+0.772, particle 0.735, ema 0.601. Only the timings differ:
 
 | estimator | us/update (WASM) | us/pkt (WASM) | ×ema per packet | us/pkt (CPython) |
 |---|---|---|---|---|
@@ -287,8 +289,8 @@ No particle count reaches `kalman2` (0.660).
 
 | criterion | particle | kalman2 | verdict |
 |---|---|---|---|
-| overall score (seeds 100–129 / 200–229) | 0.653 / **0.655** | **0.660** / 0.648 | tied: +0.012 ± 0.005 and −0.001 ± 0.005 per run |
-| distance error (seeds 100–129 / 200–229) | 0.609 / 0.585 | **0.507 / 0.512** | kalman2, clearly |
+| overall score (seeds 100–129 / 200–229) | 0.653 / **0.655** | **0.660** / 0.647 | tied: +0.012 ± 0.005 and −0.002 ± 0.005 per run |
+| distance error (seeds 100–129 / 200–229) | 0.609 / 0.585 | **0.506 / 0.512** | kalman2, clearly |
 | trend accuracy / precision | **0.729 / 0.85** | 0.643 / 0.82 | particle |
 | false trend, both still | 0.046 | **0.020** | kalman2 (2.3× fewer) |
 | false trend, drifty IMU | 0.33 | **0.29** | kalman2 |
@@ -300,13 +302,13 @@ No particle count reaches `kalman2` (0.660).
 | determinism / simplicity | internal PRNG, 468 lines | no randomness, 200 lines | kalman2 |
 
 Scored the way the game runs, `kalman2` ties with `particle` on overall score,
-has the lowest distance error, and is the one expected to fit the per-update
-budget, which is a hard requirement: the game shares the CPU with the display, the
-radio and the touch loop. `particle` is still the better trend follower (faster
-reversals, more trends shown and right) and the better indoor estimator, but it
-costs about 5–6× more and has only been shown to fit the budget by extrapolation
-from a Mac. `ema` must not ship: its raw trend is wrong 81 % of the time while
-nobody moves.
+has lower distance error than `particle`, and is the one expected to fit the
+per-update budget, which is a hard requirement: the game shares the CPU with the
+display, the radio and the touch loop. `particle` is still the better trend
+follower (faster reversals, more trends shown and right) and the better indoor
+estimator, but it costs about 5–6× more and has only been shown to fit the
+budget by extrapolation from a Mac. `ema` must not ship: its raw trend is wrong
+81 % of the time while nobody moves.
 
 ### When to switch to `particle`
 
@@ -342,8 +344,10 @@ nobody moves.
   * reversal lag is reported but not scored
   * `orbit` can't be solved from RSSI and step counts alone
 * **`peer_rssi` has no freshness flag.** A peer that stops hearing us keeps
-  re-sending its last value. The estimators weight it lightly, but the protocol
-  should add an age or sequence field.
+  re-sending its last value. `kalman1d` and `particle` give it a larger noise,
+  `median_ema` folds it into its running median, and `kalman2` uses it only after
+  averaging its offset over 20 reports (2 s). Repeats still count as new
+  measurements, so the protocol should add an age or sequence field.
 * **Timing:** ESP32 cost is extrapolated, as described above. The single-precision
   float behaviour of the ESP32 port is untested, because the WASM port uses doubles.
 

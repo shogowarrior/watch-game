@@ -32,7 +32,9 @@ FEATURES_IN layout and is rejected by the sha256 check.
 
 Data format: 12-bit two's complement left-aligned in 16 bits (LSB first),
 identical in DATA_8..13 and in headerless FIFO frames (6 bytes: x, y, z).
-Axes are the sensor's own frame (no remap).
+Axes are the sensor's own frame (no remap); the feature engine also runs with
+Bosch's default (identity) axes remap, so the wrist-wear gesture assumes that
+frame (unverified on the T-Watch: docs/hardware-setup.md §6).
 """
 
 from array import array
@@ -522,7 +524,9 @@ class BMA423:
     def start_features(self, **kw):
         """Game-loop start of the feature engine: ``load_config(wait=False,
         **kw)``, then ``poll_features`` until it stops returning FEAT_PENDING.
-        False when there is no usable blob (software step detection only)."""
+        False when there is no usable blob (software step detection only).
+        An OSError during the upload leaves INIT_CTRL unset, so calling it
+        again is safe."""
         self._feat_on = False
         return self.load_config(wait=False, **kw)
 
