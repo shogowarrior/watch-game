@@ -2,8 +2,8 @@
 
 Read this first. It covers the current state, the decisions waiting on the
 owner, and the order to do things in. CLAUDE.md and AGENTS.md still govern how
-to work. The Project's goal, instructions and cloud setup script are in this
-folder ([setup.md](setup.md) says which goes where).
+to work. The Project's goal and instructions are in this folder
+([setup.md](setup.md) says which goes where).
 
 ## Before doing anything: ask the owner
 

@@ -7,7 +7,7 @@
 **Setup in every new thread**
 - Before the first commit, set `git config user.name "shogowarrior"` and `git config user.email "abhinabray@gmail.com"`. A fresh clone has neither, and the history uses that identity.
 - Read CLAUDE.md (it imports AGENTS.md) and docs/project/handoff.md. Ask me the handoff's open questions in one message before building anything they affect.
-- Once per clone: `cd tools/mpy && npm ci` (the MicroPython test runner; the environment script caches its package).
+- The MicroPython test runner's package installs itself in cloud sessions (`.claude/hooks/cloud-setup.sh`). If `node tools/mpy/run.mjs` reports it missing, run `cd tools/mpy && npm ci`. The image's Node 22 has not been tried with the runner yet: on your first run, say whether it works.
 
 **Shipping**
 - `main` is what goes on the watches. When the work is verified, merge your branch into `main` and push without asking.

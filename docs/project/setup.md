@@ -9,7 +9,6 @@ field. Copy each file whole. These steps mirror the rover's
 |---|---|
 | [goal.md](goal.md) | the Project's **Goal** field. The project conversation reads it. |
 | [instructions.md](instructions.md) | the Project's **Project instructions** field. It is sent to every thread, so it repeats the standing goals. |
-| [environment.sh](environment.sh) | the cloud environment's **setup script** |
 | [handoff.md](handoff.md) | nowhere: it stays in the repo, and threads read it |
 
 ## Steps
@@ -22,20 +21,18 @@ field. Copy each file whole. These steps mirror the rover's
    `main`.
 3. **Goal:** paste [goal.md](goal.md).
 4. **Project instructions:** paste [instructions.md](instructions.md).
-5. **Environment.** The setup script belongs to a cloud environment, not to
-   the Project. Environments are shared by every Project that picks them, so
-   make one for watch-game:
-   - At claude.ai/code, click the cloud icon above the message box, open
-     **Cloud**, and click **Add cloud environment**.
-   - **Name:** `watch-game`.
-   - **Setup script:** paste [environment.sh](environment.sh). It installs
-     Python 3 and Node 24, and caches the one npm package the MicroPython test
-     runner needs.
-   - **Network access:** **Custom**, allowing the distribution's apt mirrors,
-     `deb.nodesource.com`, `registry.npmjs.org` and GitHub. **Full** also
-     works.
+5. **Environment: no setup script needed.** The cloud image already has
+   everything the checks use: Python 3, Node 22, git and `gh`
+   (code.claude.com/docs/en/cloud-environments). The MicroPython test runner's
+   one npm package is installed by the repo's own SessionStart hook
+   (`.claude/hooks/cloud-setup.sh`, cloud sessions only), as those docs
+   recommend for project packages. The **Default** environment with **Trusted**
+   network access (which allows registry.npmjs.org) is enough. A setup script
+   is only worth adding if the first thread finds that the runner fails on
+   Node 22: then make a `watch-game` environment whose script installs a newer
+   Node.
 6. **Point the Project at it:** in the Project, open **Project settings >
-   Environment** and pick `watch-game`.
+   Environment** and pick Default (or `watch-game` if you made one).
 7. **Models and effort:** use the gear icon in the Project's header > **Project
    settings** > **General**. Set **Thread model** and **Thread effort** for the
    threads, and **Coordinator model** and **Coordinator effort** for the
