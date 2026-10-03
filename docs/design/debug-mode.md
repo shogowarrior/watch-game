@@ -199,6 +199,9 @@ How the page reads the records:
   counted and kept in the raw log only.
 - Two different `mac` values under one label within 3 s are flagged as two
   watches with the same name. The same MAC on both watches is fine.
+- When both watches are live and their latest `rp` records carry different
+  non-null `ch`, both cards say the watches joined different parts of the
+  Wi-Fi (different channels) and suggest a network with one access point.
 - "Last heard" counts from the bridge's `rx`, not from the record's `t`.
 - An `rp` record without `p` keeps the last screen. A `mac` of null (a watch
   whose radio failed to start) is accepted.
