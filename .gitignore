@@ -1,1 +1,10 @@
 examples/*
+.DS_Store
+.venv/
+__pycache__/
+node_modules/
+secrets.py
+webrepl_cfg.py
+.serena/
+dist/
+firmware/*.bin
