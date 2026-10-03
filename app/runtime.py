@@ -92,6 +92,7 @@ BATT_LOW_READS = 3         # falling readings <= 20 % in a row before the game s
 BATT_RECHECK_MS = 1000     # ... taken this far apart
 IMU_OUT_HZ = 25            # MotionTracker rate (25-50 Hz; 25 halves its float work)
 CHIP_MS = 1000             # BMA423 feature engine (steps/activity/wrist) poll
+CHIP_TRIES = 5             # engine starts in all: at boot, then at the poll after a bus error
 MAX_SLEEP_MS = 50
 GC_PERIOD_MS = 1000
 GC_BUDGET_MS = 10
@@ -109,6 +110,7 @@ S_TELE = 9
 CHIP_OFF = 0               # feature engine: absent / failed (software steps only)
 CHIP_PENDING = 1           # blob uploaded, engine starting
 CHIP_ON = 2
+CHIP_RETRY = 3             # a bus error stopped the start: the poll starts it again
 ACC_LIMIT_US = 0x1FFFFFFF  # stage sums halve past this (stay MicroPython small ints)
 PMU_OFF_TRIES = 3          # shared I2C0: retry a glitched AXP202 power-off write
 _NO_EVENTS = ()
@@ -219,6 +221,7 @@ class Runtime:
         self._vbus = getattr(self.pmu, "vbus_present", None)
         self._low_n = 0
         self._chip = CHIP_OFF
+        self._chip_tries = 0
         if self.feed is not None:
             self._chip_start()
         self._rx_cb = self._on_rx
@@ -437,7 +440,9 @@ class Runtime:
             self._t_chip = ticks_add(now, CHIP_MS)
             imu = self.imu
             try:
-                if self._chip == CHIP_PENDING:
+                if self._chip == CHIP_RETRY:
+                    self._chip_start()
+                elif self._chip == CHIP_PENDING:
                     self._chip_poll()
                 elif imu.features_ok():
                     self.feed.tracker.set_chip(now, imu.steps(), imu.activity())
@@ -448,24 +453,28 @@ class Runtime:
 
     def _chip_start(self):
         """Start the BMA423 feature engine without blocking (no blob: software
-        steps only); ``_chip_poll`` finishes it (hal.bma423 start/poll_features)."""
+        steps only); ``_chip_poll`` finishes it (hal.bma423 start/poll_features).
+        A bus error mid-upload leaves INIT_CTRL unset, so the 1 s poll starts it
+        again, CHIP_TRIES starts in all (each one sends the 6 KB blob again)."""
         start = getattr(self.imu, "start_features", None)   # absent on a bare FIFO imu
         if start is None:
             return
-        for _ in range(3):                    # a bus error mid-upload leaves INIT_CTRL unset
-            try:
-                ok = start()
-                break
-            except OSError as e:
-                self.errors["imu_features"] = e
-        else:
+        self._chip_tries += 1
+        try:
+            ok = start()
+        except OSError as e:
+            self.errors["imu_features"] = e
+            self._chip = CHIP_RETRY if self._chip_tries < CHIP_TRIES else CHIP_OFF
             return
-        if ok:
-            self._chip = CHIP_PENDING
-            try:
-                self._chip_poll()
-            except OSError as e:
-                self.errors["imu_features"] = e     # retried by the 1 s poll
+        self.errors.pop("imu_features", None)       # an earlier start's bus error
+        if not ok:
+            self._chip = CHIP_OFF
+            return
+        self._chip = CHIP_PENDING
+        try:
+            self._chip_poll()
+        except OSError as e:
+            self.errors["imu_features"] = e     # retried by the 1 s poll
 
     def _chip_poll(self):
         st = self.imu.poll_features()
