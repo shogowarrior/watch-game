@@ -1,0 +1,81 @@
+"""Cost of sim/webhost.py per page frame (run under the wasm MicroPython):
+
+    node tools/mpy/run.mjs tools/bench_webhost.py [steps]
+
+Times ``step(50)`` (both watches rendering at 20 fps), ``step(16)`` (a 60 Hz
+page), ``telemetry_json()`` and the heap allocated per step, in the HUNT
+screens after the auto pairing. Also runs on CPython (logic only, no frames).
+"""
+
+import gc
+import sys
+
+
+def _root():
+    f = globals().get("__file__", "tools/bench_webhost.py")
+    i = f.rfind("/")
+    d = f[:i] if i >= 0 else "."
+    j = d.rfind("/")
+    return d[:j] if j >= 0 else "."
+
+
+_R = _root()
+if _R not in sys.path:
+    sys.path.insert(0, _R)
+
+from finder.compat import argv  # noqa: E402
+from sim.webhost import TwoWatchSim  # noqa: E402
+
+try:
+    from time import ticks_us, ticks_diff
+except ImportError:
+    import time
+
+    def ticks_us():
+        return int(time.perf_counter() * 1000000)
+
+    def ticks_diff(a, b):
+        return a - b
+
+
+def _alloc():
+    f = getattr(gc, "mem_alloc", None)
+    return f() if f is not None else 0
+
+
+def bench(label, s, fn, n):
+    gc.collect()
+    a0 = _alloc()
+    gc_was = gc.isenabled() if hasattr(gc, "isenabled") else True
+    gc.disable()
+    t0 = ticks_us()
+    for _ in range(n):
+        fn(s)
+    us = ticks_diff(ticks_us(), t0)
+    a1 = _alloc()
+    if gc_was:
+        gc.enable()
+    print("%-22s %7.3f ms/call  %7.0f B/call" % (label, us / 1000.0 / n, (a1 - a0) / n))
+    return us / 1000.0 / n
+
+
+def main():
+    args = [a for a in argv(globals())[1:] if a.isdigit()]
+    n = int(args[0]) if args else 200
+    s = TwoWatchSim(seed=1)
+    while s.t_ms < 15000:
+        s.step(50)
+    print("impl", sys.implementation.name, "screens", s.telemetry(0)["screen"],
+          s.telemetry(1)["screen"], "renderers", s.renderers is not None)
+    ms50 = bench("step(50)", s, lambda s: s.step(50), n)
+    bench("step(16)", s, lambda s: s.step(16), n * 3)
+    bench("telemetry_json()", s, lambda s: s.telemetry_json(), n)
+    s.walk_to(0, 30.0, 8.0)
+    bench("step(50) walking", s, lambda s: s.step(50), n)
+    s.tap(0)
+    bench("step(50) scanning", s, lambda s: s.step(50), n)
+    print("frames", s.frames, "sim t %.1f s" % (s.t_ms / 1000.0))
+    print("step(50) = %.1f %% of a 50 ms real-time budget" % (100.0 * ms50 / 50.0))
+
+
+main()

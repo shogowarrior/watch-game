@@ -1,0 +1,9 @@
+{
+  "name": "watch-game-mpy-tools",
+  "private": true,
+  "type": "module",
+  "description": "Runs the pure-Python game logic under real MicroPython (WebAssembly port) for compatibility tests",
+  "devDependencies": {
+    "@micropython/micropython-webassembly-pyscript": "1.29.0-6"
+  }
+}

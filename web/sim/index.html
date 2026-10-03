@@ -1,0 +1,573 @@
+<title>Two-Watch Field Sim</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap">
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0A0F0D;
+  --panel: #111915;
+  --panel-2: #0E1512;
+  --line: #1E2B25;
+  --grid: #14201A;
+  --grid-2: #1B2B23;
+  --text: #D5E3DA;
+  --muted: #8BA096;
+  --faint: #5C6E65;
+  --a: #7FD6FF;
+  --b: #FFB86B;
+  --glow: #5AE78C;
+  --warn: #FF9A21;
+  --bad: #FF6B5E;
+  --radius: 10px;
+  --sans: 'IBM Plex Sans Condensed', 'Arial Narrow', system-ui, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+}
+html, body { background: var(--bg); color: var(--text); }
+body { font-family: var(--sans); font-size: 14px; line-height: 1.45; }
+.wrap { max-width: 1320px; margin: 0 auto; padding-inline: 20px; padding-block: 18px 32px; display: flex; flex-direction: column; gap: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
+h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: 0.01em; text-wrap: balance; }
+.sub { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+.sub a { color: var(--glow); }
+.status { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; border-radius: 15px; background: var(--panel); border: 1px solid var(--line); font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
+.status.ok .dot { background: var(--glow); box-shadow: 0 0 8px var(--glow); }
+.status.err .dot { background: var(--bad); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; align-items: start; }
+@media (max-width: 980px) { main { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.field-card { display: flex; flex-direction: column; overflow: hidden; }
+.field-wrap { position: relative; }
+#field { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; max-width: 100%; touch-action: none; cursor: crosshair; background: var(--panel-2); }
+.legend { position: absolute; left: 12px; top: 10px; display: flex; flex-wrap: wrap; gap: 6px; pointer-events: none; }
+.chip { height: 24px; padding: 0 9px; border-radius: 12px; background: rgba(10, 15, 13, 0.82); border: 1px solid var(--line); display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.chip b { color: var(--text); font-weight: 600; }
+.swatch { width: 9px; height: 9px; border-radius: 50%; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 14px; border-top: 1px solid var(--line); }
+.controls label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+select, button { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--grid-2); border-radius: 7px; height: 32px; padding: 0 10px; }
+button { cursor: pointer; }
+button:hover, select:hover { border-color: #2F4539; }
+button:focus-visible, select:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px solid var(--glow); outline-offset: 2px; }
+button.primary { background: #16301F; border-color: #245236; color: #C9F5D8; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+input[type="checkbox"] { accent-color: var(--glow); width: 16px; height: 16px; }
+.seg { display: inline-flex; border: 1px solid var(--grid-2); border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; height: 30px; background: transparent; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: #16301F; color: #C9F5D8; }
+.help { padding: 10px 14px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.help kbd { font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--grid-2); color: var(--text); }
+.watches { display: flex; flex-direction: column; gap: 16px; }
+.watch { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.watch-head { display: flex; align-items: center; justify-content: space-between; }
+.watch-head h2 { margin: 0; font-size: 17px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.screen-name { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.bezel { align-self: center; padding: 18px; border-radius: 34px; background: #151A18; box-shadow: 0 0 0 1px #262D2A, 0 10px 24px rgba(0, 0, 0, 0.4); transition: box-shadow 70ms linear; position: relative; }
+.bezel.buzz { box-shadow: 0 0 0 3px var(--glow), 0 0 26px 6px rgba(90, 231, 140, 0.5); }
+.bezel::after { content: ""; position: absolute; right: -6px; top: 38%; width: 8px; height: 44px; border-radius: 3px; background: #2B312E; }
+.screen { display: block; width: 240px; height: 240px; max-width: 100%; image-rendering: pixelated; background: #000; border-radius: 3px; cursor: pointer; touch-action: none; }
+.btns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.btns button { height: 34px; font-size: 13px; }
+dl.tele { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; font-size: 13px; }
+dl.tele dt { color: var(--muted); }
+dl.tele dd { margin: 0; font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.good { color: var(--glow); }
+.warnc { color: var(--warn); }
+.overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(10, 15, 13, 0.72); color: var(--muted); font-family: var(--mono); font-size: 13px; text-align: center; padding: 20px; }
+.overlay[hidden] { display: none; }
+.err-box { max-width: 520px; color: var(--text); font-family: var(--sans); font-size: 14px; }
+.err-box code { font-family: var(--mono); color: var(--bad); }
+.guide { margin: 0; padding: 12px 14px 12px 34px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 22px; font-size: 13px; color: var(--muted); }
+.guide li { padding-left: 2px; }
+.guide li b { color: var(--text); font-weight: 600; }
+@media (max-width: 1100px) { .guide { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .guide { grid-template-columns: minmax(0, 1fr); } }
+.chart-wrap { border-top: 1px solid var(--line); padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 6px; }
+.chart-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px; font-size: 13px; }
+.chart-head h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.keys { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 12px; }
+.keys span { display: inline-flex; align-items: center; gap: 6px; }
+.line-key { width: 18px; height: 0; border-top: 2px solid; }
+#chart { display: block; width: 100%; height: 170px; max-width: 100%; }
+.why { margin: 0; padding: 9px 11px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); font-size: 13px; line-height: 1.45; color: var(--text); min-height: 3.2em; }
+.posture { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 13px; }
+.posture select { height: 30px; }
+.note { color: var(--faint); font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { .bezel { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Two-Watch Field Sim</h1>
+      <p class="sub">The real watch code (game logic and screen renderer, MicroPython 1.29) running in your browser against a simulated radio. Drag the watches around and both screens react as the firmware would. Mockups: <a href="https://claude.ai/code/artifact/6fa68c10-ec92-4dbc-9fdc-a45a0d5aa3a1" target="_blank" rel="noopener">Sheikah Finder watch UI</a>.</p>
+    </div>
+    <div class="status" id="status" role="status"><span class="dot"></span><span id="status-text">Loading MicroPython…</span></div>
+  </header>
+
+  <main>
+    <section class="card field-card" aria-label="Top-down field">
+      <ol class="guide">
+        <li><b>Wait about 15 s.</b> The watches pair and calibrate themselves, then play starts.</li>
+        <li><b>Drag A toward B.</b> A walks there at a real pace. Use 4× or 8× to fast-forward.</li>
+        <li><b>Watch the chart and the rings.</b> As A gets closer the rings speed up and brighten; warmer shows as an up-arrow.</li>
+        <li><b>Tap A's screen to scan,</b> then walk the arrow. Next to B, press <b>Bump watches</b>.</li>
+      </ol>
+      <div class="field-wrap">
+        <canvas id="field" width="1200" height="900" tabindex="0" aria-label="Field. Drag watches to move them; drag the small handle or scroll over a watch to turn it; double-click to send watch A walking there."></canvas>
+        <div class="legend">
+          <span class="chip"><span class="swatch" style="background: var(--a)"></span><b>A</b> seeker</span>
+          <span class="chip"><span class="swatch" style="background: var(--b)"></span><b>B</b> hider</span>
+          <span class="chip" id="chip-dist">true distance <b id="true-dist">–</b></span>
+          <span class="chip" id="chip-clock">sim <b id="sim-clock">0:00</b></span>
+        </div>
+        <div class="overlay" id="boot">Starting the watch code…</div>
+      </div>
+      <div class="controls">
+        <label for="profile">Radio conditions
+          <select id="profile">
+            <option value="clean">Open field, clean</option>
+            <option value="typical" selected>Park, typical</option>
+            <option value="harsh">Crowded, harsh</option>
+            <option value="indoor">Indoors, walls</option>
+          </select>
+        </label>
+        <span class="seg" role="group" aria-label="Speed">
+          <button type="button" data-speed="1" aria-pressed="true">1×</button>
+          <button type="button" data-speed="2" aria-pressed="false">2×</button>
+          <button type="button" data-speed="4" aria-pressed="false">4×</button>
+          <button type="button" data-speed="8" aria-pressed="false">8×</button>
+        </span>
+        <label for="pace">Drag moves at
+          <select id="pace">
+            <option value="1.3" selected>walking pace</option>
+            <option value="2.6">jogging pace</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="auto-turn" checked> Auto-turn during scans</label>
+        <label><input type="checkbox" id="truth" checked> Show truth</label>
+        <button type="button" class="primary" id="bump">Bump watches</button>
+        <button type="button" id="reset">Reset</button>
+      </div>
+      <div class="chart-wrap">
+        <div class="chart-head">
+          <h2>Distance: what each watch thinks vs the truth</h2>
+          <div class="keys">
+            <span><i class="line-key" style="border-color: #D5E3DA; border-top-style: dashed"></i>true distance</span>
+            <span><i class="line-key" style="border-color: var(--a)"></i>A thinks</span>
+            <span><i class="line-key" style="border-color: var(--b)"></i>B thinks</span>
+          </div>
+        </div>
+        <canvas id="chart" width="1200" height="340" aria-label="Chart of true distance and each watch's estimate over the last 90 seconds, with the far, near, warm and hot zone bands."></canvas>
+      </div>
+      <div class="help">
+        <span>Drag a watch: it walks to where you let go (<kbd>Shift</kbd>-drag jumps there)</span>
+        <span>Drag its small handle, or scroll over it, to turn it</span>
+        <span>Double-click the field: the selected watch walks there</span>
+        <span><kbd>Q</kbd> <kbd>E</kbd> turn the selected watch</span>
+        <span class="note">Turning a watch only changes its signal: your body blocks radio from behind. The watch itself cannot sense which way it faces (no compass or gyroscope), which is why direction needs a scan.</span>
+      </div>
+    </section>
+
+    <section class="watches" aria-label="Watch screens">
+      <article class="card watch" data-i="0">
+        <div class="watch-head"><h2><span class="swatch" style="background: var(--a)"></span>Watch A</h2><span class="screen-name" id="name-0">–</span></div>
+        <div class="bezel" id="bezel-0"><canvas class="screen" id="screen-0" width="240" height="240" aria-label="Watch A screen. Click to tap, drag up or down (or scroll) to swipe."></canvas></div>
+        <div class="btns">
+          <button type="button" data-act="tap" data-i="0">Tap screen</button>
+          <button type="button" data-act="hold" data-i="0">Hold (menu)</button>
+          <button type="button" data-act="button" data-i="0">Side button</button>
+        </div>
+        <p class="why" id="why-0">Starting…</p>
+        <label class="posture" for="posture-0">Watch position (what its accelerometer feels)
+          <select id="posture-0" data-i="0">
+            <option value="flat" selected>held flat</option>
+            <option value="tilted">tilted 50°</option>
+            <option value="down">wrist down</option>
+          </select>
+        </label>
+        <dl class="tele" id="tele-0"></dl>
+      </article>
+      <article class="card watch" data-i="1">
+        <div class="watch-head"><h2><span class="swatch" style="background: var(--b)"></span>Watch B</h2><span class="screen-name" id="name-1">–</span></div>
+        <div class="bezel" id="bezel-1"><canvas class="screen" id="screen-1" width="240" height="240" aria-label="Watch B screen. Click to tap, drag up or down (or scroll) to swipe."></canvas></div>
+        <div class="btns">
+          <button type="button" data-act="tap" data-i="1">Tap screen</button>
+          <button type="button" data-act="hold" data-i="1">Hold (menu)</button>
+          <button type="button" data-act="button" data-i="1">Side button</button>
+        </div>
+        <p class="why" id="why-1">Starting…</p>
+        <label class="posture" for="posture-1">Watch position (what its accelerometer feels)
+          <select id="posture-1" data-i="1">
+            <option value="flat" selected>held flat</option>
+            <option value="tilted">tilted 50°</option>
+            <option value="down">wrist down</option>
+          </select>
+        </label>
+        <dl class="tele" id="tele-1"></dl>
+      </article>
+    </section>
+  </main>
+</div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const statusEl = $('status'), statusText = $('status-text'), boot = $('boot');
+function setStatus(kind, text) { statusEl.className = 'status' + (kind ? ' ' + kind : ''); statusText.textContent = text; }
+function fail(msg, detail) {
+  setStatus('err', 'Stopped');
+  boot.hidden = false;
+  boot.innerHTML = '';
+  const box = document.createElement('div'); box.className = 'err-box';
+  const p = document.createElement('p'); p.textContent = msg; box.appendChild(p);
+  if (detail) { const c = document.createElement('code'); c.textContent = String(detail).slice(0, 600); box.appendChild(c); }
+  boot.appendChild(box);
+}
+
+// ---------- world view ----------
+const VIEW = { x0: -12, x1: 52, y0: -20, y1: 28 };
+const field = $('field'), fctx = field.getContext('2d');
+let W = field.width, H = field.height, S = 1;
+function layoutField() {
+  const r = field.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
+  field.width = Math.round(r.width * dpr); field.height = Math.round(r.width * 0.75 * dpr);
+  W = field.width; H = field.height;
+  S = Math.min(W / (VIEW.x1 - VIEW.x0), H / (VIEW.y1 - VIEW.y0));
+}
+const wx = (px) => VIEW.x0 + px / S;
+const wy = (py) => VIEW.y1 - py / S;
+const sx = (x) => (x - VIEW.x0) * S;
+const sy = (y) => (VIEW.y1 - y) * S;
+const rad = (d) => d * Math.PI / 180;
+
+// ---------- RGB565 (byte-swapped in memory) -> RGBA lookup ----------
+const LUT = new Uint32Array(65536);
+for (let u = 0; u < 65536; u++) {
+  const v = ((u & 0xFF) << 8) | (u >> 8);
+  const r = (((v >> 11) & 31) * 527 + 23) >> 6, g = (((v >> 5) & 63) * 259 + 33) >> 6, b = ((v & 31) * 527 + 23) >> 6;
+  LUT[u] = (0xFF000000 | (b << 16) | (g << 8) | r) >>> 0;
+}
+const screens = [0, 1].map((i) => {
+  const cv = $('screen-' + i), ctx = cv.getContext('2d'), img = ctx.createImageData(240, 240);
+  return { cv, ctx, img, px: new Uint32Array(img.data.buffer), bezel: $('bezel-' + i), buzzUntil: 0 };
+});
+
+// ---------- MicroPython ----------
+let mp, SIM, M;
+async function start() {
+  let loadMicroPython;
+  try { ({ loadMicroPython } = await import('./mpy/micropython.mjs')); }
+  catch (e) { return fail('Could not load the MicroPython engine file (mpy/micropython.mjs).', e && e.message); }
+  try {
+    mp = await loadMicroPython({ url: new URL('./mpy/micropython.wasm', document.baseURI).href, heapsize: 24 * 1024 * 1024, stdout: (l) => console.log('[py]', l), stderr: (l) => console.warn('[py]', l) });
+  } catch (e) { return fail('MicroPython could not start. This browser or page may block WebAssembly.', e && e.message); }
+  let bundle;
+  try { bundle = await (await fetch('./py/bundle.json')).json(); }
+  catch (e) { return fail('Could not load the watch code bundle (py/bundle.json).', e && e.message); }
+  try {
+    const made = new Set();
+    for (const [path, src] of Object.entries(bundle.files)) {
+      const parts = ('/app/' + path).split('/').slice(1, -1); let cur = '';
+      for (const p of parts) { cur += '/' + p; if (!made.has(cur)) { try { mp.FS.mkdir(cur); } catch (_) {} made.add(cur); } }
+      mp.FS.writeFile('/app/' + path, src);
+    }
+    mp.runPython("import sys\nsys.path.insert(0, '/app')\nfrom sim.webhost import TwoWatchSim\nSIM = TwoWatchSim(seed=1, profile='typical')");
+    SIM = mp.globals.get('SIM');
+    M = mp._module;
+  } catch (e) { return fail('The watch code failed to start.', e && e.message); }
+  boot.hidden = true;
+  setStatus('ok', 'Running · MicroPython ' + (bundle.mpy || '1.29'));
+  requestAnimationFrame(loop);
+}
+
+// ---------- state ----------
+let speed = 1, last = 0, tele = null, world = null, selected = 0, fpsAvg = 0;
+const pings = [];
+function call(name, ...args) { try { return SIM[name](...args); } catch (e) { console.error(name, e); fail('The watch code raised an error.', e && e.message); running = false; } }
+let running = true;
+
+function loop(now) {
+  if (!running) return;
+  requestAnimationFrame(loop);
+  const dt = last ? Math.min(100, now - last) : 16;
+  last = now;
+  fpsAvg = fpsAvg ? fpsAvg * 0.95 + (1000 / Math.max(1, dt)) * 0.05 : 60;
+  frame(Math.round(dt * speed), now);
+}
+function frame(simMs, now) {
+  call('step', simMs);
+  if (!running) return;
+  try { tele = JSON.parse(SIM.telemetry_json()); world = tele.world; }
+  catch (e) { console.error(e); }
+  for (let i = 0; i < 2; i++) drawScreen(i, now);
+  record();
+  drawField(now);
+  drawChart();
+  renderTele();
+}
+
+// ---------- distance history (sim time) ----------
+const HIST_MS = 90000, hist = [];
+function record() {
+  if (!tele || !tele.watches) return;
+  const t = tele.t_ms || 0, last = hist[hist.length - 1];
+  if (last && t - last.t < 250 && t >= last.t) return;
+  if (last && t < last.t) hist.length = 0;              // reset
+  const [a, b] = tele.watches;
+  hist.push({ t, d: a.true_dist_m, a: a.est_dist_m, b: b.est_dist_m });
+  while (hist.length && t - hist[0].t > HIST_MS) hist.shift();
+}
+const chart = $('chart'), cctx = chart.getContext('2d');
+function layoutChart() {
+  const r = chart.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
+  chart.width = Math.round(r.width * dpr); chart.height = Math.round(r.height * dpr);
+}
+const ZBANDS = [[0, 7, 'hot', 'rgba(181,255,206,0.10)'], [7, 14, 'warm', 'rgba(90,231,140,0.07)'], [14, 28, 'near', 'rgba(49,195,99,0.05)'], [28, 80, 'far', 'rgba(24,113,57,0.035)']];
+function drawChart() {
+  const c = cctx, Wc = chart.width, Hc = chart.height, u = Wc / 1200, padL = 46 * u, padB = 22 * u, padT = 8 * u;
+  const lo = Math.log(1), hi = Math.log(80);
+  const y = (m) => padT + (Hc - padT - padB) * (1 - (Math.log(Math.max(1, Math.min(80, m))) - lo) / (hi - lo));
+  const tNow = hist.length ? hist[hist.length - 1].t : 0;
+  const x = (t) => padL + (Wc - padL - 8 * u) * (1 - (tNow - t) / HIST_MS);
+  c.setTransform(1, 0, 0, 1, 0, 0); c.fillStyle = '#0E1512'; c.fillRect(0, 0, Wc, Hc);
+  c.font = `${Math.round(11 * u * 1.5)}px 'IBM Plex Mono', monospace`; c.textBaseline = 'middle';
+  for (const [a, b, name, fill] of ZBANDS) {
+    c.fillStyle = fill; c.fillRect(padL, y(b), Wc - padL, y(a) - y(b));
+    c.fillStyle = '#8BA096'; c.textAlign = 'right'; c.fillText(name, padL - 6 * u, (y(a) + y(Math.min(b, 80))) / 2);
+  }
+  c.strokeStyle = '#1B2B23'; c.lineWidth = 1;
+  for (const m of [7, 14, 28]) { c.beginPath(); c.moveTo(padL, y(m) + 0.5); c.lineTo(Wc, y(m) + 0.5); c.stroke(); }
+  c.fillStyle = '#5C6E65'; c.textAlign = 'left';
+  for (const m of [3, 7, 14, 28, 55]) c.fillText(m + ' m', padL + 4 * u, y(m) - 7 * u);
+  c.textAlign = 'center';
+  for (let k = 0; k <= 90; k += 30) c.fillText(k ? '-' + k + ' s' : 'now', x(tNow - k * 1000), Hc - padB / 2);
+  const series = (key, color, dash) => {
+    c.strokeStyle = color; c.lineWidth = 2 * u; c.setLineDash(dash ? [6 * u, 5 * u] : []);
+    c.beginPath(); let pen = false;
+    for (const h of hist) { const v = h[key]; if (v == null) { pen = false; continue; } const px = x(h.t), py = y(v); if (pen) c.lineTo(px, py); else { c.moveTo(px, py); pen = true; } }
+    c.stroke(); c.setLineDash([]);
+  };
+  series('d', '#D5E3DA', true); series('a', '#7FD6FF'); series('b', '#FFB86B');
+}
+
+// ---------- plain-language explanation per watch ----------
+const ZINFO = {
+  FAR: ['FAR means about 28 m or more', 'It switches to NEAR once its estimate stays under 28 m for 3 s.'],
+  NEAR: ['NEAR means about 14 to 28 m', 'WARM once it stays under 14 m for 2 s; back to FAR above 36 m.'],
+  WARM: ['WARM means about 7 to 14 m', 'HOT once it stays under 7 m for 1.5 s; back to NEAR above 18 m.'],
+  HOT: ['HOT means under about 7 m', 'Within about 3 m it shows BUMP!: press Bump watches.']
+};
+function why(t) {
+  const est = t.est_dist_m == null ? null : t.est_dist_m.toFixed(0), tru = t.true_dist_m.toFixed(0);
+  switch (t.screen) {
+    case 'PAIRING': return 'Pairing. The simulator confirms the matching symbols and does the 1 m calibration for you, then a short split-up countdown runs.';
+    case 'SEARCHING': return 'No signal heard yet, so it shows grey inward rings and no distance.';
+    case 'SCANNING': return t.sub === 'ready' ? 'Scan starting: hold the watch flat for the countdown.' : t.sub === 'sweep' ? 'Scanning: the wearer turns a full circle (auto-turn). The signal is strongest when facing the other watch.' : 'Scan finished: picking the strongest direction.';
+    case 'FOUND': return 'Found: both watches felt the bump at the same moment.';
+    case 'LINK_LOST': return 'Signal lost for 5 s. It keeps the last distance and trend until packets return.';
+    case 'MENU': return 'Menu open. Tap Hold (menu) again or wait 8 s to close it.';
+  }
+  const z = ZINFO[t.screen];
+  if (!z) return t.screen || '';
+  let s = `Hears the other watch at ${t.rssi_f == null ? '?' : t.rssi_f.toFixed(0)} dBm, so it thinks ${est} m away (really ${tru} m). ${z[0]}. ${z[1]}`;
+  if (t.trend > 0) s += ' The up-arrow means the signal keeps getting stronger as you walk.';
+  else if (t.trend < 0) s += ' The hollow down-arrow means you are walking away.';
+  if (t.arrow_deg != null) s += ` Arrow from the scan: ${Math.round(t.arrow_deg)}° ± ${Math.round(t.cone_deg)}° (truth ${Math.round(t.true_bearing_rel_deg)}°).`;
+  return s;
+}
+// Test hook: drive the sim without animation frames (hidden tabs pause them).
+window.fieldSim = {
+  advance(ms, stepMs = 50) { for (let t = 0; t < ms; t += stepMs) frame(stepMs, performance.now()); return tele; },
+  call: (name, ...args) => call(name, ...args),
+  get telemetry() { return tele; }
+};
+
+function drawScreen(i, now) {
+  const addr = SIM.frame_addr(i);
+  if (addr == null) return;
+  const heap = M.HEAPU8;
+  const src = new Uint16Array(heap.buffer, addr, 57600);
+  const s = screens[i], px = s.px;
+  for (let k = 0; k < 57600; k++) px[k] = LUT[src[k]];
+  s.ctx.putImageData(s.img, 0, 0);
+  const t = tele && tele.watches ? tele.watches[i] : null;
+  if (t && t.haptic && t.haptic.length) {
+    const ms = t.haptic.reduce((a, n) => a + (HAPTIC_MS[n] || 80), 0);
+    s.buzzUntil = now + Math.min(900, ms);
+    const w = world && world.walkers ? world.walkers[i] : null;
+    if (w) pings.push({ i, x: w.x, y: w.y, t0: now });
+  }
+  s.bezel.classList.toggle('buzz', now < s.buzzUntil);
+  const bl = t && t.backlight != null ? t.backlight : 0.6;      // screen off / dimmed like the real panel
+  const f = bl <= 0 ? 'brightness(0)' : `brightness(${(0.55 + 0.45 * Math.min(1, bl)).toFixed(2)})`;
+  if (s.cv.style.filter !== f) s.cv.style.filter = f;
+}
+const HAPTIC_MS = { TICK: 60, DOUBLE: 200, CLOSER: 440, FARTHER: 300, NOPE: 750, LOST: 540, HOLD: 1800, FOUND: 1060, BATT: 1200 };
+
+function drawField(now) {
+  const c = fctx;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.fillStyle = '#0E1512'; c.fillRect(0, 0, W, H);
+  // grid
+  for (let x = Math.ceil(VIEW.x0 / 5) * 5; x <= VIEW.x1; x += 5) { c.strokeStyle = x % 10 === 0 ? '#1B2B23' : '#14201A'; c.lineWidth = 1; c.beginPath(); c.moveTo(sx(x) + 0.5, 0); c.lineTo(sx(x) + 0.5, H); c.stroke(); }
+  for (let y = Math.ceil(VIEW.y0 / 5) * 5; y <= VIEW.y1; y += 5) { c.strokeStyle = y % 10 === 0 ? '#1B2B23' : '#14201A'; c.beginPath(); c.moveTo(0, sy(y) + 0.5); c.lineTo(W, sy(y) + 0.5); c.stroke(); }
+  // scale bar
+  const u = W / 1200;
+  c.fillStyle = '#8BA096'; c.font = `${Math.round(12 * u * 1.4)}px 'IBM Plex Mono', monospace`;
+  c.fillRect(sx(VIEW.x0 + 2), H - 22 * u * 1.4, 10 * S, 3 * u);
+  c.fillText('10 m', sx(VIEW.x0 + 2), H - 28 * u * 1.4);
+  if (!world || !world.walkers) return;
+  // walls
+  (world.walls || []).forEach((w) => { c.fillStyle = 'rgba(255,154,33,0.18)'; c.strokeStyle = 'rgba(255,154,33,0.55)'; c.lineWidth = 2 * u; const x = sx(Math.min(w[0], w[2])), y = sy(Math.max(w[1], w[3])); c.fillRect(x, y, Math.abs(w[2] - w[0]) * S, Math.abs(w[3] - w[1]) * S); c.strokeRect(x, y, Math.abs(w[2] - w[0]) * S, Math.abs(w[3] - w[1]) * S); });
+  const A = world.walkers[0], B = world.walkers[1];
+  const showTruth = $('truth').checked;
+  if (showTruth) {
+    c.setLineDash([6 * u, 6 * u]); c.strokeStyle = 'rgba(213,227,218,0.35)'; c.lineWidth = 1.5 * u;
+    c.beginPath(); c.moveTo(sx(A.x), sy(A.y)); c.lineTo(sx(B.x), sy(B.y)); c.stroke(); c.setLineDash([]);
+  }
+  // walk targets
+  world.walkers.forEach((w, i) => { if (w.target) { c.strokeStyle = i ? '#FFB86B' : '#7FD6FF'; c.lineWidth = 2 * u; const x = sx(w.target[0]), y = sy(w.target[1]); c.beginPath(); c.moveTo(x - 7 * u, y - 7 * u); c.lineTo(x + 7 * u, y + 7 * u); c.moveTo(x + 7 * u, y - 7 * u); c.lineTo(x - 7 * u, y + 7 * u); c.stroke(); } });
+  // haptic pings
+  for (let k = pings.length - 1; k >= 0; k--) {
+    const p = pings[k], age = now - p.t0;
+    if (age > 900) { pings.splice(k, 1); continue; }
+    c.strokeStyle = `rgba(90,231,140,${0.6 * (1 - age / 900)})`; c.lineWidth = 2 * u;
+    c.beginPath(); c.arc(sx(p.x), sy(p.y), (18 + age / 12) * u * 1.4, 0, Math.PI * 2); c.stroke();
+  }
+  if (drag && drag.kind === 'move' && drag.target) {
+    const w = world.walkers[drag.i], gx = sx(drag.target[0]), gy = sy(drag.target[1]);
+    c.setLineDash([5 * u, 5 * u]); c.strokeStyle = drag.i ? '#FFB86B' : '#7FD6FF'; c.lineWidth = 2 * u;
+    c.beginPath(); c.moveTo(sx(w.x), sy(w.y)); c.lineTo(gx, gy); c.stroke(); c.setLineDash([]);
+    c.beginPath(); c.arc(gx, gy, 12 * u * 1.4, 0, Math.PI * 2); c.stroke();
+  }
+  world.walkers.forEach((w, i) => drawWatch(c, w, i, u, showTruth));
+}
+
+function drawWatch(c, w, i, u, showTruth) {
+  const col = i ? '#FFB86B' : '#7FD6FF', X = sx(w.x), Y = sy(w.y), h = rad(w.heading_deg);
+  const r = 16 * u * 1.4, fr = 70 * u * 1.4;
+  // facing wedge
+  c.fillStyle = i ? 'rgba(255,184,107,0.10)' : 'rgba(127,214,255,0.10)';
+  c.beginPath(); c.moveTo(X, Y); c.arc(X, Y, fr, h - rad(30) - Math.PI / 2, h + rad(30) - Math.PI / 2); c.closePath(); c.fill();
+  // arrow from telemetry (relative to facing, clockwise)
+  const t = tele && tele.watches ? tele.watches[i] : null;
+  if (t && t.arrow_deg != null && showTruth) {
+    const a = h + rad(t.arrow_deg), cone = rad(Math.min(60, t.cone_deg || 30));
+    c.fillStyle = t.in_cone ? 'rgba(90,231,140,0.22)' : 'rgba(255,107,94,0.20)';
+    c.beginPath(); c.moveTo(X, Y); c.arc(X, Y, fr * 1.3, a - cone - Math.PI / 2, a + cone - Math.PI / 2); c.closePath(); c.fill();
+    c.strokeStyle = t.in_cone ? '#5AE78C' : '#FF6B5E'; c.lineWidth = 3 * u;
+    c.beginPath(); c.moveTo(X, Y); c.lineTo(X + Math.sin(a) * fr * 1.3, Y - Math.cos(a) * fr * 1.3); c.stroke();
+  }
+  // body
+  c.fillStyle = col; c.beginPath(); c.arc(X, Y, r, 0, Math.PI * 2); c.fill();
+  if (i === selected) { c.strokeStyle = '#D5E3DA'; c.lineWidth = 2 * u; c.beginPath(); c.arc(X, Y, r + 5 * u, 0, Math.PI * 2); c.stroke(); }
+  c.fillStyle = '#0A0F0D'; c.font = `600 ${Math.round(15 * u * 1.4)}px 'IBM Plex Sans Condensed', sans-serif`; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(i ? 'B' : 'A', X, Y + 1);
+  // rotation handle
+  const hx = X + Math.sin(h) * (r + 18 * u * 1.4), hy = Y - Math.cos(h) * (r + 18 * u * 1.4);
+  c.strokeStyle = col; c.lineWidth = 2 * u; c.beginPath(); c.moveTo(X + Math.sin(h) * r, Y - Math.cos(h) * r); c.lineTo(hx, hy); c.stroke();
+  c.fillStyle = '#0A0F0D'; c.beginPath(); c.arc(hx, hy, 6 * u * 1.4, 0, Math.PI * 2); c.fill(); c.stroke();
+  c.textAlign = 'start'; c.textBaseline = 'alphabetic';
+  w._hx = hx; w._hy = hy; w._X = X; w._Y = Y; w._r = r;
+}
+
+const fmt = (v, d = 0, unit = '') => (v == null || Number.isNaN(v)) ? '–' : (Number(v).toFixed(d) + unit);
+function renderTele() {
+  if (!tele || !tele.watches) return;
+  $('sim-clock').textContent = fmtClock(tele.t_ms || 0);
+  tele.watches.forEach((t, i) => {
+    $('name-' + i).textContent = (t.screen || '–') + (t.sub ? ' · ' + t.sub : '');
+    const w = why(t);
+    if ($('why-' + i).textContent !== w) $('why-' + i).textContent = w;
+    const trend = t.trend > 0 ? '<span class="good">warmer</span>' : t.trend < 0 ? '<span class="warnc">colder</span>' : 'none';
+    const arrow = t.arrow_deg == null ? 'no arrow' : `${fmt(t.arrow_deg)}° ±${fmt(t.cone_deg)}° · truth ${fmt(t.true_bearing_rel_deg)}° ${t.in_cone ? '<span class="good">inside</span>' : '<span class="warnc">outside</span>'}`;
+    $('tele-' + i).innerHTML =
+      `<dt>True distance</dt><dd>${fmt(t.true_dist_m, 1, ' m')}</dd>` +
+      `<dt>Shown band</dt><dd>${t.band || '–'} ${t.zone != null ? '· zone ' + ['far', 'near', 'warm', 'hot'][t.zone] : ''}</dd>` +
+      `<dt>Estimate</dt><dd>${fmt(t.est_dist_m, 1, ' m')} · place ${t.place || '–'}</dd>` +
+      `<dt>Signal (raw / filtered)</dt><dd>${fmt(t.rssi_last, 0)} / ${fmt(t.rssi_f, 1)} dBm</dd>` +
+      `<dt>Trend</dt><dd>${trend}</dd>` +
+      `<dt>Arrow</dt><dd>${arrow}</dd>` +
+      `<dt>Packets</dt><dd>${fmt(t.pkts_per_s, 0, '/s')} · steps ${fmt(t.steps)}</dd>`;
+  });
+  const A = world && world.walkers ? world.walkers[0] : null, B = A ? world.walkers[1] : null;
+  if (A && B) $('true-dist').textContent = Math.hypot(A.x - B.x, A.y - B.y).toFixed(1) + ' m';
+}
+function fmtClock(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+
+// ---------- input ----------
+let drag = null;
+function pos(e) { const r = field.getBoundingClientRect(); return { x: (e.clientX - r.left) * (W / r.width), y: (e.clientY - r.top) * (H / r.height) }; }
+function hit(p) {
+  if (!world || !world.walkers) return null;
+  for (let i = 1; i >= 0; i--) { const w = world.walkers[i]; if (w._hx != null && Math.hypot(p.x - w._hx, p.y - w._hy) < w._r * 0.9) return { i, kind: 'turn' }; }
+  for (let i = 1; i >= 0; i--) { const w = world.walkers[i]; if (w._X != null && Math.hypot(p.x - w._X, p.y - w._Y) < w._r * 1.5) return { i, kind: 'move' }; }
+  return null;
+}
+const pace = () => parseFloat($('pace').value) || 1.3;
+field.addEventListener('pointerdown', (e) => {
+  const h = hit(pos(e)); if (!h || !SIM) return;
+  selected = h.i; drag = Object.assign(h, { jump: e.shiftKey, target: null }); field.setPointerCapture(e.pointerId); e.preventDefault();
+});
+field.addEventListener('pointermove', (e) => {
+  if (!drag || !SIM) return;
+  const p = pos(e), w = world.walkers[drag.i];
+  if (drag.kind === 'move') {
+    if (drag.jump) call('set_pose', drag.i, wx(p.x), wy(p.y), w.heading_deg);
+    else drag.target = [wx(p.x), wy(p.y)];
+  } else { const hd = (Math.atan2(p.x - w._X, -(p.y - w._Y)) * 180 / Math.PI + 360) % 360; call('set_pose', drag.i, w.x, w.y, hd); }
+});
+const endDrag = () => {
+  if (drag && drag.kind === 'move' && !drag.jump && drag.target && SIM) call('walk_to', drag.i, drag.target[0], drag.target[1], pace());
+  drag = null;
+};
+field.addEventListener('pointerup', endDrag); field.addEventListener('pointercancel', endDrag);
+field.addEventListener('wheel', (e) => {
+  const h = hit(pos(e)); if (!h || !SIM) return; e.preventDefault();
+  const w = world.walkers[h.i]; call('set_pose', h.i, w.x, w.y, (w.heading_deg + (e.deltaY > 0 ? 10 : -10) + 360) % 360);
+}, { passive: false });
+field.addEventListener('dblclick', (e) => { if (!SIM) return; const p = pos(e); if (hit(p)) return; call('walk_to', selected, wx(p.x), wy(p.y), pace()); });
+field.addEventListener('keydown', (e) => {
+  if (!SIM || !world || (e.key !== 'q' && e.key !== 'e' && e.key !== 'Q' && e.key !== 'E')) return;
+  const w = world.walkers[selected]; call('set_pose', selected, w.x, w.y, (w.heading_deg + (e.key.toLowerCase() === 'e' ? 15 : -15) + 360) % 360);
+});
+// Screen: click = tap; vertical drag or wheel = swipe (MENU scrolls). A drag swallows its click.
+const SWIPE_PX = 30, WHEEL_GAP_MS = 600;   // > 500 ms: 3 swipes in 1 s trip the watch touch-burst filter
+screens.forEach((s, i) => {
+  let y0 = null, swiped = false, lastWheel = 0;
+  s.cv.addEventListener('pointerdown', (e) => { y0 = e.clientY; swiped = false; });
+  s.cv.addEventListener('pointerup', (e) => {
+    if (y0 == null || !SIM) { y0 = null; return; }
+    const dy = e.clientY - y0; y0 = null;
+    if (Math.abs(dy) >= SWIPE_PX) { swiped = true; call('swipe', i, dy < 0); }
+  });
+  s.cv.addEventListener('click', (e) => {
+    if (swiped) { swiped = false; return; }
+    if (!SIM) return;
+    const r = s.cv.getBoundingClientRect();                  // tap where clicked (menu rows, iris)
+    const x = Math.round((e.clientX - r.left) * 240 / r.width), y = Math.round((e.clientY - r.top) * 240 / r.height);
+    call('tap', i, Math.max(0, Math.min(239, x)), Math.max(0, Math.min(239, y)));
+  });
+  s.cv.addEventListener('wheel', (e) => {
+    if (!SIM || !e.deltaY) return; e.preventDefault();
+    const now = performance.now(); if (now - lastWheel < WHEEL_GAP_MS) return; lastWheel = now;
+    call('swipe', i, e.deltaY > 0);
+  }, { passive: false });
+});
+document.querySelectorAll('.btns button').forEach((b) => b.addEventListener('click', () => {
+  if (!SIM) return; const i = +b.dataset.i, a = b.dataset.act;
+  if (a === 'tap') call('tap', i); else if (a === 'hold') call('long_press', i); else call('button', i, false);
+}));
+$('bump').addEventListener('click', () => SIM && call('bump'));
+$('reset').addEventListener('click', () => SIM && call('reset', 1));
+$('profile').addEventListener('change', (e) => SIM && call('set_profile', e.target.value));
+$('auto-turn').addEventListener('change', (e) => { if (SIM) mp.runPython('SIM.auto_turn = ' + (e.target.checked ? 'True' : 'False')); });
+document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => {
+  speed = +b.dataset.speed; document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+}));
+document.querySelectorAll('.posture select').forEach((sel) => sel.addEventListener('change', () => SIM && call('set_posture', +sel.dataset.i, sel.value)));
+window.addEventListener('resize', () => { layoutField(); layoutChart(); });
+layoutField();
+layoutChart();
+drawField(0);
+start();
+</script>
