@@ -1,6 +1,16 @@
 @AGENTS.md
 
+**Work in progress: read [docs/handoff.md](docs/handoff.md) first.** It lists the
+decisions to ask the owner about before starting and the next steps in order.
+
 ## Claude Code notes
+
+- Commits are authored as `shogowarrior <abhinabray@gmail.com>`. The owner's
+  checkout sets this in its git config; a fresh clone (a cloud or Project thread)
+  does not, so run `git config user.name shogowarrior` and
+  `git config user.email abhinabray@gmail.com` before the first commit.
+- `.claude/workflows/` holds the review round (`review-fix-round`) and the
+  debug-mode build (`debug-mode-build`); each file's header lists its args.
 
 - Before saying something is done, run **both** test runners and read the result
   lines: `python3 tests/runner.py` and `node tools/mpy/run.mjs tests/runner.py`.

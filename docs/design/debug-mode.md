@@ -1,0 +1,175 @@
+# Debug mode: watch the real watches in the web sim page
+
+Status: **specified, not built.** This is the next feature (docs/handoff.md).
+`.claude/workflows/debug-mode-build.js` builds it in three parallel tracks,
+then reviews and verifies it end to end.
+
+## What the owner asked for
+
+A toggle at the top of the web sim page switches between **Simulator** and
+**Real watches**. In Real mode the page shows what the two physical watches are
+doing, live, over Wi-Fi. Wi-Fi credentials must never be committed.
+
+## Decisions
+
+1. **Real mode lives in the local page, not the artifact.** The claude.ai
+   artifact is an https page in a sandbox. It cannot reach devices on the home
+   Wi-Fi (mixed content, sandbox CSP). The rover project works the same way:
+   a local page that talks to the device over Wi-Fi. The artifact build keeps
+   the toggle, but Real is disabled there with one plain sentence that says why
+   and gives the command to run locally.
+2. **Data path: watch -> UDP -> laptop bridge -> page (Server-Sent Events).**
+   The watches never run a server. In debug mode each watch joins the Wi-Fi
+   access point and sends one JSON object per UDP datagram to the laptop. The
+   laptop is a unicast target, because broadcast sends are unreliable on ESP32
+   MicroPython; subnet broadcast is only a fallback. `tools/debug_server.py`
+   (CPython, standard library only) receives the datagrams and serves the page.
+   It also relays the datagrams to the page and logs them.
+3. **What a watch sends** reuses `app/telemetry.py`:
+   - the 5 Hz state records (`"ev": "s"`: rssi, rssi_f, d_est/d_lo/d_hi,
+     zone, trend, steps, act, ui/sub, battery, link counters);
+   - its events;
+   - one new 5 Hz `"rp"` record with the frame's `RenderParams`, so the page
+     can draw the watch's real screen with the real renderer.
+
+   Sending happens from the 5 Hz telemetry path only, never from the render
+   loop.
+4. **Radio channel.** ESP-NOW and a Wi-Fi association share one radio. Once
+   the watch joins the access point, the channel is the access point's. In
+   debug mode:
+   - The watch joins first and reads the channel.
+   - The ESP-NOW radio starts on that channel without dropping the Wi-Fi
+     connection. Today `EspNowRadio.begin()` always disconnects and allows
+     only channels 1, 6 and 11. Debug mode needs an explicit associated mode:
+     any channel from 1 to 13, no disconnect, `PM_NONE` kept.
+   - Normal play is unchanged.
+   - **Both watches must join the same access point**, so they share the
+     channel.
+   - Only `hal/` imports `network` and `socket` (AGENTS rule 12).
+5. **Switching it on**, like `/tele`:
+   - `python3 tools/deploy.py --port P --debug A` writes `/debug` and copies
+     `secrets.py`. That file is the gitignored file with `WIFI_SSID` and
+     `WIFI_PASSWORD`; its template is `secrets.example.py`.
+   - `--no-debug` removes both from the watch.
+   - `main.py` reads `/debug`. If `secrets.py` is missing or the join fails,
+     the watch prints why and plays normally.
+6. **Credentials are never committed.**
+   - `secrets.py` stays gitignored.
+   - It is read only on the watch and by deploy.py's copy.
+   - Its values are never printed, logged or sent.
+   - `tests/test_secrets_guard.py` checks that no tracked file contains them.
+
+## Contract between the parts
+
+### `/debug` on the watch
+
+JSON: `{"dev": "A", "host": "192.168.1.23", "port": 47268}`
+
+- `dev` is the label the page shows (A or B).
+- `host` is the laptop's LAN IPv4 address. `deploy.py --debug` detects it with
+  the UDP-connect trick; `--debug-host` overrides it. If `host` is missing, the
+  watch sends to the subnet broadcast address computed from `ifconfig`.
+- `port` defaults to 47268 (`DEBUG_PORT`).
+
+### A datagram (watch -> laptop)
+
+One UTF-8 JSON object per UDP packet, at most about 1400 bytes (one Wi-Fi
+frame). If a record would be larger, the watch drops optional fields rather
+than fragmenting it.
+
+Every datagram carries:
+
+- `dev`
+- `mac`: the last 3 MAC bytes as 6 lowercase hex characters
+- `t`: the watch's `ticks_ms`
+- `ev`
+
+The kinds are:
+
+- `"s"`: the existing state record, with unchanged fields.
+- `"rp"`: `p` holds `finder.render_params.to_dict(params, json_ready=True)`;
+  `on` is whether the screen is on; `bl` is the backlight from 0 to 100.
+- The other telemetry events (`btn`, `tap`, `haptic`, `pwr`, `crash`, ...), as
+  they happen.
+
+Send errors are counted (`tx_err`) and never raised into the game loop.
+
+### `tools/debug_server.py` (CPython, standard library only)
+
+```
+python3 tools/debug_server.py [--http-port 8765] [--udp-port 47268] [--root dist/sim] [--no-log] [--demo]
+```
+
+- It serves `--root` over HTTP on 127.0.0.1, with no-store cache headers.
+- It listens for UDP on 0.0.0.0:udp-port. Each valid datagram becomes one SSE
+  message on `GET /events`:
+  `data: {"src": "<sender ip>", "rx": <server ms>, "rec": <the object>}`.
+  Invalid datagrams are counted and dropped.
+- `GET /debug/status` returns
+  `{"ok": true, "udp_port": N, "clients": N, "packets": N, "bad": N, "log": path|null, "watches": {"<dev>": {"src": ip, "last_rx": ms, "n": N}}}`.
+  The page checks this to decide whether Real mode is available.
+- Every valid datagram is appended to `logs/debug-YYYYmmdd-HHMMSS.jsonl`
+  (gitignored) unless `--no-log` is set. A recorded session can be replayed
+  later to calibrate the estimators on real radio data.
+- `--demo` runs `tools/fake_watches.py` in a thread, so Real mode can be tried
+  with no watches.
+- `.claude/launch.json` `web-sim` runs this server instead of `http.server`.
+
+### `tools/fake_watches.py` (CPython)
+
+`run(host="127.0.0.1", port=47268, seconds=None, speed=1.0, stop=None)` runs
+the two-watch simulator: `sim/` plus `finder.game.Game`, with no renderer. It
+sends the same datagrams real watches send, built by the same `app/telemetry.py`
+code; there is no second copy of the record format.
+
+### Page side (`sim/webhost.py`, `web/sim/index.html`)
+
+`TwoWatchSim` gets two methods:
+
+- `show_params(i, json_text)` draws the given params on watch i's screen. Frames
+  keep advancing with time, but no game logic runs for that watch.
+- `real_mode(on)` stops or resumes the simulated world.
+
+The page in Real mode:
+
+- **Controls:** the drag, pace, speed and posture controls and the guide are
+  hidden.
+- **Screens:** both screens are drawn from the latest `rp` per watch.
+- **Under each screen:** the connection state ("last heard N s ago"), band,
+  zone, trend, rssi/rssi_f, steps, activity, battery and loss, all with
+  plain-language labels.
+- **Distance chart:** each watch's d_est (with the d_lo..d_hi band) and rssi_f.
+- **Raw log:** the last 50 lines, collapsible.
+- **Waiting state:** a short how-to.
+- **Unavailable state:** the artifact, or a page served by a plain http.server.
+
+The choice is remembered in localStorage. The page must work at 375 px and in
+both themes, and `window.fieldSim` must keep working.
+
+## Tests (both runners where they apply)
+
+- The Telemetry sink and the `rp` record.
+- `hal/debuglink` with fakes. `tests/fakes` gets a fake `socket`, and the fake
+  `network` gets connect, isconnected, `config('channel')` and `ifconfig`.
+- The `EspNowRadio` associated mode.
+- The `main`/runtime wiring: `/debug` present, secrets missing, and a failed
+  join that falls back to normal play.
+- Command building for `deploy.py --debug` and `--no-debug`.
+- The `debug_server` UDP-to-SSE relay and its log, with real localhost sockets
+  and short timeouts. These run on CPython only.
+- `show_params` draws the same frame the renderer draws for the same params.
+- The secrets guard.
+
+No test uses real Wi-Fi.
+
+## Docs to update when it lands
+
+- `docs/hardware-setup.md`: a "Debug mode" section with the exact commands.
+- `AGENTS.md`:
+  - the repo map;
+  - the commands;
+  - Security: the game joins Wi-Fi only in debug mode;
+  - rule 12, which should name `socket`.
+- `README.md`: one paragraph.
+- `docs/architecture.md`: the debug data path.
+- `hal/README.md`: `debuglink` and the associated radio mode.

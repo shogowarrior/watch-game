@@ -52,12 +52,14 @@ watches.** Every threshold is a starting value to calibrate.
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). |
 | `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`), `est_helpers.py` (shared estimator fixtures), `test_deploy.py` (`tools/deploy.py`, CPython only). |
 | `tools/` | Host and on-watch scripts (see Commands). `tools/mpy/run.mjs` runs Python under MicroPython WebAssembly; `tools/cli.py` is the shared `--key value` parser. |
-| `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`. |
+| `docs/handoff.md` `docs/project.md` | Current state, open questions and next steps (read first); the Project's goal and instructions. |
+| `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`, `debug-mode.md` (the next feature, specified, not built). |
 | `docs/estimation/` | `bakeoff.md` (why kalman2), `imu-drift.md` (why no dead reckoning). |
 | `docs/research/user-research.md` | Personas, field-test plan, requirements R-01..R-15. |
 | `docs/architecture.md` `docs/hardware-setup.md` | Layers and data flow; bring-up on real watches. |
 | `notebooks/` | Jupyter "MicroPython - USB" notebooks. `finder_dev.ipynb` is the current one. `watch.ipynb` and `tools.ipynb` are legacy (old custom firmware) and do not run on stock v1.29. |
 | `firmware/` | Old firmware images. **Do not touch.** |
+| `.claude/workflows/` | `review-fix-round.js` (verified review/fix round) and `debug-mode-build.js`; args in each header. |
 | `typings/` | MicroPython stubs for the IDE (v1.23; the watch runs v1.29, so a few newer APIs are missing from them). |
 
 ## Tests: run both runtimes
@@ -194,6 +196,7 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
 - Users, field-test protocol, requirements R-xx: `docs/research/user-research.md`.
 - Driver facts and hardware gotchas: `hal/README.md`.
 - System structure and per-tick data flow: `docs/architecture.md`.
+- Debug mode (Real watches in the web page over Wi-Fi), the next feature: `docs/design/debug-mode.md`.
 
 ## Adding a range estimator
 
