@@ -6,11 +6,7 @@ Plain constants only; blocks marked 'ui-spec only' come from ui-spec.md.
 """
 
 TOKENS_VERSION = '0.2.0'
-TOKENS_HASH = '339c9c6870cbfcce'
-
-# ---- Display
-SCREEN_W = 240
-SCREEN_H = 240
+TOKENS_HASH = '8592ae02c742664d'
 
 # ---- Zones (thresholds.zones_m): boundary k is between zone k and k+1
 ZONE_FAR = 0
@@ -27,12 +23,10 @@ BAND_EDGES_M = (3.5, 7.0, 14.0, 28.0, 55.0)
 BAND_LABELS = ('<3', '~5', '~10', '~20', '~40', '60+')
 BAND_HYST = 1.15  # multiplicative, each way
 ZONE_BANDS = ((4, 5), (3, 3), (2, 2), (0, 1))  # allowed (lo, hi) band per zone
-READOUT_SCREENS = ('FAR', 'NEAR', 'WARM', 'HOT')
 
 # ---- Zone tempo (thresholds.zone_tempo), index = zone
 ZONE_PERIOD_MS = (2400, 1600, 1000, 500)  # ring spawn = heartbeat base period
 ZONE_SPEED_PX_S = (40.0, 56.0, 80.0, 120.0)
-ZONE_WAVELENGTH_PX = (96.0, 89.6, 80.0, 60.0)  # speed*period/1000
 ZONE_LEAD_PX = (3, 3, 3, 3)
 ZONE_TRAIL_PX = (22, 20, 18, 14)
 ZONE_HEARTBEAT = ('TICK', 'TICK', 'DOUBLE', 'TICK')
@@ -57,7 +51,6 @@ PROX_LN_RATIO = 3.4011973816621555
 INTENSITY_TAU_MS = 1500
 
 # ---- Calibration and path loss (thresholds.calibrate)
-CAL_AT_M = 1.0
 CAL_WINDOW_MS = 3000
 P1M_NOMINAL_DBM = -45.0
 CAL_CLAMP_DB = 6.0  # clamp to nominal +- this
@@ -74,7 +67,7 @@ TREND_HOLD_EVALS = 2
 TREND_STRONG_CONF = 0.85
 TREND_STRONG_DB = 6.0
 TREND_FLIP_MIN_MS = 5000
-UNRELIABLE_SD_DB = 6.0
+UNRELIABLE_SD_DB = 7.5
 UNRELIABLE_DELIVERY = 0.5
 
 # ---- Direction arrow and sigma model (thresholds.arrow)
@@ -97,6 +90,7 @@ ARROW_RELINK_RESTORE_MS = 20000
 SCAN_DURATION_MS = 12000
 SCAN_READY_MS = 3000
 SCAN_DEG_PER_S = 30.0
+PACER_DEG_PER_S = 30.0  # DIRECTION turn pacer, the scan's rate
 SCAN_MIN_P2T_DB = 4.0  # no fix if 2*a1 < this
 SCAN_MAX_S0_DEG = 45.0
 SCAN_TILT_FAULT_DEG = 35.0
@@ -105,26 +99,25 @@ SCAN_ABORT_STEPS = 8
 SCAN_ABORT_PAUSE_MS = 6000
 SCAN_BINS = 12
 SCAN_MIN_PACKETS_PER_BIN = 4
-PROBE_STEPS_PER_LEG = 10
-PROBE_TURN_DEG = 90.0
 PROBE_SIGMA_MIN_DEG = 35.0
-PROBE_ARC_R = (58, 64)
 
 # ---- Link, beacons, battery (thresholds.link, beacon_hz, battery_pct)
-LINK_SEARCHING_AFTER_MS = 1000
 LINK_LOST_AFTER_MS = 5000
 RELINK_PACKETS = 3  # also the SEARCHING exit rule
 RELINK_WINDOW_MS = 2000
 LIVE_WINDOW_MS = 1000  # ring_live = packet in this window
-LINK_NO_FALLBACK = True
 BEACON_HZ_NORMAL = 10
 BEACON_HZ_HOT = 20
 BEACON_HZ_SCAN = 20
 BEACON_HZ_SAVER = 5
-FOUND_RSSI_ALONE = False
 BATT_WARN_PCT = 20
 BATT_CRITICAL_PCT = 10
 BATT_BANNER_PCT = 5
+
+# ---- FOUND gate (thresholds.found)
+BUMP_WINDOW_MS = 400  # both bump spikes within this
+FALLBACK_PRESS_WINDOW_MS = 3000
+FALLBACK_MAX_BAND = 1  # band <= '~5'
 
 # ---- Saver and backlight (states.LOW_BATTERY, power.backlight)
 SAVER_FPS = 15
@@ -133,8 +126,22 @@ SAVER_V_MAX = 5.0
 SAVER_BACKLIGHT = 0.35
 BACKLIGHT_NORMAL = 0.6
 BACKLIGHT_BOOST = 1.0
-BACKLIGHT_LOW = 0.35
 BUTTON_LONG_MS = 1500
+
+# ---- Screen field presets (states): (ramp, I, speed_px_s, period_ms, glow_r_px, pulse_amp)
+FIELD_PAIRING_LOOKING = ('green', 0.1, -30.0, 3000, 30.0, 2.0)  # inward rings
+FIELD_SEARCHING = ('grey', 0.15, -36.0, 3200, 18.0, 2.5)  # inward rings
+FIELD_LINK_LOST = ('grey', None, -30.0, 3000, 16.0, 1.5)  # I frozen at last value
+PAIRING_SEEN_BREATHE_AMP = (1.5, 3.0)
+PAIRING_SEEN_FLOOR = 0.4
+SEARCHING_GLOW_AMP = 1.5
+FIELD_LEAD_TRAIL_PX = (3, 22)  # rings outside FAR..HOT
+FOUND_LEAD_TRAIL_PX = (3, 24)  # FOUND burst ring
+FIELD_SCAN_READY_GLOW_R = 8.0
+FIELD_SCAN_READY_PULSE_SCALE = 0.4  # ready: pulse_amp x this
+FIELD_SCAN_SWEEP_GLOW_AMP = (1.0, 5.0)  # glow_amp = a + b*I_mirror
+FIELD_SCAN_SWEEP_GLOW_R = 12.0  # halo outside the iris
+FOUND_PERIOD_MS = 1200  # RenderParams pulse_period_ms in FOUND (no rings travel)
 
 # ---- Haptics (haptics): patterns are on/off ms, starting with on
 # priority order, highest first
@@ -166,92 +173,10 @@ HAPTIC_MIN_PULSE_MS = 60
 HAPTIC_MIN_GAP_MS = 60
 HAPTIC_MAX_DUTY = 0.12
 HAPTIC_BLANKING_MS = 150  # accel ignores pulse start .. end + this
-HAPTIC_MODES = ('FULL', 'EVENTS', 'OFF')
+HAPTIC_HB_RESUME_MS = 1000  # heartbeats resume this long after an event
+HAPTIC_EVENT_GUARD_MS = 1000  # drop an event if >= priority started < this ago
 
-# ---- Colours (color): C_* are byte-swapped RGB565 ints, C_*_RGB are (r, g, b)
-# byte-swapped RGB565 for framebuf palettes
-COLOR_SWAPPED = {
-    'bg.base': 0x0000,
-    'bg.iris': 0x6100,
-    'surface.chip': 0xA208,
-    'surface.toast': 0x0319,
-    'line.subtle': 0x283A,
-    'text.primary': 0xFFFF,
-    'text.secondary': 0xB9C6,
-    'text.tertiary': 0x707C,
-    'prox.0': 0xC208,
-    'prox.1': 0x6309,
-    'prox.2': 0x4412,
-    'prox.3': 0x871B,
-    'prox.4': 0xC924,
-    'prox.5': 0x0C36,
-    'prox.6': 0x315F,
-    'prox.7': 0xF9B7,
-    'found.0': 0x8018,
-    'found.1': 0x2139,
-    'found.2': 0x226A,
-    'found.3': 0x439B,
-    'found.4': 0xA4D4,
-    'found.5': 0xC6FD,
-    'found.6': 0x8EFE,
-    'found.7': 0x78FF,
-    'grey.0': 0x6108,
-    'grey.1': 0xC310,
-    'grey.2': 0x4521,
-    'grey.3': 0xE731,
-    'grey.4': 0xCA4A,
-    'grey.5': 0xCE6B,
-    'grey.6': 0x3395,
-    'grey.7': 0xBACE,
-    'accent.cold': 0x586D,
-    'status.warn': 0xC4FC,
-    'status.critical': 0x47FA,
-    'accent.found': 0xC6FD,
-    'glyph.arrow': 0xF9B7,
-    'glyph.outline': 0x0000,
-    'text.onAccent': 0x0000,
-}
-COLOR_RGB = {
-    'bg.base': (0, 0, 0),
-    'bg.iris': (0, 12, 8),
-    'surface.chip': (8, 20, 16),
-    'surface.toast': (24, 32, 24),
-    'line.subtle': (57, 69, 66),
-    'text.primary': (255, 255, 255),
-    'text.secondary': (198, 215, 206),
-    'text.tertiary': (123, 142, 132),
-    'prox.0': (8, 24, 16),
-    'prox.1': (8, 44, 24),
-    'prox.2': (16, 73, 33),
-    'prox.3': (24, 113, 57),
-    'prox.4': (33, 154, 74),
-    'prox.5': (49, 195, 99),
-    'prox.6': (90, 231, 140),
-    'prox.7': (181, 255, 206),
-    'found.0': (24, 16, 0),
-    'found.1': (57, 36, 8),
-    'found.2': (107, 69, 16),
-    'found.3': (156, 105, 24),
-    'found.4': (214, 150, 33),
-    'found.5': (255, 186, 49),
-    'found.6': (255, 211, 115),
-    'found.7': (255, 239, 198),
-    'grey.0': (8, 12, 8),
-    'grey.1': (16, 24, 24),
-    'grey.2': (33, 40, 41),
-    'grey.3': (49, 60, 57),
-    'grey.4': (74, 89, 82),
-    'grey.5': (107, 121, 115),
-    'grey.6': (148, 166, 156),
-    'grey.7': (206, 215, 214),
-    'accent.cold': (107, 170, 198),
-    'status.warn': (255, 154, 33),
-    'status.critical': (255, 73, 57),
-    'accent.found': (255, 186, 49),
-    'glyph.arrow': (181, 255, 206),
-    'glyph.outline': (0, 0, 0),
-    'text.onAccent': (0, 0, 0),
-}
+# ---- Colours (color): byte-swapped RGB565 ints for framebuf palettes
 C_BG_BASE = 0x0000  # #000000
 C_BG_IRIS = 0x6100  # #000C08
 C_SURFACE_CHIP = 0xA208  # #081410
@@ -264,77 +189,14 @@ C_ACCENT_COLD = 0x586D  # #6BAAC6
 C_ACCENT_FOUND = 0xC6FD  # #FFBA31
 C_STATUS_WARN = 0xC4FC  # #FF9A21
 C_STATUS_CRITICAL = 0x47FA  # #FF4939
-C_GLYPH_ARROW = 0xF9B7  # #B5FFCE
-C_TEXT_ONACCENT = 0x0000  # #000000
-C_BG_BASE_RGB = (0, 0, 0)
-C_BG_IRIS_RGB = (0, 12, 8)
-C_SURFACE_CHIP_RGB = (8, 20, 16)
-C_SURFACE_TOAST_RGB = (24, 32, 24)
-C_LINE_SUBTLE_RGB = (57, 69, 66)
-C_TEXT_PRIMARY_RGB = (255, 255, 255)
-C_TEXT_SECONDARY_RGB = (198, 215, 206)
-C_TEXT_TERTIARY_RGB = (123, 142, 132)
-C_ACCENT_COLD_RGB = (107, 170, 198)
-C_ACCENT_FOUND_RGB = (255, 186, 49)
-C_STATUS_WARN_RGB = (255, 154, 33)
-C_STATUS_CRITICAL_RGB = (255, 73, 57)
-C_GLYPH_ARROW_RGB = (181, 255, 206)
-C_TEXT_ONACCENT_RGB = (0, 0, 0)
 
 # ---- Ramps (ramp)
 RAMP_NAMES = ('green', 'gold', 'grey')
-RAMP_LUT_SIZE = 64
 # 8 stops
-RAMP_HEX = {
-    'green': (
-        '#081810', '#082C18', '#104921', '#187139', '#219A4A', '#31C363', '#5AE78C',
-        '#B5FFCE',
-    ),
-    'gold': (
-        '#181000', '#392408', '#6B4510', '#9C6918', '#D69621', '#FFBA31', '#FFD373',
-        '#FFEFC6',
-    ),
-    'grey': (
-        '#080C08', '#101818', '#212829', '#313C39', '#4A5952', '#6B7973', '#94A69C',
-        '#CED7D6',
-    ),
-}
 RAMP_SWAPPED = {
     'green': (0xC208, 0x6309, 0x4412, 0x871B, 0xC924, 0x0C36, 0x315F, 0xF9B7),
     'gold': (0x8018, 0x2139, 0x226A, 0x439B, 0xA4D4, 0xC6FD, 0x8EFE, 0x78FF),
     'grey': (0x6108, 0xC310, 0x4521, 0xE731, 0xCA4A, 0xCE6B, 0x3395, 0xBACE),
-}
-RAMP_RGB = {
-    'green': (
-        (8, 24, 16),
-        (8, 44, 24),
-        (16, 73, 33),
-        (24, 113, 57),
-        (33, 154, 74),
-        (49, 195, 99),
-        (90, 231, 140),
-        (181, 255, 206),
-    ),
-    'gold': (
-        (24, 16, 0),
-        (57, 36, 8),
-        (107, 69, 16),
-        (156, 105, 24),
-        (214, 150, 33),
-        (255, 186, 49),
-        (255, 211, 115),
-        (255, 239, 198),
-    ),
-    'grey': (
-        (8, 12, 8),
-        (16, 24, 24),
-        (33, 40, 41),
-        (49, 60, 57),
-        (74, 89, 82),
-        (107, 121, 115),
-        (148, 166, 156),
-        (206, 215, 214),
-    ),
 }
 # LUT[j] = ramp position j/63*7, byte-swapped
 RAMP_LUT = {
@@ -369,64 +231,31 @@ RAMP_LUT = {
 
 # ---- Layout (layout): rects are (x, y, w, h)
 CENTER = (120, 120)
-RING_CENTER = (119.5, 119.5)
-SAFE_RECT = (6, 6, 228, 228)
-CONTENT_RECT = (12, 12, 216, 216)
-TOP_SLOT = (12, 12, 216, 23)
+TOP_SLOT = (12, 12, 216, 24)
 BOTTOM_SLOT = (24, 186, 192, 40)
-STATUS_STRIP = (12, 12, 216, 20)
-STATUS_SLOTS = {'own_battery': (12, 52), 'link': (98, 44), 'partner_battery': (176, 52)}  # (x, w)
 IRIS_R = {'none': 0, 'chevrons': 44, 'arrow': 64, 'scan': 64, 'runes': 92, 'seeker': 44}
-IRIS_R_CHEVRONS = 44
-IRIS_R_ARROW = 64
-IRIS_R_SCAN = 64
-IRIS_R_RUNES = 92
-IRIS_R_SEEKER = 44
 BEAM_R = 60
 SWEEP_R_INNER = 70
 SWEEP_R_OUTER = 110
 RUNE_CENTERS_X = (64, 120, 176)
-RUNE_CENTER_Y = 120
-RUNE_BOX = 48
 CORE_DOT_R = 6
 CORE_DOT_LEVEL = 6.0
-SPACE = (0, 2, 4, 8, 12, 16, 24, 32, 48)  # space.0 .. space.8
-RADIUS = {'none': 0, 'sm': 4, 'md': 6, 'lg': 8}
-STROKE = {'s': 2, 'm': 4, 'l': 6, 'xl': 10, 'min_glance_px': 4}
 
 # ---- Typography (typography)
 WORD_MAX_CHARS = 10
 LABEL_MAX_CHARS = 18
 WORD_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!'=:+%~<"  # tokens subset (no space)
 LABEL_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ~<>+%:-'  # tokens subset
-# (w, h)
-TYPE_CELL = {
-    'micro': (8, 8),
-    'label': (8, 16),
-    'numeral': (16, 32),
-    'display': (24, 48),
-    'word': (16, 32),
-}
 
 # ---- Motion (motion)
 FPS_TARGET = 20
-FPS_MIN = 15
-FPS_LOW_BATTERY = 15
-DURATION_MS = {
-    'instant': 0,
-    'fast': 150,
-    'base': 250,
-    'slow': 600,
-    'hue_crossfade': 1500,
-    'toast_dwell': 2500,
-    'breathe_found': 1200,
-    'breathe_pairing': 2400,
-}
+BREATHE_PAIRING_MS = 2400  # PAIRING seen halo breathing
 TOAST_MS = 2500
 ZONE_CROSSFADE_MS = 600
 HUE_CROSSFADE_MS = 1500
 HUE_CROSSFADE_FOUND_MS = 400
-IRIS_OPEN_MS = 300
+IRIS_ANIM_MS = 300
+SCAN_MORPH_MS = 400
 ARROW_APPEAR_MS = 250
 ARROW_APPEAR_SCALE = 0.6
 ARROW_ANGLE_TAU_MS = 200
@@ -436,7 +265,6 @@ CHEVRON_NUDGE_PX = 6
 TOAST_IN_MS = 200
 TOAST_IN_PX = 12
 TOAST_OUT_MS = 150
-SWEEP_DEG_PER_S = 30.0
 FLASH_LIMIT_STEPS = 2
 FLASH_LIMIT_MS = 333
 TEMPORAL_AA_K = 1.5  # lead_eff = max(lead, K*|speed|/fps)
@@ -447,6 +275,7 @@ VIGNETTE_STOPS = ((0, 1.0), (88, 1.0), (120, 0.4), (168, 0.15))  # (index, gain)
 FADEIN_PX = 12
 GHOST_AMP_SCALE = 0.6
 IRIS_RIM_PX = 3
+IRIS_RIM_MIN_LEVEL = 5.0  # rim level min(7, max(this, floor+glow_amp))
 BURST_AMP = 7.0
 FOUND_BURST_SPEED_PX_S = 240.0
 STANDING_BASE = 2.0
@@ -491,10 +320,11 @@ RUNES = (
     ('cross', (('line', (0, -20), (0, 20)), ('line', (-20, 0), (20, 0)))),
     ('moon', (('disc', 0, 0, 18), ('cut_disc', 7, -4, 15))),
 )
-BATTERY_ICON = ((22, 12), (2, 6), 2, 2)  # (body, nub, stroke, inset)
 LINK_BARS = (4, 2, (4, 7, 10, 13))  # (w, gap, heights)
+LINK_Q_MAX = 4  # status link bars 0..count
 
 # ---- ui-spec only: Screens and phases (ui-spec §3)
+LOGIC_MS = 100  # logic rate: one RenderParams per 100 ms (10 Hz)
 SCREENS = (
     'PAIRING', 'SEARCHING', 'FAR', 'NEAR', 'WARM', 'HOT', 'FOUND', 'SCANNING',
     'LINK_LOST', 'MENU',
@@ -519,36 +349,25 @@ GLOW_R_MAX_PX = 96.0
 CONE_DRAW_MIN_DEG = 12.0  # cone half-angle is clamped to 12..60 for drawing
 FPS_CAP_MIN = 12
 FPS_CAP_MAX = 20
-LINK_Q_MAX = 4  # status link bars 0..4
 COUNTDOWN_MAX = 99  # 2-digit type.display countdown (split 30..0)
 
-# ---- ui-spec only: Per-screen field presets (ui-spec §6): (ramp, I, speed_px_s, period_ms, glow_r_px, pulse_amp)
-FIELD_PAIRING_LOOKING = ('green', 0.1, -30.0, 3000, 30.0, 2.0)  # inward rings
-FIELD_SEARCHING = ('grey', 0.15, -36.0, 3200, 18.0, 2.5)  # inward rings
-FIELD_LINK_LOST = ('grey', None, -30.0, 3000, 16.0, 1.5)  # I frozen at last value
-FIELD_SCAN_READY_PULSE_SCALE = 0.4  # pulse_amp x0.4, glow_r 8 at the rim
-FIELD_SCAN_READY_GLOW_R = 8.0
-FIELD_SCAN_SWEEP_GLOW_R = 12.0  # halo outside the iris, glow_amp 1 + 5*I_mirror
-FIELD_SCAN_SWEEP_GLOW_AMP = (1.0, 5.0)  # glow_amp = a + b*I_mirror
-PAIRING_SEEN_BREATHE_AMP = (1.5, 3.0)
-BYE_RING_SPEED_PX_S = -120.0  # 3 % shutdown ring
+# ---- ui-spec only: Per-screen field extras (ui-spec §6)
 MENU_PALETTE_SCALE = 0.5
 BURST_SPEED_MULT = 2.0  # burst ring speed = 2x zone speed (§4)
-IRIS_RIM_MIN_LEVEL = 5.0  # rim level max(5, floor+glow_amp) (§2)
-IRIS_ANIM_MS = 300  # iris open/close, out_cubic
 
 # ---- ui-spec only: Mirror, trend, direction extras (ui-spec §5)
 MIRROR_EMA_MS = 150  # live mirror RSSI EMA (§5.7)
 MIRROR_MIN_SPAN_DB = 4.0  # I_mirror denominator floor
 TREND_START_DB = 3.0  # +1 at >= 3 dB / 8 s starting threshold (§5.5)
 UNRELIABLE_WINDOW_MS = 5000  # delivery window for 'unreliable' (§5.5)
+NOISE_EMA_ALPHA = 0.02  # noise_db: EMA of |own RSSI step| (§5.5)
+NOISE_PAIR_GAP_MS = 1000  # own packets further apart don't form a pair (§5.5)
 DIRECTION_REVEAL_MS = 1500
 DIRECTION_CLOCK_MAX_SIGMA_DEG = 30.0  # clock-hour word if sigma <= 30
 DIRECTION_AHEAD_DEG = 20.0  # |theta| <= 20 -> AHEAD, turn skipped
 DIRECTION_LOCK_EASE_MS = 300
 DIRECTION_WALK_WORD_MS = 3000
 ARROW_EXPIRE_MS = 600
-PACER_DEG_PER_S = 30.0
 PACER_TICK_DEG = 45.0
 
 # ---- ui-spec only: Scan extras (ui-spec §6 SCANNING)
@@ -557,11 +376,7 @@ SCAN_FLAT_HOLD_MS = 500  # ... held 0.5 s
 SCAN_WALK_STEPS = 3  # >= 3 steps in 2 s pauses the sweep
 SCAN_WALK_WINDOW_MS = 2000
 SCAN_TICK_DEG = 45.0  # TICK every 45 deg, DOUBLE at 180
-SCAN_WEDGE_DEG = 30.0
-SCAN_BIN_WIDTH_DEG = 6.0  # drawn bar width
-SCAN_SMOOTH_DEG = 30.0  # bars show a +-30 deg smoothed curve
 SCAN_BLINK_MS = 200
-SCAN_MORPH_MS = 400
 SCAN_PEER_WALK_WIDEN_MS = 2000  # peer walking > 2 s of sweep: +15 deg to s0
 SCAN_PEER_WALK_WIDEN_DEG = 15.0
 SCAN_PEER_WALK_FAIL_MS = 4000  # > 4 s: no fix, FRIEND MOVED
@@ -570,25 +385,31 @@ SCAN_HOLD_REPEAT_MAX = 3
 
 # ---- ui-spec only: Pairing, found, battery, power, input (ui-spec §6, §8)
 PAIR_SPLIT_S = 30
-PAIR_RUNE_STEP_MS = 150
+PAIR_GO_MS = 1000  # split: GO shown 1 s at 0
 CAL_GATE_WINDOW_MS = 1000  # RSSI sd over 1 s > unstable_sd pauses the fill
 SEARCHING_WALK_ABOUT_MS = 45000
-BUMP_WINDOW_MS = 400  # both taps within 400 ms
 BUMP_TOUCH_GUARD_MS = 300  # ignore taps 300 ms after a screen touch
+BUMP_TOUCH_LEAD_MS = 100  # ... and from 100 ms before its touch-down (§8)
+BUMP_SPIKE_G = 2.5  # gravity-removed |a| above this (§6 HOT)
+BUMP_SPIKE_MS = (10, 20)  # spike run length min..max
+BUMP_REFRACTORY_MS = 200
 BUMP_READY_HOLD_MS = 1500  # band <3 held 1.5 s
 BUMP_READY_BAND = 0  # index of '<3'
-FALLBACK_PRESS_WINDOW_MS = 3000
-FALLBACK_MAX_BAND = 1  # band <= '~5'
+HOT_SCAN_PRESS_MS = 1000  # HOT: 2nd short press within this starts a scan (§8)
 FOUND_CELEBRATE_MS = 2000
+PARTNER_LEFT_MS = 2000  # partner in PAIRING this long: it left (§6 MENU)
 BATT_SHUTDOWN_PCT = 3
 BATT_INTERSTITIAL_MS = 2500
+BATT_SCREEN_OFF_MS = 3000  # 5 %: screen off 3 s after lowering (LOW-BATTERY)
 BYE_WORD_MS = 2000
 GOODBYE_BEACONS = 3
+GOODBYE_GRACE_MS = 1000  # power off this long after the BYE word (§6 LOW-BATTERY)
 LOST_TIMER_MAX_S = 599  # m:ss up to 9:59, then 10M+
 LOST_HINT_AFTER_MS = 20000  # GO BACK / KEEP ON
 WAKE_BOOST_MS = 3000
 WRIST_DOWN_MS = 2000
 IDLE_DIM_MS = 30000
+IDLE_DIM_BACKLIGHT = 0.35  # ui-spec §8: face-up > 30 s with no input
 STATUS_AFTER_WAKE_MS = 3000
 HINT_CHIP_MS = 4000  # TAP TO SCAN / LOOK AROUND
 HINT_STILL_MS = 6000  # TAP TO SCAN after 6 s still with no arrow
@@ -606,8 +427,6 @@ MENU_AUTOCLOSE_MS = 8000
 MENU_CONFIRM_MS = 3000
 MENU_ROWS_Y = (32, 76, 120, 164)
 MENU_ROW_H = 40
-HAPTIC_EVENT_GUARD_MS = 1000  # drop an event if >= priority started < 1 s ago
-HAPTIC_HB_RESUME_MS = 1000  # heartbeats resume 1 s after an event
 
 # ---- ui-spec only: Copy glyph extras (ui-spec copy needs chars missing from tokens subsets)
 WORD_EXTRA_CHARS = ' '  # e.g. 'TURN RIGHT', "4 O'CLOCK"

@@ -107,13 +107,13 @@ dl.tele dd { margin: 0; font-family: var(--mono); font-size: 12.5px; font-varian
   <main>
     <section class="card field-card" aria-label="Top-down field">
       <ol class="guide">
-        <li><b>Wait about 15 s.</b> The watches pair and calibrate themselves, then play starts.</li>
+        <li id="guide-pair"><b>Wait about 15 s.</b> The watches pair and calibrate themselves, then play starts.</li>
         <li><b>Drag A toward B.</b> A walks there at a real pace. Use 4× or 8× to fast-forward.</li>
         <li><b>Watch the chart and the rings.</b> As A gets closer the rings speed up and brighten; warmer shows as an up-arrow.</li>
         <li><b>Tap A's screen to scan,</b> then walk the arrow. Next to B, press <b>Bump watches</b>.</li>
       </ol>
       <div class="field-wrap">
-        <canvas id="field" width="1200" height="900" tabindex="0" aria-label="Field. Drag watches to move them; drag the small handle or scroll over a watch to turn it; double-click to send watch A walking there."></canvas>
+        <canvas id="field" width="1200" height="900" tabindex="0" aria-label="Field. Drag watches to move them; drag the small handle or scroll over a watch to turn it; double-click to send the selected watch walking there."></canvas>
         <div class="legend">
           <span class="chip"><span class="swatch" style="background: var(--a)"></span><b>A</b> seeker</span>
           <span class="chip"><span class="swatch" style="background: var(--b)"></span><b>B</b> hider</span>
@@ -144,6 +144,7 @@ dl.tele dd { margin: 0; font-family: var(--mono); font-size: 12.5px; font-varian
           </select>
         </label>
         <label><input type="checkbox" id="auto-turn" checked> Auto-turn during scans</label>
+        <label><input type="checkbox" id="auto-pair" checked> Auto-pair (demo: 5 s split, auto-confirm)</label>
         <label><input type="checkbox" id="truth" checked> Show truth</label>
         <button type="button" class="primary" id="bump">Bump watches</button>
         <button type="button" id="reset">Reset</button>
@@ -270,9 +271,13 @@ async function start() {
       for (const p of parts) { cur += '/' + p; if (!made.has(cur)) { try { mp.FS.mkdir(cur); } catch (_) {} made.add(cur); } }
       mp.FS.writeFile('/app/' + path, src);
     }
-    mp.runPython("import sys\nsys.path.insert(0, '/app')\nfrom sim.webhost import TwoWatchSim\nSIM = TwoWatchSim(seed=1, profile='typical')");
+    mp.runPython("import sys\nsys.path.insert(0, '/app')\nfrom sim.webhost import TwoWatchSim\nSIM = TwoWatchSim(seed=1, profile='" + $('profile').value + "')" +
+      '\nSIM.auto_turn = ' + pyBool('auto-turn') + '\nSIM.auto_pair = ' + pyBool('auto-pair'));   // a restored page keeps its switches and selects
     SIM = mp.globals.get('SIM');
+    document.querySelectorAll('.posture select').forEach((sel) => SIM.set_posture(+sel.dataset.i, sel.value));
     M = mp._module;
+    useConstants(JSON.parse(SIM.constants_json()));
+    pairGuide();
   } catch (e) { return fail('The watch code failed to start.', e && e.message); }
   boot.hidden = true;
   setStatus('ok', 'Running · MicroPython ' + (bundle.mpy || '1.29'));
@@ -280,7 +285,7 @@ async function start() {
 }
 
 // ---------- state ----------
-let speed = 1, last = 0, tele = null, world = null, selected = 0, fpsAvg = 0;
+let speed = 1, last = 0, tele = null, world = null, selected = 0;
 const pings = [];
 function call(name, ...args) { try { return SIM[name](...args); } catch (e) { console.error(name, e); fail('The watch code raised an error.', e && e.message); running = false; } }
 let running = true;
@@ -290,14 +295,15 @@ function loop(now) {
   requestAnimationFrame(loop);
   const dt = last ? Math.min(100, now - last) : 16;
   last = now;
-  fpsAvg = fpsAvg ? fpsAvg * 0.95 + (1000 / Math.max(1, dt)) * 0.05 : 60;
   frame(Math.round(dt * speed), now);
 }
 function frame(simMs, now) {
   call('step', simMs);
   if (!running) return;
-  try { tele = JSON.parse(SIM.telemetry_json()); world = tele.world; }
-  catch (e) { console.error(e); }
+  const js = call('telemetry_json');
+  if (!running) return;
+  try { tele = JSON.parse(js); world = tele.world; }
+  catch (e) { console.error(e); fail('The watch code sent unreadable telemetry.', e && e.message); running = false; return; }
   for (let i = 0; i < 2; i++) drawScreen(i, now);
   record();
   drawField(now);
@@ -321,7 +327,6 @@ function layoutChart() {
   const r = chart.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
   chart.width = Math.round(r.width * dpr); chart.height = Math.round(r.height * dpr);
 }
-const ZBANDS = [[0, 7, 'hot', 'rgba(181,255,206,0.10)'], [7, 14, 'warm', 'rgba(90,231,140,0.07)'], [14, 28, 'near', 'rgba(49,195,99,0.05)'], [28, 80, 'far', 'rgba(24,113,57,0.035)']];
 function drawChart() {
   const c = cctx, Wc = chart.width, Hc = chart.height, u = Wc / 1200, padL = 46 * u, padB = 22 * u, padT = 8 * u;
   const lo = Math.log(1), hi = Math.log(80);
@@ -335,9 +340,9 @@ function drawChart() {
     c.fillStyle = '#8BA096'; c.textAlign = 'right'; c.fillText(name, padL - 6 * u, (y(a) + y(Math.min(b, 80))) / 2);
   }
   c.strokeStyle = '#1B2B23'; c.lineWidth = 1;
-  for (const m of [7, 14, 28]) { c.beginPath(); c.moveTo(padL, y(m) + 0.5); c.lineTo(Wc, y(m) + 0.5); c.stroke(); }
+  for (const m of K.enter_m) { c.beginPath(); c.moveTo(padL, y(m) + 0.5); c.lineTo(Wc, y(m) + 0.5); c.stroke(); }
   c.fillStyle = '#5C6E65'; c.textAlign = 'left';
-  for (const m of [3, 7, 14, 28, 55]) c.fillText(m + ' m', padL + 4 * u, y(m) - 7 * u);
+  for (const m of K.band_edges_m) c.fillText(m + ' m', padL + 4 * u, y(m) - 7 * u);
   c.textAlign = 'center';
   for (let k = 0; k <= 90; k += 30) c.fillText(k ? '-' + k + ' s' : 'now', x(tNow - k * 1000), Hc - padB / 2);
   const series = (key, color, dash) => {
@@ -349,22 +354,33 @@ function drawChart() {
   series('d', '#D5E3DA', true); series('a', '#7FD6FF'); series('b', '#FFB86B');
 }
 
+// ---------- tuning values from finder/tuning.py (SIM.constants_json), read once at start ----------
+let K = null, ZBANDS = [], ZINFO = {}, HAPTIC_MS = {};
+function useConstants(k) {
+  K = k;
+  const [e0, e1, e2] = k.enter_m, x = k.exit_m, s = (ms) => ms / 1000 + ' s';
+  ZBANDS = [[0, e2, 'hot', 'rgba(181,255,206,0.10)'], [e2, e1, 'warm', 'rgba(90,231,140,0.07)'], [e1, e0, 'near', 'rgba(49,195,99,0.05)'], [e0, 80, 'far', 'rgba(24,113,57,0.035)']];
+  ZINFO = {
+    FAR: [`FAR means about ${e0} m or more`, `It switches to NEAR once its estimate stays under ${e0} m for ${s(k.dwell_ms[0])}.`],
+    NEAR: [`NEAR means about ${e1} to ${e0} m`, `WARM once it stays under ${e1} m for ${s(k.dwell_ms[1])}; back to FAR above ${x[0]} m.`],
+    WARM: [`WARM means about ${e2} to ${e1} m`, `HOT once it stays under ${e2} m for ${s(k.dwell_ms[2])}; back to NEAR above ${x[1]} m.`],
+    HOT: [`HOT means under about ${e2} m`, 'Within about 3 m it shows BUMP!: press Bump watches.']
+  };
+  HAPTIC_MS = k.haptic_ms;
+}
+
 // ---------- plain-language explanation per watch ----------
-const ZINFO = {
-  FAR: ['FAR means about 28 m or more', 'It switches to NEAR once its estimate stays under 28 m for 3 s.'],
-  NEAR: ['NEAR means about 14 to 28 m', 'WARM once it stays under 14 m for 2 s; back to FAR above 36 m.'],
-  WARM: ['WARM means about 7 to 14 m', 'HOT once it stays under 7 m for 1.5 s; back to NEAR above 18 m.'],
-  HOT: ['HOT means under about 7 m', 'Within about 3 m it shows BUMP!: press Bump watches.']
-};
 function why(t) {
   const est = t.est_dist_m == null ? null : t.est_dist_m.toFixed(0), tru = t.true_dist_m.toFixed(0);
   switch (t.screen) {
-    case 'PAIRING': return 'Pairing. The simulator confirms the matching symbols and does the 1 m calibration for you, then a short split-up countdown runs.';
+    case 'PAIRING': return $('auto-pair').checked
+      ? 'Pairing. The simulator confirms the matching symbols and does the 1 m calibration for you, then a short split-up countdown runs.'
+      : `Pairing. Bring the watches within about 5 m and confirm the matching symbols with Tap or the Side button on both. Hold them still about 1 m apart for the calibration, then a ${K.split_s} s split-up countdown runs.`;
     case 'SEARCHING': return 'No signal heard yet, so it shows grey inward rings and no distance.';
     case 'SCANNING': return t.sub === 'ready' ? 'Scan starting: hold the watch flat for the countdown.' : t.sub === 'sweep' ? 'Scanning: the wearer turns a full circle (auto-turn). The signal is strongest when facing the other watch.' : 'Scan finished: picking the strongest direction.';
     case 'FOUND': return 'Found: both watches felt the bump at the same moment.';
-    case 'LINK_LOST': return 'Signal lost for 5 s. It keeps the last distance and trend until packets return.';
-    case 'MENU': return 'Menu open. Tap Hold (menu) again or wait 8 s to close it.';
+    case 'LINK_LOST': return `Signal lost for ${K.lost_ms / 1000} s. It keeps the last distance band until packets return.`;
+    case 'MENU': return `Menu open. Select RESUME (tap it, or Hold while it is selected) or wait ${K.menu_close_ms / 1000} s to close it.`;
   }
   const z = ZINFO[t.screen];
   if (!z) return t.screen || '';
@@ -373,6 +389,12 @@ function why(t) {
   else if (t.trend < 0) s += ' The hollow down-arrow means you are walking away.';
   if (t.arrow_deg != null) s += ` Arrow from the scan: ${Math.round(t.arrow_deg)}° ± ${Math.round(t.cone_deg)}° (truth ${Math.round(t.true_bearing_rel_deg)}°).`;
   return s;
+}
+function pairGuide() {
+  if (!K) return;
+  $('guide-pair').innerHTML = $('auto-pair').checked
+    ? '<b>Wait about 15 s.</b> The watches pair and calibrate themselves, then play starts.'
+    : `<b>Pair by hand.</b> Drag B next to A, confirm the symbols on both (Tap or Side button) and hold still for the calibration. Then split up during the ${K.split_s} s countdown.`;
 }
 // Test hook: drive the sim without animation frames (hidden tabs pause them).
 window.fieldSim = {
@@ -401,7 +423,6 @@ function drawScreen(i, now) {
   const f = bl <= 0 ? 'brightness(0)' : `brightness(${(0.55 + 0.45 * Math.min(1, bl)).toFixed(2)})`;
   if (s.cv.style.filter !== f) s.cv.style.filter = f;
 }
-const HAPTIC_MS = { TICK: 60, DOUBLE: 200, CLOSER: 440, FARTHER: 300, NOPE: 750, LOST: 540, HOLD: 1800, FOUND: 1060, BATT: 1200 };
 
 function drawField(now) {
   const c = fctx;
@@ -428,7 +449,7 @@ function drawField(now) {
   world.walkers.forEach((w, i) => { if (w.target) { c.strokeStyle = i ? '#FFB86B' : '#7FD6FF'; c.lineWidth = 2 * u; const x = sx(w.target[0]), y = sy(w.target[1]); c.beginPath(); c.moveTo(x - 7 * u, y - 7 * u); c.lineTo(x + 7 * u, y + 7 * u); c.moveTo(x + 7 * u, y - 7 * u); c.lineTo(x - 7 * u, y + 7 * u); c.stroke(); } });
   // haptic pings
   for (let k = pings.length - 1; k >= 0; k--) {
-    const p = pings[k], age = now - p.t0;
+    const p = pings[k], age = Math.max(0, now - p.t0);      // fieldSim.advance stamps pings ahead of rAF time
     if (age > 900) { pings.splice(k, 1); continue; }
     c.strokeStyle = `rgba(90,231,140,${0.6 * (1 - age / 900)})`; c.lineWidth = 2 * u;
     c.beginPath(); c.arc(sx(p.x), sy(p.y), (18 + age / 12) * u * 1.4, 0, Math.PI * 2); c.stroke();
@@ -479,7 +500,8 @@ function renderTele() {
     const w = why(t);
     if ($('why-' + i).textContent !== w) $('why-' + i).textContent = w;
     const trend = t.trend > 0 ? '<span class="good">warmer</span>' : t.trend < 0 ? '<span class="warnc">colder</span>' : 'none';
-    const arrow = t.arrow_deg == null ? 'no arrow' : `${fmt(t.arrow_deg)}° ±${fmt(t.cone_deg)}° · truth ${fmt(t.true_bearing_rel_deg)}° ${t.in_cone ? '<span class="good">inside</span>' : '<span class="warnc">outside</span>'}`;
+    const arrow = (t.arrow_deg == null ? 'no arrow' : `${fmt(t.arrow_deg)}° ±${fmt(t.cone_deg)}° · truth ${fmt(t.true_bearing_rel_deg)}° ${t.in_cone ? '<span class="good">inside</span>' : '<span class="warnc">outside</span>'}`) +
+      (t.cone_ms ? ` · in cone ${fmt(t.cone_hit_pct, 0, '%')} of ${fmt(t.cone_ms / 1000, 0, ' s')} (target ~80%)` : '');
     $('tele-' + i).innerHTML =
       `<dt>True distance</dt><dd>${fmt(t.true_dist_m, 1, ' m')}</dd>` +
       `<dt>Shown band</dt><dd>${t.band || '–'} ${t.zone != null ? '· zone ' + ['far', 'near', 'warm', 'hot'][t.zone] : ''}</dd>` +
@@ -489,8 +511,7 @@ function renderTele() {
       `<dt>Arrow</dt><dd>${arrow}</dd>` +
       `<dt>Packets</dt><dd>${fmt(t.pkts_per_s, 0, '/s')} · steps ${fmt(t.steps)}</dd>`;
   });
-  const A = world && world.walkers ? world.walkers[0] : null, B = A ? world.walkers[1] : null;
-  if (A && B) $('true-dist').textContent = Math.hypot(A.x - B.x, A.y - B.y).toFixed(1) + ' m';
+  $('true-dist').textContent = fmt(tele.watches[0].true_dist_m, 1, ' m');
 }
 function fmtClock(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
 
@@ -558,9 +579,21 @@ document.querySelectorAll('.btns button').forEach((b) => b.addEventListener('cli
   if (a === 'tap') call('tap', i); else if (a === 'hold') call('long_press', i); else call('button', i, false);
 }));
 $('bump').addEventListener('click', () => SIM && call('bump'));
-$('reset').addEventListener('click', () => SIM && call('reset', 1));
+function resetSim() {
+  if (!SIM) return;
+  call('reset', 1);                                    // the sim holds both watches flat again
+  document.querySelectorAll('.posture select').forEach((sel) => { sel.value = 'flat'; });
+}
+$('reset').addEventListener('click', resetSim);
 $('profile').addEventListener('change', (e) => SIM && call('set_profile', e.target.value));
-$('auto-turn').addEventListener('change', (e) => { if (SIM) mp.runPython('SIM.auto_turn = ' + (e.target.checked ? 'True' : 'False')); });
+const pyBool = (id) => ($(id).checked ? 'True' : 'False');
+$('auto-turn').addEventListener('change', () => { if (SIM) mp.runPython('SIM.auto_turn = ' + pyBool('auto-turn')); });
+$('auto-pair').addEventListener('change', () => {
+  pairGuide();
+  if (!SIM) return;
+  mp.runPython('SIM.auto_pair = ' + pyBool('auto-pair'));
+  resetSim();                                          // a fresh pairing: no calibration mixes both channels
+});
 document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => {
   speed = +b.dataset.speed; document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
 }));

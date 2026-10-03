@@ -20,12 +20,13 @@ FIELDS = (
     "ring_live", "burst",
     # centre glyph
     "glyph", "arrow_deg", "cone_deg", "arrow_style", "trend", "trend_strong", "countdown",
+    "runes",
     # text slots
-    "dist_band", "dist_stale", "word", "top_text", "banner", "status",
+    "dist_band", "dist_stale", "word", "top_text", "banner", "status", "menu_rows",
     # scanning
     "sweep",
     # output devices
-    "haptic", "heartbeat", "heartbeat_every", "backlight", "fps_cap",
+    "haptic", "heartbeat", "heartbeat_every", "backlight", "sun", "fps_cap",
 )
 
 RenderParams = namedtuple("RenderParams", FIELDS)
@@ -37,23 +38,25 @@ DEFAULTS = {
     "ramp": _FS[0], "intensity": _FS[1], "speed_px_s": _FS[2], "pulse_period_ms": _FS[3],
     "wavelength_px": None, "glow_r_px": _FS[4], "ring_live": False, "burst": False,
     "glyph": "seeker", "arrow_deg": None, "cone_deg": None, "arrow_style": None,
-    "trend": 0, "trend_strong": False, "countdown": None,
+    "trend": 0, "trend_strong": False, "countdown": None, "runes": None,
     "dist_band": None, "dist_stale": False, "word": None, "top_text": None, "banner": None,
-    "status": (100, None, 0, False),
+    "status": (100, None, 0, False, False), "menu_rows": None,
     "sweep": None,
     "haptic": None, "heartbeat": None, "heartbeat_every": 1,
-    "backlight": T.BACKLIGHT_NORMAL, "fps_cap": T.FPS_TARGET,
+    "backlight": T.BACKLIGHT_NORMAL, "sun": False, "fps_cap": T.FPS_TARGET,
 }
 
 ZONE_SCREENS = T.ZONE_NAMES                 # FAR NEAR WARM HOT, index = zone
 _NO_ARROW_SCREENS = ("SEARCHING", "SCANNING", "LINK_LOST", "FOUND", "PAIRING")
 _NO_BAND_SCREENS = ("PAIRING", "SEARCHING", "SCANNING", "FOUND")
-_TREND_SCREENS = ("FAR", "NEAR", "WARM")
+_TREND_SCREENS = ("FAR", "NEAR", "WARM", "LINK_LOST")   # LINK_LOST: the LAST chip's mark
+_CHEVRON_SCREENS = ("FAR", "NEAR", "WARM")
 _RAMP_FOR = {"FOUND": "gold", "SEARCHING": "grey", "LINK_LOST": "grey",
              "PAIRING": "green", "SCANNING": "green",
              "FAR": "green", "NEAR": "green", "WARM": "green", "HOT": "green"}
 _WORD_CHARS = T.WORD_CHARS + T.WORD_EXTRA_CHARS
 _LABEL_CHARS = T.LABEL_CHARS + T.LABEL_EXTRA_CHARS
+_MENU_VISIBLE = len(T.MENU_ROWS_Y)          # rows on screen
 
 
 def wavelength(speed_px_s, pulse_period_ms):
@@ -262,6 +265,8 @@ def validate(rp):
             e("glyph: must be 'arrow' while an arrow is set")
     elif g == "arrow":
         e("glyph: 'arrow' needs arrow_deg/cone_deg/arrow_style")
+    if g == "chevrons" and sc not in _CHEVRON_SCREENS:
+        e("glyph: 'chevrons' only in FAR/NEAR/WARM")
     tr = rp.trend
     if tr not in (-1, 0, 1) or isinstance(tr, bool):
         e("trend: must be -1, 0 or +1")
@@ -271,11 +276,26 @@ def validate(rp):
         e("trend_strong: must be bool")
     elif rp.trend_strong and tr == 0:
         e("trend_strong: needs a non-zero trend")
+    elif rp.trend_strong and sc == "LINK_LOST":
+        e("trend_strong: must be False in LINK_LOST")
     cn = rp.countdown
     if cn is not None and (not _int(cn) or not 0 <= cn <= T.COUNTDOWN_MAX):
         e("countdown: must be None or int 0..%d" % T.COUNTDOWN_MAX)
     if (g == "countdown") != (cn is not None):
         e("countdown: set exactly when glyph is 'countdown'")
+    rn = rp.runes
+    if rn is not None:
+        ok = isinstance(rn, tuple) and len(rn) == 3
+        if ok:
+            for r in rn:
+                if not _int(r) or not 0 <= r <= 7:
+                    ok = False
+        if not ok:
+            e("runes: must be None or 3 rune ids 0..7")
+        elif sc != "PAIRING":
+            e("runes: only in PAIRING")
+    elif g == "runes" and sub in ("seen", "confirmed"):
+        e("runes: glyph 'runes' needs them in %s" % sub)
 
     # text slots
     band = rp.dist_band
@@ -311,8 +331,8 @@ def validate(rp):
             if not isinstance(bn[2], bool):
                 e("banner: sticky must be bool")
     s = rp.status
-    if not isinstance(s, tuple) or len(s) != 4:
-        e("status: must be (own_pct, partner_pct|None, link_q, visible)")
+    if not isinstance(s, tuple) or len(s) != 5:
+        e("status: must be (own_pct, partner_pct|None, link_q, visible, unreliable)")
     else:
         if not _int(s[0]) or not 0 <= s[0] <= 100:
             e("status: own_pct must be int 0..100")
@@ -322,6 +342,21 @@ def validate(rp):
             e("status: link_q must be int 0..%d" % T.LINK_Q_MAX)
         if not isinstance(s[3], bool):
             e("status: visible must be bool")
+        if not isinstance(s[4], bool):
+            e("status: unreliable must be bool")
+        elif s[4] and not s[3]:
+            e("status: unreliable pins the strip (visible)")
+    mr = rp.menu_rows
+    if (sc == "MENU") != (mr is not None):
+        e("menu_rows: set exactly when screen is MENU")
+    if mr is not None:
+        if not isinstance(mr, tuple) or len(mr) != _MENU_VISIBLE:
+            e("menu_rows: must be a tuple of %d rows" % _MENU_VISIBLE)
+        else:
+            for row in mr:
+                if row is None:
+                    e("menu_rows: row text missing")
+                _text(out, "menu_rows", row, T.LABEL_MAX_CHARS, _LABEL_CHARS)
 
     # scanning
     sw = rp.sweep
@@ -359,6 +394,8 @@ def validate(rp):
             e("heartbeat: not the %s zone heartbeat" % sc)
     if not _in(rp.backlight, 0.0, 1.0):
         e("backlight: must be 0..1")
+    if not isinstance(rp.sun, bool):
+        e("sun: must be bool")
     if not _int(rp.fps_cap) or not T.FPS_CAP_MIN <= rp.fps_cap <= T.FPS_CAP_MAX:
         e("fps_cap: must be int %d..%d" % (T.FPS_CAP_MIN, T.FPS_CAP_MAX))
     return out

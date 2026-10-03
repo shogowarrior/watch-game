@@ -8,7 +8,8 @@ Packet updates are replayed back to back and timed as one block, so
 the 1 ms ticks_us resolution of the WebAssembly port does not matter. On
 MicroPython ``bytes/pkt`` is the heap allocated per packet with GC off (every
 float result is a 16-byte heap block); on CPython it prints ``-``. Copy finder/,
-sim/ and this file to a watch to time the real thing.
+sim/, tools/bakeoff.py, tools/cli.py and this file (keeping the tools/ folder)
+to a watch to time the real thing.
 """
 
 import sys
@@ -27,42 +28,22 @@ _R = _root()
 if _R not in sys.path:
     sys.path.insert(0, _R)
 
-from finder.compat import argv, ticks_add  # noqa: E402
+from finder.compat import ticks_diff, ticks_us  # noqa: E402
 from finder import estimators  # noqa: E402
-from sim import Sim  # noqa: E402
-from sim import scenarios as _sc  # noqa: E402
-
-try:
-    from time import ticks_us as _tus, ticks_diff as _tdiff
-
-    def _clock_us():
-        return _tus()
-
-    def _el_us(a, b):
-        return _tdiff(b, a)
-except ImportError:
-    from time import perf_counter as _pc
-
-    def _clock_us():
-        return _pc() * 1e6
-
-    def _el_us(a, b):
-        return b - a
+from tools import bakeoff  # noqa: E402
+from tools.cli import parse_args  # noqa: E402
 
 
-def packets(scenario="zigzag_search", prof="typical", seed=101, dt=0.05):
+def packets(scenario="zigzag_search", prof="typical", seed=101):
     """(t_ms, rssi, peer_rssi, my_motion, peer_motion) for every packet watch A gets."""
-    world, dur = _sc.make(scenario, seed)
-    s = Sim(world, prof, seed)
-    out = []
-    pm = None
-    for _ in range(int(dur / dt + 0.5)):
-        pa, _pb = s.step(dt)
-        for p in pa:
-            if p.peer_motion is not None:
-                pm = p.peer_motion
-            out.append((ticks_add(10000, p.t_ms), p.rssi, p.peer_rssi, s.imus[0].info, pm))
-    return out, s.cal_p0(0)
+    tr = bakeoff.record(scenario, prof, seed)
+    out, pm = [], None
+    for _t_ms, _t, pks, mm, _d, _vr in tr.ticks:
+        for p_t, rssi, prssi, ppm in pks:
+            if ppm is not None:
+                pm = ppm
+            out.append((p_t, rssi, prssi, mm, pm))
+    return out, tr.cal
 
 
 def bench(name, calls, cal, reps=3, kw=None):
@@ -74,10 +55,10 @@ def bench(name, calls, cal, reps=3, kw=None):
         e.calibrate(cal)
         u = e.update
         gc.collect()
-        t0 = _clock_us()
+        t0 = ticks_us()
         for c in calls:
             u(c[0], c[1], c[2], c[3], c[4])
-        el = _el_us(t0, _clock_us())
+        el = ticks_diff(ticks_us(), t0)
         if best is None or el < best:
             best = el
     alloc = None
@@ -87,11 +68,12 @@ def bench(name, calls, cal, reps=3, kw=None):
         e.calibrate(cal)
         u = e.update
         k = min(200, len(calls))
+        sub = calls[:k]         # sliced before a0, so the slice is not counted
         gc.collect()
         gc.disable()
         try:
             a0 = mem()
-            for c in calls[:k]:
+            for c in sub:
                 u(c[0], c[1], c[2], c[3], c[4])
             alloc = (mem() - a0) / k
         finally:
@@ -100,20 +82,8 @@ def bench(name, calls, cal, reps=3, kw=None):
 
 
 def main(args):
-    o = {"est": ",".join(estimators.NAMES), "scenario": "zigzag_search", "profile": "typical",
-         "seed": "101", "reps": "3", "n": None}
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if "=" in a:
-            k, v = a[2:].split("=", 1)
-            i += 1
-        else:
-            k, v = a[2:], args[i + 1]
-            i += 2
-        if k not in o:
-            raise ValueError("unknown option " + a)
-        o[k] = v
+    o = parse_args(args, {"est": ",".join(estimators.NAMES), "scenario": "zigzag_search",
+                          "profile": "typical", "seed": "101", "reps": "3", "n": None})
     calls, cal = packets(o["scenario"], o["profile"], int(o["seed"]))
     print("%d packets (%s/%s seed %s)" % (len(calls), o["scenario"], o["profile"], o["seed"]))
     print("| estimator | us/pkt | bytes/pkt |")
@@ -126,4 +96,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    main(argv(globals())[1:])
+    main(sys.argv[1:])

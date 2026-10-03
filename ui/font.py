@@ -10,15 +10,13 @@ anisotropic scale keeps strokes square:
   DISPLAY  24x48  3 x 6         type.display (countdown digits)
 
 ``render(face, s)`` returns a MONO_HLSB bytearray (1 = ink) plus its size;
-ui/text.py caches one FrameBuffer per distinct (face, string).
+ui/text.py caches one FrameBuffer per distinct (face, string). MicroPython
+only (the built-in font comes from framebuf).
 """
 
-from finder.compat import const
+import framebuf
 
-try:
-    import framebuf
-except ImportError:  # CPython has no framebuf: faces are MicroPython-only
-    framebuf = None
+from finder.compat import const
 
 MICRO = const(0)
 LABEL = const(1)
@@ -73,10 +71,6 @@ def _expand_table(sx):
             t.append(o)
         _exp[sx] = t
     return t
-
-
-def size(face, n):
-    return 8 * SX[face] * n, 8 * SY[face]
 
 
 def render(face, s):

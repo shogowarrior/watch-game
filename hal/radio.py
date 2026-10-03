@@ -1,18 +1,18 @@
-"""ESP-NOW broadcast radio (``EspNowRadio``) and an in-memory twin (``SimRadio``).
+"""ESP-NOW broadcast radio (``EspNowRadio``) and an in-memory twin for tests (``SimRadio``).
 
 Both share one interface::
 
     r.begin(channel=6, txpower=20)
-    r.maybe_send(now, beacon_buf)       # jittered 45-55 ms schedule
-    r.poll(now, monitor=link)           # drain RX into a LinkMonitor ...
-    r.poll(now, callback=fn)            # ... or fn(mac, buf, n, rssi, t_rx)
+    r.set_rate(hz)                      # beacon rate (default 20 Hz), ~10 % jitter
+    r.maybe_send(now, beacon_buf)       # broadcast if the jittered schedule is due
+    r.poll(now, callback=fn)            # fn(mac, buf, n, rssi, t_rx) per frame
     r.stats()
 
 RX drains ``recvinto(data, 0)`` into one preallocated
 ``[mac, bytearray(250), rssi, t_ms]`` list until it returns 0 (no irq, no
-peers_table). ``buf`` handed to monitor/callback is that shared bytearray:
-copy anything you need to keep. Hardware modules are imported in ``begin``
-so this file (and SimRadio) also loads on CPython / the simulator.
+peers_table). ``buf`` handed to the callback is that shared bytearray: copy
+anything you need to keep. Hardware modules are imported in ``begin`` so this
+file (and SimRadio) also loads on CPython and in the tests.
 """
 
 from finder.compat import ticks_diff
@@ -30,19 +30,33 @@ TICKS_MASK = 0x3FFFFFFF  # espnow stamps raw u32 mp_hal_ticks_ms; ticks_ms() is 
 class _Radio:
     """Shared TX schedule, RX drain loop and counters."""
 
-    def __init__(self, seed=0xACE1, period_ms=50, jitter_ms=5):
-        self.sched = TxScheduler(period_ms, jitter_ms, seed)
+    def __init__(self, seed=0xACE1):
+        self.sched = TxScheduler(seed=seed)
         self._rx = [None, bytearray(MAX_LEN), 0, 0]
         self.channel = DEFAULT_CHANNEL
         self.txpower = 20
-        self.max_drain = MAX_DRAIN
         self.n_tx = 0
         self.n_tx_err = 0
         self.n_rx = 0
         self.n_rx_err = 0
         self.n_polls = 0
         self.drain_max = 0
-        self.last_tx_t = None
+
+    def set_rate(self, hz):
+        """Beacon rate in Hz; jitter ~10 % of the period, >= 1 ms."""
+        s = self.sched
+        per = 1000 // hz
+        if per != s.period:
+            s.period = per
+            s.jitter = per // 10 or 1
+
+    def due(self, now):
+        """True if ``maybe_send(now, ...)`` would send."""
+        return self.sched.due(now)
+
+    def next_due(self):
+        """ticks_ms of the next scheduled beacon (None before the first)."""
+        return self.sched.next_t
 
     def maybe_send(self, now, buf):
         """Broadcast ``buf`` if the jittered schedule is due; True if sent."""
@@ -60,15 +74,14 @@ class _Radio:
             self.n_tx_err += 1
             return False
         self.n_tx += 1
-        self.last_tx_t = now
         return True
 
-    def poll(self, now, monitor=None, callback=None):
-        """Drain pending frames; returns how many were handled."""
+    def poll(self, now, callback=None):
+        """Drain pending frames into ``callback``; returns how many were handled."""
         d = self._rx
         c = 0
         self.n_polls += 1
-        while c < self.max_drain:
+        while c < MAX_DRAIN:
             try:
                 n = self._recvinto(d)
             except OSError:
@@ -81,8 +94,6 @@ class _Radio:
             a = ticks_diff(now, t)
             if a < 0 or a > RX_TS_MAX_AGE:
                 t = now
-            if monitor is not None:
-                monitor.on_packet(d[0], d[1], n, d[2], t)
             if callback is not None:
                 callback(d[0], d[1], n, d[2], t)
         self.n_rx += c
@@ -99,11 +110,11 @@ class _Radio:
 class EspNowRadio(_Radio):
     """ESP-NOW broadcast on the STA interface (never associated during play)."""
 
-    def __init__(self, channel=DEFAULT_CHANNEL, txpower=20, rxbuf=2048, seed=None, **kw):
+    def __init__(self, channel=DEFAULT_CHANNEL, txpower=20, rxbuf=2048, seed=None):
         if seed is None:
             from finder.compat import ticks_ms
             seed = ticks_ms() & 0xFFFF
-        _Radio.__init__(self, seed, **kw)
+        _Radio.__init__(self, seed)
         self.channel = channel
         self.txpower = txpower
         self.rxbuf = rxbuf
@@ -120,10 +131,10 @@ class EspNowRadio(_Radio):
             self.txpower = txpower
         if self.channel not in CHANNELS:
             raise ValueError("channel must be 1, 6 or 11")
-        sta = network.WLAN(network.STA_IF)
+        sta = self._sta or network.WLAN(network.STA_IF)   # one STA (one MAC) per radio, like self._e
         sta.active(True)
         try:
-            sta.disconnect()      # boot.py may have joined an AP (pins the channel)
+            sta.disconnect()      # a notebook may have joined an AP (that pins the channel)
         except OSError:
             pass
         sta.config(channel=self.channel)
@@ -144,10 +155,6 @@ class EspNowRadio(_Radio):
         self._e = e
         return self
 
-    def close(self):
-        if self._e is not None:
-            self._e.active(False)
-
     def _send(self, buf, now):
         e = self._e
         if e is None:
@@ -162,20 +169,19 @@ class EspNowRadio(_Radio):
 
 
 class SimRadio(_Radio):
-    """In-memory radio for tests and the simulator.
+    """In-memory radio for tests (runtime, radio and ping-pong tests); the
+    two-watch simulator models the link in ``sim/radio.py``.
 
     ``connect(other, rssi, loss)`` links two SimRadios both ways; ``rssi`` may
-    be an int or ``fn(t_ms) -> int``. ``inject`` queues an arbitrary frame.
+    be an int or ``fn(t_ms) -> int``.
     Frames are delivered on the receiver's next ``poll`` (same channel only).
     """
 
-    def __init__(self, mac=None, seed=0xACE1, **kw):
-        _Radio.__init__(self, seed, **kw)
+    def __init__(self, mac=None, seed=0xACE1):
+        _Radio.__init__(self, seed)
         self.mac = bytes(mac) if mac is not None else b"\x02\x00\x00\x00\x00\x01"
         self.links = []       # [other, rssi, loss]
         self.inbox = []       # (mac, bytes, rssi, t_ms)
-        self.sent = []        # bytes of every frame sent (for tests)
-        self.keep_sent = True
         self.active = False
         self._loss_rng = Xorshift16(seed ^ 0x5A5A)
 
@@ -187,22 +193,14 @@ class SimRadio(_Radio):
         self.active = True
         return self
 
-    def close(self):
-        self.active = False
-
     def connect(self, other, rssi=-50, loss=0.0):
         self.links.append([other, rssi, loss])
         other.links.append([self, rssi, loss])
-
-    def inject(self, mac, msg, rssi=-60, t_ms=0):
-        self.inbox.append((bytes(mac), bytes(msg), rssi, t_ms))
 
     def _send(self, buf, now):
         if not self.active:
             raise OSError("not active")
         msg = bytes(buf)
-        if self.keep_sent:
-            self.sent.append(msg)
         t = 0 if now is None else now
         for o, rssi, loss in self.links:
             if not o.active or o.channel != self.channel:

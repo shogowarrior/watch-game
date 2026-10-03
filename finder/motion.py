@@ -2,8 +2,8 @@
 
 Feed raw samples (``add_sample``, g units, 25-50 Hz) and/or the on-chip step
 counter + activity register (``set_chip``). Exposes steps, cadence, activity,
-a still flag, gravity/tilt/face-up and stride odometry; ``to_motion_info``
-fills a ``MotionInfo`` for the range estimators.
+a still flag, gravity/tilt/face-up and stride odometry; the game copies them
+for the range estimators with ``session.MotionSnap.from_tracker``.
 
 No position from double integration, on purpose: a residual accel bias b
 (BMA423 offset: tens of mg, 1 mg/K) grows as 0.5*b*t^2 (40 mg -> ~20 m after
@@ -15,7 +15,7 @@ so that is what we use -- see docs/estimation/imu-drift.md.
 
 import math
 from finder.compat import ticks_diff
-from finder.estimators.base import MotionInfo, ACT_UNKNOWN, ACT_STILL, ACT_WALK, ACT_RUN
+from finder.estimators.base import ACT_UNKNOWN, ACT_STILL, ACT_WALK, ACT_RUN
 
 # BMA423 ACTIVITY_TYPE (reg 0x27) codes 0..3 -> ACT_*
 CHIP_ACT = (ACT_STILL, ACT_WALK, ACT_RUN, ACT_UNKNOWN)
@@ -37,12 +37,14 @@ WALK_HZ = 0.5
 _R2D = 180.0 / math.pi
 
 
-def heading_confidence(walked_m, elapsed_s, half_m=4.0, half_s=20.0):
-    """0..1 trust in a direction estimate made ``walked_m``/``elapsed_s`` ago.
-
-    Yaw is unobservable without gyro/compass, so a heading can only age.
-    """
-    return math.pow(0.5, walked_m / half_m + elapsed_s / half_s)
+def tilt_from_gravity(gx, gy, gz, z_sign=1):
+    """Angle (deg) between the display normal and up; 0 = face-up flat."""
+    n = math.sqrt(gx * gx + gy * gy + gz * gz)
+    if n <= 0.0:
+        return 180.0
+    c = gz * (1.0 if z_sign >= 0 else -1.0) / n
+    c = -1.0 if c < -1.0 else 1.0 if c > 1.0 else c
+    return math.acos(c) * _R2D
 
 
 class MotionTracker:
@@ -68,8 +70,6 @@ class MotionTracker:
         self.gx = 0.0
         self.gy = 0.0
         self.gz = 1.0
-        self.pitch_deg = 0.0
-        self.roll_deg = 0.0
         self.face_up = False
         self.dist_m = 0.0
         self.chip_live = False
@@ -89,10 +89,24 @@ class MotionTracker:
         self._chip_steps = None
         self._chip_act = None
         self._chip_t = None
+        self._sw_out = 0           # steps the software path credited since the last chip step read
         self._cad_n = 0
         self._cad_t0 = None
         self._iv_hz = 0.0
         self._have_raw = False
+
+    @property
+    def tilt_deg(self):
+        """Display tilt from face-up flat (deg), from the gravity estimate."""
+        return tilt_from_gravity(self.gx, self.gy, self.gz, self.z_sign)
+
+    @property
+    def roll_deg(self):
+        return math.atan2(self.gy, self.gz * self.z_sign) * _R2D
+
+    @property
+    def pitch_deg(self):
+        return math.atan2(-self.gx, math.sqrt(self.gy * self.gy + self.gz * self.gz)) * _R2D
 
     # ---- raw accelerometer path -------------------------------------------------
     def add_sample(self, t_ms, x, y, z):
@@ -153,13 +167,9 @@ class MotionTracker:
         self.gx = gx
         self.gy = gy
         self.gz = gz
-        zs = self.z_sign
-        yz = math.sqrt(gy * gy + gz * gz)
-        gn = math.sqrt(gx * gx + yz * yz)
-        self.roll_deg = math.atan2(gy, gz * zs) * _R2D
-        self.pitch_deg = math.atan2(-gx, yz) * _R2D
+        gn = math.sqrt(gx * gx + gy * gy + gz * gz)
         if gn > 0.0:
-            c = gz * zs / gn
+            c = gz * self.z_sign / gn
             self.face_up = c > (FACE_OFF_COS if self.face_up else FACE_ON_COS)
 
         # software step detector: band-pass |a|, peak with hysteresis
@@ -202,6 +212,7 @@ class MotionTracker:
             self.sw_steps += k
             if not self.chip_live:
                 self._add_steps(k)
+                self._sw_out += k
         if not self.chip_live:
             f = 1000.0 / d
             self._iv_hz = f if self._streak == 2 else self._iv_hz + 0.3 * (f - self._iv_hz)
@@ -215,8 +226,11 @@ class MotionTracker:
             self._chip_steps = steps
             if last is not None and steps > last:
                 d = steps - last
-                self._add_steps(d)
                 self._cad_n += d
+                d -= self._sw_out          # counted by the software path while the chip was out
+                if d > 0:
+                    self._add_steps(d)
+            self._sw_out = 0
             self._chip_t = t_ms
         if act_code is not None:
             self._chip_act = CHIP_ACT[act_code & 3]
@@ -267,16 +281,3 @@ class MotionTracker:
         else:
             act = ACT_UNKNOWN
         self.activity = act
-
-    def speed_mps(self):
-        k = self.run_stride_k if self.activity == ACT_RUN else 1.0
-        return self.step_rate_hz * self.stride_m * k
-
-    def to_motion_info(self, out=None):
-        """Fill (or create) a ``MotionInfo`` for the estimators."""
-        if out is None:
-            out = MotionInfo()
-        out.activity = self.activity
-        out.step_rate_hz = self.step_rate_hz
-        out.steps = self.steps
-        return out

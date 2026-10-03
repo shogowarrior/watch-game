@@ -6,88 +6,41 @@ logic tick (~10 Hz); read ``zone``, ``intensity``, ``band_idx``/``band``,
 
     px = Proximity()
     px.update_est(now, est, my_activity, delivery=meter.ratio(now))
-    period, speed, wl, lead, trail, hb, every = tempo(px.zone)
 """
 
 import math
 from array import array
 
+from finder import tuning as T
 from finder.compat import ticks_diff, ticks_add
 from finder.estimators.base import ACT_UNKNOWN, ACT_WALK, ACT_RUN
 
-try:
-    from finder import tuning as _tuning
-except ImportError:
-    _tuning = None
+# tokens.json thresholds.* (via finder.tuning) under this module's names
+ZONE_ENTER_M = T.ZONE_ENTER_M          # boundary k: zone k -> k+1
+ZONE_EXIT_M = T.ZONE_EXIT_M            # boundary k: zone k+1 -> k
+ZONE_DWELL_MS = T.ZONE_DWELL_MS        # both directions
+BAND_EDGES_M = T.BAND_EDGES_M
+BAND_LABELS = T.BAND_LABELS
+BAND_HYST = T.BAND_HYST
+ZONE_BANDS = T.ZONE_BANDS              # zone -> (lo, hi)
+PROX_FAR_M = T.PROX_D_FAR_M            # p = 0 at this distance
+PROX_MIN_M = T.PROX_D_MIN_M            # d floor inside the log
+INTENSITY_TAU_MS = T.INTENSITY_TAU_MS
+TREND_CONF_MIN = T.TREND_CONF_MIN
+TREND_WINDOW_MS = T.TREND_WINDOW_MS
+TREND_EVAL_MS = T.TREND_EVAL_MS
+TREND_HOLD_EVALS = T.TREND_HOLD_EVALS
+TREND_MIN_DELTA_DB = T.TREND_START_DB  # §5.5 starting +1 threshold
+TREND_STRONG_CONF = T.TREND_STRONG_CONF
+TREND_STRONG_DB = T.TREND_STRONG_DB
+TREND_FLIP_MIN_MS = T.TREND_FLIP_MIN_MS
+UNRELIABLE_SD_DB = T.UNRELIABLE_SD_DB
+UNRELIABLE_DELIVERY = T.UNRELIABLE_DELIVERY
+DELIVERY_WINDOW_MS = T.UNRELIABLE_WINDOW_MS
 
+FAR, NEAR, WARM, HOT = T.ZONE_FAR, T.ZONE_NEAR, T.ZONE_WARM, T.ZONE_HOT
 
-_TV_NAMES = []  # every name looked up in finder.tuning (tests check they exist)
-
-
-def _tv(name, default):
-    _TV_NAMES.append(name)
-    return getattr(_tuning, name, default) if _tuning is not None else default
-
-
-# ---- tuning constants (tokens.json v0.2.0 thresholds.*) --------------------
-# Fallback values; finder.tuning overrides any of these names when present.
-ZONE_ENTER_M = _tv("ZONE_ENTER_M", (28.0, 14.0, 7.0))    # boundary k: zone k -> k+1
-ZONE_EXIT_M = _tv("ZONE_EXIT_M", (36.0, 18.0, 9.0))      # boundary k: zone k+1 -> k
-ZONE_DWELL_MS = _tv("ZONE_DWELL_MS", (3000, 2000, 1500))  # both directions
-BAND_EDGES_M = _tv("BAND_EDGES_M", (3.5, 7.0, 14.0, 28.0, 55.0))
-BAND_LABELS = _tv("BAND_LABELS", ("<3", "~5", "~10", "~20", "~40", "60+"))
-BAND_HYST = _tv("BAND_HYST", 1.15)
-ZONE_BANDS = _tv("ZONE_BANDS", ((4, 5), (3, 3), (2, 2), (0, 1)))  # zone -> (lo, hi)
-PROX_FAR_M = _tv("PROX_D_FAR_M", 60.0)    # p = 0 at this distance
-PROX_MIN_M = _tv("PROX_D_MIN_M", 0.1)     # d floor inside the log
-PROX_RATIO = _tv("PROX_RATIO", 30.0)      # p = 1 at PROX_FAR_M / PROX_RATIO (2 m)
-INTENSITY_TAU_MS = _tv("INTENSITY_TAU_MS", 1500)
-TREND_CONF_MIN = _tv("TREND_CONF_MIN", 0.6)
-TREND_WINDOW_MS = _tv("TREND_WINDOW_MS", 8000)
-TREND_EVAL_MS = _tv("TREND_EVAL_MS", 1000)
-TREND_HOLD_EVALS = _tv("TREND_HOLD_EVALS", 2)
-TREND_MIN_DELTA_DB = _tv("TREND_START_DB", 3.0)   # §5.5 starting +1 threshold
-TREND_STRONG_CONF = _tv("TREND_STRONG_CONF", 0.85)
-TREND_STRONG_DB = _tv("TREND_STRONG_DB", 6.0)
-TREND_FLIP_MIN_MS = _tv("TREND_FLIP_MIN_MS", 5000)
-UNRELIABLE_SD_DB = _tv("UNRELIABLE_SD_DB", 6.0)
-UNRELIABLE_DELIVERY = _tv("UNRELIABLE_DELIVERY", 0.5)
-DELIVERY_WINDOW_MS = _tv("UNRELIABLE_WINDOW_MS", 5000)
-# zone -> (pulse_period_ms, speed_px_s, lead_px, trail_px, heartbeat, every)
-_TEMPO_SRC = tuple(zip(
-    _tv("ZONE_PERIOD_MS", (2400, 1600, 1000, 500)),
-    _tv("ZONE_SPEED_PX_S", (40.0, 56.0, 80.0, 120.0)),
-    _tv("ZONE_LEAD_PX", (3, 3, 3, 3)),
-    _tv("ZONE_TRAIL_PX", (22, 20, 18, 14)),
-    _tv("ZONE_HEARTBEAT", ("TICK", "TICK", "DOUBLE", "TICK")),
-    _tv("ZONE_HB_EVERY", (2, 1, 1, 1)),
-))
-# ---- end tuning constants ---------------------------------------------------
-
-FAR = 0
-NEAR = 1
-WARM = 2
-HOT = 3
-ZONE_NAMES = ("FAR", "NEAR", "WARM", "HOT")
-
-_LN_RATIO = math.log(PROX_RATIO)
-
-
-def _mk_tempo(src):
-    out = []
-    for row in src:
-        period, speed, lead, trail, hb, every = row
-        out.append((period, speed, speed * period / 1000.0, lead, trail, hb, every))
-    return tuple(out)
-
-
-# zone -> (pulse_period_ms, speed_px_s, wavelength_px, lead_px, trail_px, heartbeat, every)
-ZONE_TEMPO = _mk_tempo(_TEMPO_SRC)
-
-
-def tempo(zone):
-    """Ring/haptic tempo tuple for zone 0..3 (FAR..HOT), see ``ZONE_TEMPO``."""
-    return ZONE_TEMPO[zone]
+_LN_RATIO = T.PROX_LN_RATIO            # ln(PROX_RATIO): p = 1 at PROX_FAR_M / PROX_RATIO (2 m)
 
 
 # ---- §5.1 proximity and intensity -----------------------------------------
@@ -117,6 +70,15 @@ def zone_for(d_m):
     return z
 
 
+def _want(z, d_m):
+    """+1 toward the closer zone, -1 toward the farther one, 0 stay."""
+    if z < 3 and d_m <= ZONE_ENTER_M[z]:
+        return 1
+    if z > 0 and d_m >= ZONE_EXIT_M[z - 1]:
+        return -1
+    return 0
+
+
 class ZoneTracker:
     """Zone with enter/exit hysteresis and symmetric per-boundary dwell.
 
@@ -130,7 +92,6 @@ class ZoneTracker:
     def reset(self):
         self.zone = None
         self.changed = 0      # +1 closer / -1 farther / 0, for this update only
-        self.jumped = False   # True on the update that took a first fix
         self._arm = True
         self._dir = 0
         self._since = 0
@@ -141,7 +102,6 @@ class ZoneTracker:
 
     def update(self, now, d_m):
         self.changed = 0
-        self.jumped = False
         if d_m is None:
             return self.zone
         z = self.zone
@@ -150,16 +110,11 @@ class ZoneTracker:
             if z is not None and nz != z:
                 self.changed = 1 if nz > z else -1
             self.zone = nz
-            self.jumped = True
             self._arm = False
             self._dir = 0
             self._since = now
             return nz
-        want = 0
-        if z < 3 and d_m <= ZONE_ENTER_M[z]:
-            want = 1
-        elif z > 0 and d_m >= ZONE_EXIT_M[z - 1]:
-            want = -1
+        want = _want(z, d_m)
         if want != self._dir:
             self._dir = want
             self._since = now
@@ -168,9 +123,7 @@ class ZoneTracker:
             if ticks_diff(now, self._since) >= dwell:
                 self.zone = z = z + want
                 self.changed = want
-                # the next boundary's dwell starts at this commit
-                self._dir = 1 if z < 3 and d_m <= ZONE_ENTER_M[z] else \
-                    -1 if z > 0 and d_m >= ZONE_EXIT_M[z - 1] else 0
+                self._dir = _want(z, d_m)   # the next boundary's dwell starts at this commit
                 self._since = now
         return self.zone
 
@@ -200,17 +153,13 @@ def band(prev, d_m, zone, trend=0):
             b += 1
         while b > 0 and d_m < BAND_EDGES_M[b - 1] / BAND_HYST:
             b -= 1
-    if zone is not None:
-        lo, hi = ZONE_BANDS[zone]
-        b = lo if b < lo else hi if b > hi else b
-    if prev is not None:
         if trend > 0 and b > prev:
             b = prev
         elif trend < 0 and b < prev:
             b = prev
-        if zone is not None:
-            lo, hi = ZONE_BANDS[zone]
-            b = lo if b < lo else hi if b > hi else b
+    if zone is not None:
+        lo, hi = ZONE_BANDS[zone]
+        b = lo if b < lo else hi if b > hi else b
     return b
 
 
@@ -248,6 +197,11 @@ class DeliveryMeter:
             if self._span < self._nb - 1:
                 self._span += 1
         self._t = ticks_add(self._t, (dt // 1000) * 1000)
+
+    def expire(self, now):
+        """Roll the window without a packet, so a long silence never wraps ``_t``."""
+        if self._t is not None:
+            self._roll(now)
 
     def note(self, now):
         """Record one received partner packet."""
@@ -339,9 +293,9 @@ class TrendGate:
             self.delta_db = 0.0
         return True
 
-    def update(self, now, est_trend, trend_conf, rssi_f, rssi_sd, activity, zone,
+    def update(self, now, est_trend, trend_conf, rssi_f, noise_db, activity, zone,
                delivery=None):
-        sd_bad = rssi_sd is not None and rssi_sd > UNRELIABLE_SD_DB
+        sd_bad = noise_db is not None and noise_db > UNRELIABLE_SD_DB
         del_bad = delivery is not None and delivery < UNRELIABLE_DELIVERY
         self.unreliable = sd_bad or del_bad
         evald = self._sample(now, rssi_f)
@@ -394,18 +348,15 @@ class Proximity:
         """Forget everything (new round / SEARCHING)."""
         self.zones.reset()
         self.gate.reset()
-        self.p = 0.0
         self.intensity = 0.0
         self.band_idx = None
         self._t = None
-        self._fix = False
 
     def rearm(self):
         """After LINK_LOST: next fix jumps zone/band/intensity; trend restarts."""
         self.zones.rearm()
         self.gate.reset()
         self.band_idx = None
-        self._fix = False
 
     @property
     def zone(self):
@@ -414,10 +365,6 @@ class Proximity:
     @property
     def zone_changed(self):
         return self.zones.changed
-
-    @property
-    def first_fix(self):
-        return self.zones.jumped
 
     @property
     def band(self):
@@ -435,24 +382,22 @@ class Proximity:
     def unreliable(self):
         return self.gate.unreliable
 
-    def update(self, now, d_m, rssi_f=None, rssi_sd=None, est_trend=0, trend_conf=0.0,
+    def update(self, now, d_m, rssi_f=None, noise_db=None, est_trend=0, trend_conf=0.0,
                activity=ACT_UNKNOWN, delivery=None):
         if d_m is None:
-            self.zones.changed = 0
-            self.zones.jumped = False
-            self.gate.update(now, 0, 0.0, None, rssi_sd, activity, self.zones.zone, delivery)
+            z = self.zones.update(now, None)
+            self.gate.update(now, 0, 0.0, None, noise_db, activity, z, delivery)
             self._t = now
             return
-        self.p = p = prox(d_m)
-        if not self._fix or self._t is None:
+        p = prox(d_m)
+        if self.band_idx is None:      # first fix after reset/rearm: jump
             self.intensity = p
-            self._fix = True
         else:
             self.intensity = intensity(self.intensity, p, ticks_diff(now, self._t))
         self._t = now
         z = self.zones.update(now, d_m)
         g = self.gate
-        g.update(now, est_trend, trend_conf, rssi_f, rssi_sd, activity, z, delivery)
+        g.update(now, est_trend, trend_conf, rssi_f, noise_db, activity, z, delivery)
         prev = self.band_idx
         tr = g.trend
         b = band(prev, d_m, z, tr)
@@ -461,8 +406,11 @@ class Proximity:
         self.band_idx = b
 
     def update_est(self, now, est, activity=ACT_UNKNOWN, delivery=None):
-        """Convenience: read a ``RangeEstimator`` after its ``update``."""
-        v = est.rssi_var
-        sd = math.sqrt(v) if v is not None and v > 0 else 0.0
-        self.update(now, est.dist_m, est.rssi_f, sd, est.trend, est.trend_conf,
+        """Convenience: read a ``RangeEstimator`` after its ``update``.
+
+        The unreliable gate takes the learnt packet-to-packet noise ``noise_db``
+        (ui-spec §5.5); it is None until the first packet, which the gate reads
+        as not unreliable.
+        """
+        self.update(now, est.dist_m, est.rssi_f, est.noise_db, est.trend, est.trend_conf,
                     activity, delivery)

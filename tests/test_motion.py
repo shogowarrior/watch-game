@@ -1,7 +1,7 @@
 import math
 from finder.compat import ticks_add
-from finder.estimators.base import MotionInfo, ACT_STILL, ACT_WALK, ACT_RUN, ACT_UNKNOWN
-from finder.motion import MotionTracker, heading_confidence
+from finder.estimators.base import ACT_STILL, ACT_WALK, ACT_RUN, ACT_UNKNOWN
+from finder.motion import MotionTracker, tilt_from_gravity
 from sim.accel_synth import WristSim
 
 
@@ -34,7 +34,6 @@ def test_steps_walking_within_10pct():
         assert mt.activity == ACT_WALK
         assert not mt.is_still
         assert abs(mt.dist_m - 0.7 * mt.steps) < 1e-6
-        assert abs(mt.speed_mps() - 1.33) < 0.15
 
 
 def test_steps_stopgo_and_still_windows():
@@ -138,8 +137,6 @@ def test_chip_path():
     assert mt.activity == ACT_RUN
     mt.set_chip(t + 1000, act_code=3)
     assert mt.activity == ACT_UNKNOWN
-    info = mt.to_motion_info()
-    assert info.steps == 20 and info.activity == ACT_UNKNOWN
 
 
 def test_chip_overrides_software_steps():
@@ -158,17 +155,36 @@ def test_chip_overrides_software_steps():
     assert mt.sw_steps > 20
 
 
-def test_to_motion_info_reuses_object():
-    s, mt = _run("walk", 1, until_s=10.0)
-    out = MotionInfo()
-    r = mt.to_motion_info(out)
-    assert r is out
-    assert out.steps == mt.steps and out.activity == ACT_WALK
-    assert out.step_rate_hz == mt.step_rate_hz
+def test_tilt_from_gravity():
+    assert tilt_from_gravity(0.0, 0.0, 1.0) < 1e-6
+    assert abs(tilt_from_gravity(0.0, 0.0, -1.0) - 180.0) < 1e-6
+    s = math.sin(40 * math.pi / 180)
+    c = math.cos(40 * math.pi / 180)
+    assert abs(tilt_from_gravity(s, 0.0, c) - 40.0) < 1e-3
+    assert abs(tilt_from_gravity(0.0, 0.0, 1.0, z_sign=-1) - 180.0) < 1e-6
+    mt = MotionTracker(z_sign=-1)
+    mt.gx, mt.gy, mt.gz = s, 0.0, -c       # the tracker's property uses its z_sign
+    assert abs(mt.tilt_deg - 40.0) < 1e-3
 
 
-def test_heading_confidence():
-    assert heading_confidence(0.0, 0.0) == 1.0
-    assert abs(heading_confidence(4.0, 0.0) - 0.5) < 1e-9
-    assert abs(heading_confidence(0.0, 20.0) - 0.5) < 1e-9
-    assert heading_confidence(8.0, 20.0) < 0.2
+def test_software_steps_cover_a_chip_outage():
+    """No chip reads for > CHIP_LIVE_MS: the software detector takes over, and
+    the chip delta after the outage is not counted twice."""
+    s = WristSim("walk", 1)
+    mt = MotionTracker(rate_hz=50)
+    t_chip = -1000
+    at = {}
+    while s.step():
+        mt.add_sample(s.t_ms, s.ax, s.ay, s.az)
+        if s.t_ms - t_chip >= 1000:
+            t_chip = s.t_ms
+            if not 10.0 <= s.t < 20.0:                  # chip unreadable 10-20 s
+                mt.set_chip(s.t_ms, steps=500 + int(s.true_steps), act_code=1)
+        for k in (16.0, 19.9):
+            if k not in at and s.t >= k:
+                at[k] = (mt.chip_live, mt.steps)
+        if s.t >= 30.0:
+            break
+    assert not at[16.0][0] and not at[19.9][0]
+    assert at[19.9][1] > at[16.0][1]                    # software steps while the chip is out
+    assert abs(mt.steps - int(s.true_steps)) <= 0.1 * s.true_steps, (mt.steps, s.true_steps)

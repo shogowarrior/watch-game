@@ -1,5 +1,13 @@
 # IMU drift: what the BMA423 can and cannot tell us
 
+Terms (see also the [ui-spec glossary](../design/ui-spec.md#13-glossary)):
+**PDR**, pedestrian dead reckoning: distance from steps × stride, with no
+direction; **ODR**, the sensor's output data rate; **LSB**, one step of the raw
+reading; **%FS**, percent of full scale; **MAPE**, mean absolute percentage
+error; **INS**, an inertial navigation system (integrating accelerometer and
+gyro); **KF**, Kalman filter; **LP-tilt**, gravity estimated with a low-pass
+filter; **σ_b0**, the initial bias uncertainty of the filter.
+
 **Question:** the old `watch movement` notebook double-integrated the accelerometer
 to get position and it ran away. Does a Kalman filter fix that?
 
@@ -19,6 +27,9 @@ node tools/mpy/run.mjs tools/drift_demo.py --seeds 5 --bench   # identical numbe
 ```
 
 ## 1. What went wrong in the notebook
+
+That code is only in git history (`notebooks/watch movement.ipynb` before its
+rewrite on the `hal/` drivers).
 
 * `bma423.get_xyz()` already returns **g** (`range/2047 * raw`). The notebook
   multiplied by 981/1000, as if the values were mg going to cm/s², then labelled
@@ -128,6 +139,15 @@ What the table shows:
 
 ## 5. Recommendation
 
+**What was built.** The BMA423 runs at ±4 g with a 100 Hz FIFO, block-averaged to
+25 Hz for `MotionTracker` (`app/imu_feed.py`). The arrow decays with the σ-cone
+model (`finder/arrow.py`, ui-spec §5.6), not with the half-life decay below,
+which the game does not use (ui-spec §5.6). The
+probe (`WALK TEST`, R-15) is not built. The range filter is `kalman2`
+([bakeoff.md](bakeoff.md)), and the UI shows its trend only through the gate in
+ui-spec §5.5 (`trend_conf` ≥ 0.6). The recommendations below are the reasoning
+behind that.
+
 **Use (on every watch, `finder/motion.py`):**
 
 * `MotionTracker.set_chip(t, steps, act_code)` fed from the BMA423 step counter and
@@ -138,7 +158,8 @@ What the table shows:
 * `add_sample(t, x, y, z)` at 25–50 Hz for `is_still`: sd of |a| over 1 s, with
   hysteresis at 12 mg (enter) and 25 mg (leave). The same call gives gravity, tilt,
   and `face_up` (within 20° of flat to enter, over 30° to leave) for the scan
-  gesture. Configure the BMA423 for **ODR 50 Hz** (the features need it) and
+  gesture. Configure the BMA423 for **ODR ≥ 50 Hz** (the features need it; the
+  game uses 100 Hz) and
   **±4 g** (fast arm moves clip at ±2 g; the resolution cost is irrelevant).
 * Distance walked is `dist_m = steps × stride`. Speed magnitude is
   `step_rate_hz × stride` (`MotionInfo.speed_mps`). Calibrate stride per player
@@ -152,8 +173,8 @@ What the table shows:
 gradient: warmer or colder while the player walks. Any direction hint (the arrow)
 is valid only as long as the player hasn't turned, and the accelerometer can't
 detect turns. So the arrow's confidence **decays with distance walked and time**
-since it was established:
-`heading_confidence(walked_m, elapsed_s) = 0.5^(walked/4 m + elapsed/20 s)`.
+since it was established, for example
+`confidence = 0.5^(walked/4 m + elapsed/20 s)`.
 Show the arrow fading and ask for a fresh "walk a few steps" probe once it drops
 below about 0.3.
 

@@ -9,8 +9,8 @@ DEFAULT = "kalman2"
 NAMES = ("ema", "median_ema", "kalman1d", "kalman2", "particle")
 
 
-def make(name=None, **kw):
-    """New ``finder.estimators.<name>.Estimator(**kw)``; ``name`` defaults to DEFAULT."""
+def cls(name=None):
+    """``finder.estimators.<name>.Estimator`` class; ``name`` defaults to DEFAULT."""
     name = name or DEFAULT
     if "." in name or name.startswith("_") or name == "base":
         raise ValueError("bad estimator name: " + name)
@@ -18,4 +18,9 @@ def make(name=None, **kw):
     mod = __import__(full)
     for part in full.split(".")[1:]:
         mod = getattr(mod, part)
-    return mod.Estimator(**kw)
+    return mod.Estimator
+
+
+def make(name=None, **kw):
+    """New ``finder.estimators.<name>.Estimator(**kw)``; ``name`` defaults to DEFAULT."""
+    return cls(name)(**kw)

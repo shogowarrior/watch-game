@@ -15,5 +15,6 @@ def install():
     sys.modules["network"] = network
     sys.modules["espnow"] = espnow
     machine.reset_fakes()
+    network.reset_fakes()
     espnow.reset_fakes()
     return machine

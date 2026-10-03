@@ -1,8 +1,10 @@
 """Fake of MicroPython's ``espnow`` module with an in-memory air interface.
 
-Packets sent by any FakeESPNow instance are delivered to every other active
+Packets sent by any ESPNow instance are delivered to every other active
 instance; tests can also inject packets with ``inject(inst, mac, msg, rssi)``.
 """
+
+from tests.fakes import network as _net
 
 MAX_DATA_LEN = 250
 _instances = []
@@ -20,7 +22,8 @@ class ESPNow:
         self.peers = []
         self.cfg = {}
         self.rx = []  # list of (mac, msg, rssi, t_ms)
-        self.mac = b"\x24\x0a\xc4\x00\x00" + bytes([len(_instances) + 1])
+        # sender address = this device's STA MAC, as on the watch (radio.mac)
+        self.mac = _net.mac[0] or b"\x24\x0a\xc4\x00\x00" + bytes([len(_instances) + 1])
         _instances.append(self)
 
     def active(self, a=None):

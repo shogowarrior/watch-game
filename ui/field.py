@@ -1,11 +1,12 @@
 """RippleField: ring-index map, ramp LUTs and the per-frame palette (ui-spec §4).
 
-The background is a GS8 ring-index map (idx = min(169, floor(hypot(x-119.5,
-y-119.5)))) blitted through a 256x1 RGB565 palette, so every radial effect
-(glow, rings, iris, vignette, crossfades) is a rebuild of palette entries
-0..169. The hot paths here are integer-only (Q8 levels: 256 = one ramp
-step, Q8 radii) so a frame allocates nothing on MicroPython, where floats
-are heap objects. Floats are used only at import and a few per frame.
+The background is a GS8 ring-index map (idx = floor(hypot(x-119.5,
+y-119.5)), at most 168 at the corners) blitted through a 256x1 RGB565
+palette, so every radial effect (glow, rings, iris, vignette, crossfades) is
+a rebuild of palette entries 0..169. The hot paths here are integer-only
+(Q8 levels: 256 = one ramp step, Q8 radii) so a frame allocates nothing on
+MicroPython, where floats are heap objects. Floats are used only at import
+and a few per frame.
 
 Pure Python except the optional FrameBuffers, so the maths also runs on
 CPython (framebuf is MicroPython-only).
@@ -14,8 +15,9 @@ CPython (framebuf is MicroPython-only).
 import array
 import math
 
-from finder.compat import const, ticks_diff
-from ui import BG_IRIS, RAMP_HEX, swap16
+from finder import tuning as T
+from finder.compat import const, ticks_add, ticks_diff
+from ui import BG_IRIS, swap16
 
 try:
     import framebuf
@@ -23,7 +25,7 @@ except ImportError:  # CPython: palette maths only
     framebuf = None
 
 W = const(240)
-N_IDX = const(170)          # ring indices 0..169 (corner = 169)
+N_IDX = const(170)          # ring indices 0..169 (the map's max is 168, the corner)
 LUT_N = const(64)
 MAXR = const(12)            # ring slots
 Q8 = const(256)
@@ -31,49 +33,49 @@ V7 = const(1792)            # level 7 in Q8
 
 
 # ---- tables (import time) ---------------------------------------------------
-def _snap(c8, bits):
-    m = (1 << bits) - 1
-    return (c8 * m + 127) // 255
+def q8(x):
+    """Token level or scale (float) -> Q8 int, for import-time constants."""
+    return int(x * Q8 + 0.5)
 
 
-def lut_entry(stops, j):
-    """Snapped 8-bit (r, g, b) of LUT[j]: linear 8-bit sRGB between stops
-    (position j/63*7 = j/9), rounded half up, then snapped to RGB565 and
-    bit-replicated back to 8 bits."""
-    k = j // 9
-    f = j - k * 9
-    a = stops[k]
-    b = stops[k + 1] if k < 7 else a
-    out = []
-    for sh, bits in ((16, 5), (8, 6), (0, 5)):
-        ca = (a >> sh) & 0xFF
-        cb = (b >> sh) & 0xFF
-        c = (ca * (9 - f) * 2 + cb * f * 2 + 9) // 18
-        s = _snap(c, bits)
-        out.append((s << (8 - bits)) | (s >> (2 * bits - 8)))
-    return out[0], out[1], out[2]
-
-
-def pack_sw(r, g, b):
-    """8-bit rgb (already 565-exact or not) -> byte-swapped RGB565."""
-    return swap16(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
+# Level tokens in Q8 (finder/tuning.py). Plain globals: const() takes literals only.
+FL_A = q8(T.FLOOR_A)                     # floor = A + B*I (§4 rule 1)
+FL_B = q8(T.FLOOR_B)
+GL_A = q8(T.GLOW_AMP_A)                  # glow_amp = A + B*I
+GL_B = q8(T.GLOW_AMP_B)
+PU_A = q8(T.PULSE_AMP_A)                 # pulse_amp = A + B*I
+PU_B = q8(T.PULSE_AMP_B)
+GHOST_AMP = q8(T.GHOST_AMP_SCALE)        # ghost ring: 0.6 x pulse_amp (§4 rule 5)
+AA_K = q8(T.TEMPORAL_AA_K)               # lead_eff = max(lead, K*|v|/fps) (§4 rule 3)
+RIM_MIN = q8(T.IRIS_RIM_MIN_LEVEL)       # iris rim level >= 5 (§2)
+FLASH_Q8 = T.FLASH_LIMIT_STEPS * Q8      # <= 2 steps per FLASH_LIMIT_MS (§4, §11)
+SB_A = q8(T.STANDING_BREATHE[0])         # standing wave breathes 0.6 + 0.4 sin
+SB_B = q8(T.STANDING_BREATHE[1])
+# what FOUND shows: the standing wave's mean level, 2.0 + 2.5*0.5*0.6
+STAND_MEAN = q8(T.STANDING_BASE + T.STANDING_AMP * 0.5 * T.STANDING_BREATHE[0])
+FILL_V = const(1024)        # PAIRING calibrate fill: level 4, its edge 1.5x = level 6 (§6)
 
 
 class Lut:
-    """64-entry ramp LUT: ``c`` = swapped RGB565, ``r/g/b`` = snapped 8-bit."""
+    """64-entry ramp LUT: ``c`` = swapped RGB565, ``r/g/b`` = 8-bit channels
+    (bit-replicated from the 565 value), for the hue crossfade mix."""
 
-    def __init__(self, stops=None, c=None):
+    def __init__(self, lut=None, c=None):
         self.c = array.array("H", [0] * LUT_N) if c is None else c
         self.r = bytearray(LUT_N)
         self.g = bytearray(LUT_N)
         self.b = bytearray(LUT_N)
-        if stops is not None:
+        if lut is not None:
             for j in range(LUT_N):
-                r, g, b = lut_entry(stops, j)
-                self.r[j] = r
-                self.g[j] = g
-                self.b[j] = b
-                self.c[j] = pack_sw(r, g, b)
+                v = lut[j]
+                self.c[j] = v
+                n = swap16(v)
+                r5 = n >> 11
+                g6 = (n >> 5) & 63
+                b5 = n & 31
+                self.r[j] = (r5 << 3) | (r5 >> 2)
+                self.g[j] = (g6 << 2) | (g6 >> 4)
+                self.b[j] = (b5 << 3) | (b5 >> 2)
 
     def copy_from(self, o):
         for j in range(LUT_N):
@@ -83,10 +85,10 @@ class Lut:
             self.c[j] = o.c[j]
 
 
-LUTS = {name: Lut(stops) for name, stops in RAMP_HEX.items()}
+LUTS = {name: Lut(T.RAMP_LUT[name]) for name in T.RAMP_NAMES}
 
 # Vignette (tokens.field.vignette_stops), Q8 per ring index.
-VIG_STOPS = ((0, 1.0), (88, 1.0), (120, 0.4), (168, 0.15))
+VIG_STOPS = T.VIGNETTE_STOPS
 
 
 def _vig(i):
@@ -119,8 +121,7 @@ COS = array.array("h", [int(round(16384 * math.cos(math.radians(d)))) for d in r
 EASE_IOC = array.array("h", [int(256 * (4 * t ** 3 if t < 0.5 else 1 - (-2 * t + 2) ** 3 / 2) + 0.5)
                              for t in [k / 64.0 for k in range(65)]])
 EASE_OC = array.array("h", [int(256 * (1 - (1 - k / 64.0) ** 3) + 0.5) for k in range(65)])
-EASE_SINE = array.array("h", [int(256 * (-(math.cos(math.pi * k / 64.0) - 1) / 2) + 0.5)
-                              for k in range(65)])
+EASE_IC = array.array("h", [int(256 * (k / 64.0) ** 3 + 0.5) for k in range(65)])
 
 
 def ease(tab, age, dur):
@@ -132,14 +133,16 @@ def ease(tab, age, dur):
     return tab[(age << 6) // dur]
 
 
-
 # ---- palette kernel -----------------------------------------------------------
-# One fused pass over ring indices 0..169: base (floor + halo glow, or the FOUND
-# standing wave) + ring accumulators, vignette, core dot / calibrate fill / iris
-# and rim, level cap, menu dim, LUT lookup, ghost channel. It also clears the
-# accumulators for the next frame. The same source is compiled with
-# @micropython.viper where the port supports it (the ESP32 build) and as plain
-# Python otherwise (CPython, the wasm port), via identity pointer shims.
+# One fused pass over ring indices 0..169: base (floor + halo glow, blended
+# toward the FOUND standing wave by its weight) + ring accumulators, vignette,
+# core dot / calibrate fill / iris and rim, level cap, menu dim, LUT lookup,
+# ghost channel. It also clears the accumulators for the next frame. The same
+# source is compiled with @micropython.viper where the port supports it (the
+# ESP32 build) and as plain Python otherwise (CPython, the wasm port), via
+# identity pointer shims. Literals in it are tokens: the standing wave 2.0 +
+# 2.5*cos32 (512, 640, wavelength 32) and the core dot r 6 (test_renderer
+# checks them against finder/tuning.py).
 #
 # tab (array 'H'): VIG @0 (170) | EXPT @170 (256) | COS32 @426 (32) |
 #                  mixed LUT @458 (64) | grey LUT @522 (64)
@@ -154,7 +157,7 @@ P_IRIS = const(0)
 P_RIM_HI = const(1)
 P_FILL_R = const(2)
 P_FILL_HI = const(3)
-P_CORE = const(4)
+P_CORE = const(4)       # core dot floor level (0 = off)
 P_FL = const(5)
 P_GL = const(6)
 P_GINV = const(7)
@@ -162,12 +165,13 @@ P_VMAX = const(8)
 P_DIM = const(9)
 P_LIFT = const(10)
 P_RIM = const(11)
-P_STAND = const(12)
+P_STAND_W = const(12)   # standing-wave weight, Q8 0..256
 P_GHOST = const(13)
 P_IRISC = const(14)
 P_RIMQ = const(15)
 P_SB = const(16)
-P_N = const(17)
+P_FILL_V = const(17)    # calibrate fill floor level (0 = off)
+P_N = const(18)
 
 _KSRC = """
 def pal_kernel(pal, acc, tab, prm):
@@ -187,11 +191,13 @@ def pal_kernel(pal, acc, tab, prm):
     dim = qp[9]
     lift = qp[10]
     rim = qp[11]
-    standing = qp[12]
+    sw = qp[12]
     gh = qp[13]
     irisc = qp[14]
     rim_q = qp[15]
     sb = qp[16]
+    fill_v = qp[17]
+    fill_e = fill_v + (fill_v >> 1)
     i = 0
     while i < 170:
         a = ap[i]
@@ -209,24 +215,23 @@ def pal_kernel(pal, acc, tab, prm):
                 continue
             v = rim_q
         else:
-            if standing:
-                base = 512 + ((((640 * tp[426 + (i & 31)]) >> 8) * sb) >> 8)
-            else:
-                n = ((i - iris) * ginv) >> 8
-                if n > 255:
-                    n = 255
-                base = fl + ((gl * tp[170 + n]) >> 8)
+            n = ((i - iris) * ginv) >> 8
+            if n > 255:
+                n = 255
+            base = fl + ((gl * tp[170 + n]) >> 8)
+            if sw:
+                st = 512 + ((((640 * tp[426 + (i & 31)]) >> 8) * sb) >> 8)
+                base += ((st - base) * sw) >> 8
             v = ((base + a) * tp[i]) >> 8
-            if core:
-                if i <= 6:
-                    if v < 1536:
-                        v = 1536
+            if i <= 6:
+                if v < core:
+                    v = core
             if i < fill_hi:
                 if i < fill_r:
-                    if v < 1024:
-                        v = 1024
-                elif v < 1536:
-                    v = 1536
+                    if v < fill_v:
+                        v = fill_v
+                elif v < fill_e:
+                    v = fill_e
         if v > vmax:
             v = vmax
         vd = v
@@ -243,7 +248,7 @@ def pal_kernel(pal, acc, tab, prm):
             if g > v:
                 if dim != 256:
                     g = (g * dim) >> 8
-                j = (g * 9 + 128) >> 8
+                j = ((g * 9 + 128) >> 8) + lift
                 if j > 63:
                     j = 63
                 c = tp[522 + j]
@@ -272,11 +277,14 @@ def _compile_kernel():
     return vs["pal_kernel"], "viper"
 
 
-# Self-check frames: rings + ghosts + fill + core with a ramp rim, then the
-# FOUND standing wave with a colour rim and the menu dim.
+# Self-check frames: rings + ghosts + fill with a ramp rim; a half-faded fill
+# and the FOUND standing wave part-blended, with a colour rim and the menu
+# dim; the iris closed, so the core dot is drawn, and floor and glow 0, so
+# the ghosts win (dimmed and lifted).
 CHECK_PRMS = (
-    (30, 33, 90, 93, 1, 300, 900, 900, 1600, 200, 2, -1, 0, 1, 0x6100, 1400, 200),
-    (40, 43, 0, 0, 0, 300, 900, 900, 1792, 128, 0, 0x1234, 1, 1, 0x6100, 1400, 97),
+    (30, 33, 90, 93, 1536, 300, 900, 900, 1600, 200, 2, -1, 0, 1, 0x6100, 1400, 200, 1024),
+    (40, 43, 100, 103, 0, 300, 900, 900, 1792, 128, 0, 0x1234, 160, 1, 0x6100, 1400, 97, 512),
+    (0, 0, 0, 0, 1536, 0, 0, 900, 1792, 200, 1, -1, 0, 1, 0x6100, 1400, 97, 0),
 )
 
 
@@ -319,18 +327,12 @@ def build_map(rows):
             d = dx * dx + dy2
             while (2 * k + 2) * (2 * k + 2) <= d:
                 k += 1
-            v = k if k < 169 else 169
-            buf[base + x] = v
-            buf[base + 239 - x] = v
+            buf[base + x] = k              # k <= 168 (the corner)
+            buf[base + 239 - x] = k
     for y in range(120, rows):             # mirror rows for the full map
         s = (239 - y) * W
         buf[y * W:(y + 1) * W] = buf[s:s + W]
     return buf
-
-
-def ring_index(x, y):
-    """Reference float formula (tests)."""
-    return min(169, int(math.floor(math.sqrt((x - 119.5) ** 2 + (y - 119.5) ** 2))))
 
 
 class RingMap:
@@ -370,12 +372,14 @@ class RingMap:
 
 # ---- screen tables ----------------------------------------------------------
 # lead / trail px per zone (thresholds.zone_tempo; FAR..HOT)
-ZONE_LEAD = (3, 3, 3, 3)
-ZONE_TRAIL = (22, 20, 18, 14)
+ZONE_LEAD = T.ZONE_LEAD_PX
+ZONE_TRAIL = T.ZONE_TRAIL_PX
 
 
 class RippleField:
-    """Ring state + palette builder. ``step()`` once per frame, then ``build()``."""
+    """Ring state, level and palette state. Per frame: ``tick()``, then the
+    ``set_*`` targets, ``schedule()`` (or ``idle()``), ``cull()``; ``build()``
+    on drawn frames."""
 
     def __init__(self):
         self.pal_arr = array.array("H", [0] * 256)
@@ -405,17 +409,13 @@ class RippleField:
         # LUT mixing (hue crossfade)
         self.mix = Lut(c=memoryview(self.tab)[T_LUT:T_LUT + LUT_N])
         self.frm = Lut()
-        self.mix.copy_from(LUTS["green"])
-        self.ramp = "green"
-        self.ramp_to = LUTS["green"]
-        self.ramp_t0 = 0
-        self.ramp_dur = 0
         self.reset()
 
     def reset(self):
         self.mix.copy_from(LUTS["green"])
         self.ramp = "green"
         self.ramp_to = LUTS["green"]
+        self.ramp_t0 = 0
         self.ramp_dur = 0
         for k in range(MAXR):
             self.r_on[k] = 0
@@ -425,22 +425,54 @@ class RippleField:
         self.period = 0
         self.spawns = 0
         self.dt = 50                 # smoothed frame interval, ms
+        self.flash = 0               # flash-limit level slew per frame, Q8
         self.t = 0
         # displayed levels (Q8) and crossfade snapshot
-        self.fl = 77
-        self.gl = 512
-        self.pu = 1024
+        self.fl = FL_A
+        self.gl = GL_A
+        self.pu = PU_A
         self.gr = 20 * Q8
         self.xf = (0, 0, 0, 0)
         self.xf_on = False           # crossfade running (xf_t0 read only then)
         self.xf_t0 = 0
         self.dim = 256
+        self.fill_r = 0              # calibrate fill radius, px
+        self.fill_v = 0              # its floor level, Q8 (0 = off)
+        self.stand_w = 0             # FOUND standing-wave weight, Q8
         self.iris = 0
         self.iris_from = 0
         self.iris_to = 0
         self.iris_on = False         # iris tween running (iris_t0 read only then)
         self.iris_t0 = 0
         self.ghosts = 0
+        self.stand_t0 = 0            # standing-wave breathing clock (MENU holds it)
+
+    # ---- clocks ------------------------------------------------------------
+    def tick(self, t, fps_cap):
+        """Move the frame clock to ``t``: smoothed frame interval ``dt`` and
+        the flash-limit slew ``flash`` per frame. Returns the previous t."""
+        if self.started:
+            dt = ticks_diff(t, self.t)
+            dt = 1 if dt < 1 else (250 if dt > 250 else dt)
+            self.dt = (self.dt * 3 + dt) >> 2
+        else:
+            self.dt = 1000 // (fps_cap or T.FPS_TARGET)
+        self.flash = (FLASH_Q8 * self.dt) // T.FLASH_LIMIT_MS + 1
+        prev = self.t
+        self.t = t
+        return prev
+
+    def hold(self, dt):
+        """MENU: freeze rings, the ring schedule, crossfades, the iris and the
+        standing-wave breathing by shifting their clocks ``dt`` ms (wrap-safe)."""
+        for k in range(MAXR):
+            self.r_t0[k] = ticks_add(self.r_t0[k], dt)
+        self.next_spawn = ticks_add(self.next_spawn, dt)
+        self.last_spawn = ticks_add(self.last_spawn, dt)
+        self.xf_t0 = ticks_add(self.xf_t0, dt)
+        self.iris_t0 = ticks_add(self.iris_t0, dt)
+        self.ramp_t0 = ticks_add(self.ramp_t0, dt)
+        self.stand_t0 = ticks_add(self.stand_t0, dt)
 
     # ---- ring bookkeeping --------------------------------------------------
     def spawn(self, t0, r0q, v, amp, lead, trail, ghost):
@@ -467,13 +499,55 @@ class RippleField:
         self.r_trail[k] = trail
         return k
 
+    def schedule(self, t, period, r0q, v, lead, trail, live, first):
+        """Spawn the ring due by ``t`` (one per ``period`` ms; a ghost at
+        0.6 x pulse_amp unless ``live``). ``first``: place rings already
+        mid-flight, so a wake shows no intro. Returns 1 when a live ring
+        spawned this frame (its heartbeat is due)."""
+        if period != self.period:
+            if self.period and not first:
+                ago = ticks_diff(t, self.last_spawn)
+                if 0 <= ago < self.period:        # recent spawn: re-time the next
+                    nxt = ticks_add(self.last_spawn, period)
+                    if ticks_diff(nxt, self.next_spawn) < 0:
+                        self.next_spawn = nxt
+            self.period = period
+        amp = self.pu if live else (self.pu * GHOST_AMP) >> 8
+        if first:
+            for k in range(1, 8):
+                age = k * period
+                r = r0q + (v * age * 256) // 1000
+                if (v > 0 and r > (170 + trail) * Q8) or (v < 0 and r < self.iris_to * Q8):
+                    break
+                self.last_spawn = ticks_add(t, -age)
+                self.spawn(self.last_spawn, r0q, v, amp, lead, trail, not live)
+            self.next_spawn = t
+        lag = ticks_diff(t, self.next_spawn)
+        if lag < 0:
+            return 0
+        if lag >= period:                          # frames were skipped
+            self.next_spawn = ticks_add(t, -(lag % period))
+        t0 = self.next_spawn
+        self.spawn(t0, r0q, v, amp, lead, trail, not live)
+        self.last_spawn = t0
+        self.next_spawn = ticks_add(t0, period)
+        if not live:
+            return 0
+        self.spawns += 1
+        return 1
+
+    def idle(self, t):
+        """No ring schedule this frame: the next scheduled frame spawns at once."""
+        self.next_spawn = t
+
     def ring_r(self, k, t):
         """Ring k radius at t, Q8 px (fractional: temporal AA needs it)."""
         va = self.r_v[k] * ticks_diff(t, self.r_t0[k])
         q = va // 1000                   # split so no product leaves small-int range
         return self.r_r0[k] + (q << 8) + (((va - q * 1000) << 8) // 1000)
 
-    def _cull(self, t):
+    def cull(self, t):
+        """Drop rings that have left the field; note whether ghosts remain."""
         ir = self.iris * Q8
         g = 0
         for k in range(MAXR):
@@ -530,7 +604,7 @@ class RippleField:
             self.xf_t0 = t
             self.xf_on = True
         if self.xf_on:
-            e = ease(EASE_IOC, ticks_diff(t, self.xf_t0), 600)
+            e = ease(EASE_IOC, ticks_diff(t, self.xf_t0), T.ZONE_CROSSFADE_MS)
             if e >= 256:
                 self.xf_on = False       # never compare a stale t0 again
         else:
@@ -541,8 +615,8 @@ class RippleField:
             gl = x[1] + (((gl - x[1]) * e) >> 8)
             pu = x[2] + (((pu - x[2]) * e) >> 8)
             gr = x[3] + (((gr - x[3]) * e) >> 8)
-        # flash limit: full-field floor moves <= 2 steps / 333 ms
-        step = (1536 * self.dt) // 1000 + 1
+        # flash limit: the full-field floor moves <= 2 steps / 333 ms
+        step = self.flash
         d = fl - self.fl
         if self.started:
             if d > step:
@@ -554,6 +628,27 @@ class RippleField:
         self.pu = pu
         self.gr = gr if gr > 2 * Q8 else 2 * Q8
 
+    def set_fill(self, on, r):
+        """PAIRING calibrate fill disc (§6): floor level 4 inside ``r`` px
+        while ``on``. When it ends it fades out at its last radius at the
+        flash-limit rate instead of dropping the whole field in one frame."""
+        if on:
+            self.fill_r = r
+            self.fill_v = FILL_V
+        elif self.fill_v:
+            v = self.fill_v - self.flash
+            self.fill_v = v if v > 0 else 0
+
+    def set_stand(self, on):
+        """FOUND standing-wave weight: crossfades with the 600 ms state
+        crossfade (§4), from and to the levels set_levels shows."""
+        if not self.started:
+            self.stand_w = Q8 if on else 0
+            return
+        step = (Q8 * self.dt) // T.ZONE_CROSSFADE_MS + 1
+        w = self.stand_w + (step if on else -step)
+        self.stand_w = Q8 if w > Q8 else (w if w > 0 else 0)
+
     def set_iris(self, t, r):
         if r != self.iris_to:
             self.iris_from = self.iris
@@ -563,27 +658,25 @@ class RippleField:
         if not self.iris_on:
             self.iris = self.iris_to
             return
-        e = ease(EASE_OC, ticks_diff(t, self.iris_t0), 300)
+        e = ease(EASE_OC, ticks_diff(t, self.iris_t0), T.IRIS_ANIM_MS)
         if e >= 256:
             self.iris_on = False
         self.iris = self.iris_from + (((self.iris_to - self.iris_from) * e) >> 8)
 
     def set_dim(self, target):
-        """Menu dim, slewed at 128/600 ms (under the flash limit)."""
-        step = (128 * self.dt) // 600 + 1
+        """Menu dim, slewed at 128 per 600 ms crossfade (under the flash limit)."""
+        step = (128 * self.dt) // T.ZONE_CROSSFADE_MS + 1
         d = target - self.dim
         self.dim = target if -step <= d <= step else self.dim + (step if d > 0 else -step)
 
     # ---- palette -----------------------------------------------------------
-    def build(self, t, core=False, rim=-1, fill_r=0, standing=False,
-              vmax=V7, lift=0):
+    def build(self, t, core=0, rim=-1, vmax=V7, lift=0):
         """Rebuild palette entries 0..169 for time t.
 
-        core: iris-closed sun floor (indices 0..6 >= level 6).
+        core: core-dot floor level (Q8, 0 = off) for indices 0..6.
         rim: -1 = ramp-coloured rim, else a swapped RGB565 rim colour.
-        fill_r: PAIRING calibrate fill radius (px, 0 = off).
-        standing: FOUND standing wave instead of floor + glow.
         vmax: level cap (Q8; saver = 5). lift: LUT index lift (sun mode).
+        The calibrate fill and the standing wave come from set_fill/set_stand.
         """
         self._mix_ramp(t)
         acc = self._acc
@@ -596,7 +689,7 @@ class RippleField:
             v = self.r_v[k]
             av = v if v > 0 else -v
             lead = self.r_lead[k] * Q8
-            aa = (384 * av * dt) // 1000             # 1.5*|v|/fps, Q8 px
+            aa = (AA_K * av * dt) // 1000            # 1.5*|v|/fps, Q8 px
             if aa > lead:
                 lead = aa
             trail = self.r_trail[k] * Q8
@@ -609,7 +702,7 @@ class RippleField:
             dist = rq - self.r_r0[k]
             if dist < 0:
                 dist = -dist
-            fade = dist // 12                          # 12 px fade-in, Q8
+            fade = dist // T.FADEIN_PX                 # 12 px fade-in, Q8
             if fade > 256:
                 fade = 256
             w = (self.r_amp[k] * fade) >> 8
@@ -648,14 +741,15 @@ class RippleField:
         rim_q = self.fl + self.gl
         if rim_q > V7:
             rim_q = V7
-        if rim_q < 1280:
-            rim_q = 1280
+        if rim_q < RIM_MIN:
+            rim_q = RIM_MIN
+        fr = self.fill_r if self.fill_v else 0
         q = self.prm
         q[P_IRIS] = iris
-        q[P_RIM_HI] = iris + 3 if iris > 0 else 0
-        q[P_FILL_R] = fill_r
-        q[P_FILL_HI] = fill_r + 3 if fill_r > 0 else 0
-        q[P_CORE] = 1 if core else 0
+        q[P_RIM_HI] = iris + T.IRIS_RIM_PX if iris > 0 else 0
+        q[P_FILL_R] = fr
+        q[P_FILL_HI] = fr + 3 if fr > 0 else 0
+        q[P_CORE] = core
         q[P_FL] = self.fl
         q[P_GL] = self.gl
         q[P_GINV] = (64 * Q8 * Q8) // self.gr
@@ -663,9 +757,11 @@ class RippleField:
         q[P_DIM] = self.dim
         q[P_LIFT] = lift
         q[P_RIM] = rim
-        q[P_STAND] = 1 if standing else 0
+        q[P_STAND_W] = self.stand_w
         q[P_GHOST] = self.ghosts
         q[P_IRISC] = BG_IRIS
         q[P_RIMQ] = rim_q
-        q[P_SB] = 154 + ((102 * SIN[(t % 2400) * 360 // 2400]) >> 14)   # 0.6+0.4 sin
+        ph = ticks_diff(t, self.stand_t0) % T.STANDING_PERIOD_MS
+        q[P_SB] = SB_A + ((SB_B * SIN[ph * 360 // T.STANDING_PERIOD_MS]) >> 14)
+        q[P_FILL_V] = self.fill_v
         pal_kernel(self.pal_arr, acc, self.tab, q)

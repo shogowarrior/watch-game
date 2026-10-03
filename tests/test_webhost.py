@@ -10,14 +10,18 @@ import json
 import math
 import sys
 
-from sim.webhost import TwoWatchSim, heading_to_world, heading_to_page, AUTO_SPLIT_S
+from sim.webhost import TwoWatchSim, heading_to_world, heading_to_page, AUTO_SPLIT_S, TILT_TILTED
 from sim.world import PI
 from finder import arrow as A
+from finder import scan as S
+from finder import tuning as T
+from finder.haptic_patterns import TOTAL_MS, HB_RESUME_MS
+from tests import Skip
 
 MPY = sys.implementation.name == "micropython"
 KEYS = ("screen", "sub", "zone", "band", "true_dist_m", "est_dist_m", "rssi_last", "rssi_f",
-        "trend", "arrow_deg", "cone_deg", "true_bearing_rel_deg", "in_cone", "pkts_per_s",
-        "haptic", "steps", "place")
+        "trend", "arrow_deg", "cone_deg", "true_bearing_rel_deg", "in_cone", "cone_ms",
+        "cone_hit_pct", "pkts_per_s", "haptic", "steps", "backlight", "place")
 
 
 def _sample(buf):
@@ -163,6 +167,15 @@ def test_telemetry_keys_and_json():
     ws = s.world_state()
     assert ws["walkers"][0]["x"] == 0.0 and ws["walls"] == []
     assert s.telemetry(0)["pkts_per_s"] >= 5
+    assert s.telemetry(0)["cone_ms"] == 0 and s.telemetry(0)["cone_hit_pct"] is None
+
+
+def test_constants_json_follows_tuning():
+    k = json.loads(TwoWatchSim().constants_json())
+    assert k["enter_m"] == list(T.ZONE_ENTER_M) and k["exit_m"] == list(T.ZONE_EXIT_M), k
+    assert k["dwell_ms"] == list(T.ZONE_DWELL_MS) and k["lost_ms"] == T.LINK_LOST_AFTER_MS
+    assert k["menu_close_ms"] == T.MENU_AUTOCLOSE_MS and k["band_edges_m"] == list(T.BAND_EDGES_M)
+    assert k["split_s"] == T.PAIR_SPLIT_S and k["haptic_ms"] == TOTAL_MS, k
 
 
 def test_swipe_scrolls_the_menu_and_place_shows_in_telemetry():
@@ -173,15 +186,15 @@ def test_swipe_scrolls_the_menu_and_place_shows_in_telemetry():
     assert s.telemetry(0)["place"] == "OUT" and not g.indoor      # typical: outdoors
     s.long_press(0)
     s.step(100)
-    assert g.menu_open and g.menu_top == 0
+    assert g.menu_open and g.menu.top == 0
     s.swipe(0, True)                         # up: rows below come into view
     s.step(100)
-    assert g.menu_top == 1 and s.telemetry(0)["sub"] == "0^"
+    assert g.menu.top == 1 and s.telemetry(0)["sub"] == "0^"
     for _ in range(20):
         s.step(50)                           # (touch burst filter: 3 touches in 1 s)
     s.swipe(0, False)
     s.step(100)
-    assert g.menu_top == 0
+    assert g.menu.top == 0
     # the radio profile sets PLACE on both watches; a menu choice holds until the next change
     s.set_profile("indoor")
     assert s.telemetry(0)["place"] == "IN" and s.telemetry(1)["place"] == "IN"
@@ -189,6 +202,48 @@ def test_swipe_scrolls_the_menu_and_place_shows_in_telemetry():
     assert s.telemetry(0)["place"] == "OUT" and s.telemetry(1)["place"] == "IN"
     s.set_profile("clean")
     assert s.telemetry(0)["place"] == "OUT" and s.telemetry(1)["place"] == "OUT"
+
+
+def test_page_touches_feed_the_burst_filter():
+    # each page gesture lands a finger first (Game.on_touch_down), as on the watch
+    s = TwoWatchSim()
+    for _ in range(20):
+        s.step(50)
+    g = s.games[0]
+    assert g.screen_on and g._touch_block is None
+    for _ in range(3):
+        s.swipe(0, True)
+        s.step(100)
+    assert g._touch_block is not None              # 3 touch-downs in 1 s: rain/sleeve
+
+
+def test_auto_confirm_waits_for_an_open_menu():
+    s = TwoWatchSim()
+    g = s.games[0]
+    assert _run_until(s, lambda s: g.pair.sub == "seen", 3000)
+    s.long_press(0)                          # menu opens while A is in SEEN
+    for _ in range(12):
+        s.step(100)
+        # auto-confirm does not press into the menu: the cursor stays on RESUME, A waits in SEEN
+        assert g.menu_open and g.menu.sel == 0 and g.pair.sub == "seen", (g.menu.sel, g.pair.sub)
+    assert _run_until(s, lambda s: not g.menu_open, 10000)        # the menu closes on its own
+    assert g.mode == "PAIRING" and g.pair.sub == "seen"
+    assert _run_until(s, lambda s: s.games[0].mode != "PAIRING" and s.games[1].mode != "PAIRING",
+                      20000)
+
+
+def test_manual_pairing_without_auto_pair():
+    s = TwoWatchSim()
+    s.auto_pair = False
+    s.set_pose(1, 1.0, 0.0, 270.0)            # B 1 m east of A, face to face
+
+    def both(sub):
+        return lambda s: s.games[0].pair.sub == sub and s.games[1].pair.sub == sub
+    assert _run_until(s, both("seen"), 3000)
+    s.button(0)                               # both players confirm the runes
+    s.button(1)
+    assert _run_until(s, both("split"), 15000)
+    assert max(p.countdown for p in s._params) > AUTO_SPLIT_S     # the full split, not the demo cut
 
 
 def test_auto_pair_starts_quickly():
@@ -208,6 +263,9 @@ def test_auto_pair_starts_quickly():
     # the proxy pairing never leaks 1 m packets: nobody opens HOT 36 m away
     for g in s.games:
         assert g.px.zone != 3, g.px.zone
+    p0 = s.sim.radio.p0_link
+    for k in (0, 1):                      # both 1 m calibrations finish on the proxy (held split/calibrate)
+        assert abs(s.games[k].pair.p1m - p0[k]) <= 1.0, (k, s.games[k].pair.p1m, p0[k])
 
 
 def test_auto_turn_rotates_during_scan():
@@ -222,11 +280,21 @@ def test_auto_turn_rotates_during_scan():
     turned = (h0 - s.world.a.heading) % (2 * PI) * 180.0 / PI
     assert 45.0 <= turned <= 75.0, turned                  # ~60 deg clockwise
     assert s.world.b.heading == math.atan2(-10.0, -35.0)   # B is not scanning
-    s.auto_turn = False
+    assert TILT_TILTED > S.TILT_FAULT_DEG
+    s.set_posture(0, "tilted")                             # the page's 'tilted 50°' pauses the sweep
+    assert _run_until(s, lambda s: s.games[0].scan.paused, 2000)
     h1 = s.world.a.heading
+    for _ in range(10):
+        s.step(50)
+    assert s.games[0].scan.sub == "sweep" and s.games[0].scan.paused
+    assert s.world.a.heading == h1                         # auto-turn holds while paused
+    s.set_posture(0, "flat")
+    assert _run_until(s, lambda s: not s.games[0].scan.paused, 2000)
+    s.auto_turn = False
+    h2 = s.world.a.heading
     for _ in range(20):
         s.step(50)
-    assert s.world.a.heading == h1
+    assert s.games[0].scan.sub == "sweep" and s.world.a.heading == h2
 
 
 def test_auto_turn_follows_the_pacer():
@@ -238,6 +306,57 @@ def test_auto_turn_follows_the_pacer():
     assert _run_until(s, lambda s: g.arrow is None or g.arrow.phase in ("lock", "walk"), 10000)
     turned = (h0 - s.world.a.heading) % (2 * PI) * 180.0 / PI
     assert 75.0 <= turned <= 100.0, turned
+    t = s.telemetry(0)                     # truth overlay: B is ~16 deg left, the arrow 90 right
+    assert t["cone_ms"] > 0 and t["cone_hit_pct"] == 0 and t["in_cone"] is False, t
+    g.arrow = A.make(170.0, 15.0, s.t_ms)                # a long turn, cut by a link loss
+    h0 = s.world.a.heading
+    b = (s.world.b.x, s.world.b.y)
+    assert _run_until(s, lambda s: g.arrow.phase == A.PH_TURN, 3000)
+    s.set_pose(1, 600.0, 0.0)
+    assert _run_until(s, lambda s: g.mode == "LINK_LOST", 10000) and g.arrow.phase == A.PH_TURN
+    s.set_pose(1, b[0], b[1])
+    assert _run_until(s, lambda s: g.arrow is None or g.arrow.phase in ("lock", "walk"), 20000)
+    turned = (h0 - s.world.a.heading) % (2 * PI) * 180.0 / PI
+    assert 155.0 <= turned <= 185.0, turned               # the relinked pacer is not counted twice
+
+
+def test_cone_score_follows_the_true_bearing():
+    # truth overlay: an arrow at the true bearing scores inside, its mirror image outside
+    for mirror, ok in ((False, True), (True, False)):
+        s = TwoWatchSim()
+        assert _run_until(s, _hunting, 30000)
+        g = s.games[0]
+        s.set_pose(0, s.world.a.x, s.world.a.y, 200.0)     # B ~126 deg to the left
+        tb = s.true_bearing_rel_deg(0)
+        g.arrow = A.make(-tb if mirror else tb, 15.0, s.t_ms)
+        assert _run_until(s, lambda s: g.arrow is None or g.arrow.phase in ("lock", "walk"), 10000)
+        t = s.telemetry(0)
+        assert t["cone_ms"] > 0 and t["in_cone"] is ok, (mirror, t["in_cone"])
+        assert (t["cone_hit_pct"] >= 90) if ok else (t["cone_hit_pct"] <= 10), (mirror, t["cone_hit_pct"])
+
+
+def _end_round(s, i):
+    s.button(i, True); s.step(200)              # MENU
+    for _ in range(4):                          # down to END ROUND
+        s.button(i); s.step(200)
+    s.button(i, True); s.step(200)              # SURE? PRESS
+    s.button(i); s.step(100)                    # confirm
+
+
+def test_end_round_during_the_split_keeps_the_real_channel():
+    s = TwoWatchSim(seed=3)
+    g = s.games
+    assert _run_until(s, lambda s: g[0].pair.sub == "split" and g[1].pair.sub == "split"
+                      and not s._pair_proxy(), 20000)
+    s.step(500)
+    _end_round(s, 1)
+    assert g[1].pair.sub == "looking"
+    while g[0].mode == "PAIRING":               # A's split hears no 1 m packet
+        assert not s._pair_proxy(), s.t_ms
+        s.step(50)
+    assert _run_until(s, _hunting, 40000)       # FRIEND LEFT on A, then both re-pair
+    p0 = s.sim.radio.p0_link
+    assert max(abs(g[k].pair.p1m - p0[k]) for k in (0, 1)) <= 2.0
 
 
 def test_set_profile_and_reset():
@@ -246,13 +365,16 @@ def test_set_profile_and_reset():
         s.step(50)
     addr = (s.frame_addr(0), s.frame_addr(1))
     bufs = (s.frame_bytes(0), s.frame_bytes(1))
+    p0 = list(s.sim.radio.p0_link)
     s.set_profile("indoor")
     assert len(s.world_state()["walls"]) > 10
-    for _ in range(40):
+    assert s.sim.radio.p0_link == p0                    # same devices, new environment
+    assert min(s.sim.radio.next_tx) > s.t_ms            # the schedule goes on from now
+    for _ in range(20):
         s.step(50)
-    assert s.telemetry(0)["pkts_per_s"] <= 25          # no burst from a restarted scheduler
+    assert s.telemetry(0)["pkts_per_s"] <= 25           # the second right after the switch: no burst
     s.set_profile("clean")
-    assert s.world_state()["walls"] == []
+    assert s.world_state()["walls"] == [] and s.sim.radio.p0_link == p0
     s.reset(2)
     assert s.t_ms == 0 and s.seed == 2
     assert s.telemetry(0)["screen"] == "PAIRING"
@@ -261,7 +383,7 @@ def test_set_profile_and_reset():
     if MPY:
         assert addr[0] is not None and addr[0] != addr[1]
     else:
-        assert addr == (None, None)
+        assert addr == (None, None) and s.renderers is None
     try:
         s.set_profile("space")
         assert False, "bad profile accepted"
@@ -282,11 +404,10 @@ def test_episode_drag_walk_bump_found():
 
 
 def test_episode_frames_change():
+    if not MPY:
+        raise Skip("framebuf: frames only under MicroPython")
     e = _episode()
     s = e.s
-    if not MPY:
-        assert s.frame_addr(0) is None and s.renderers is None
-        return
     assert s.frames[0] > 100 and s.frames[1] > 100
     fa = set(p[1] for p in e.prints)
     fb = set(p[2] for p in e.prints)
@@ -297,21 +418,46 @@ def test_episode_frames_change():
     assert len(e.haptic[0]) > 10
 
 
-def test_posture_tilt_and_wrist_down_reach_the_game():
-    from sim.webhost import TwoWatchSim
-    s = TwoWatchSim(seed=2)
+def test_haptic_readout_follows_the_player():
+    if not MPY:
+        raise Skip("framebuf: heartbeats come from the renderer")
+    s = TwoWatchSim()
+    assert _run_until(s, _hunting, 30000)
+    seen = []
+    for _ in range(80):                           # 4 s: the rings beat
+        s.step(50)
+        seen += s.telemetry(0)["haptic"]
+    assert seen
+    s.players[0].play_named("FOUND", s.t_ms)      # as the game's event would
+    end = s.t_ms + TOTAL_MS["FOUND"] + HB_RESUME_MS
+    while s.t_ms < end:                           # §7: no heartbeat during the event and 1 s after
+        s.step(50)
+        assert s.telemetry(0)["haptic"] == [], s.t_ms
+    assert _run_until(s, lambda s: s.telemetry(0)["haptic"], 3000)    # then they resume
 
-    def run(ms):
-        for _ in range(ms // 100):
-            s.step(100)                           # page-sized steps (one logic tick each)
-    run(20000)
+
+def test_dark_screen_draws_nothing_and_a_tap_wakes_it():
+    s = TwoWatchSim()
+    assert _run_until(s, _hunting, 30000)
     s.set_posture(0, "down")
-    run(4000)
-    assert s.games[0].screen_on is False          # wrist down -> screen off after 2 s
+    assert _run_until(s, lambda s: not s.games[0].screen_on, 5000)   # wrist down -> screen off
+    if MPY:
+        s.step(100)
+        n = list(s.frames)
+        shot = _sample(s.frame_bytes(0))
+        for _ in range(20):
+            s.step(50)
+        assert s.frames[0] == n[0] and s.frames[1] > n[1], (n, s.frames)     # §8: rendering stops
+        assert s.renderers[0]._dark and _sample(s.frame_bytes(0)) == shot
+    s.tap(0)                                      # a tap on the dark screen wakes it (wrist still down)
+    assert s.games[0].screen_on
     s.set_posture(0, "flat")
-    s.tap(0)                                      # a tap on a dark screen wakes it
-    run(500)
-    assert s.games[0].screen_on is True
+    if MPY:
+        n0 = s.frames[0]
+        assert _run_until(s, lambda s: s.frames[0] > n0, 500)          # the next frame snaps, no intro
+        assert not s.renderers[0]._dark
+    s.set_posture(0, "tilted")                    # 50 deg is not face-up either: off after 2 s
+    assert _run_until(s, lambda s: not s.games[0].screen_on, 5000)
     try:
         s.set_posture(0, "sideways")
         assert False

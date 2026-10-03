@@ -33,9 +33,10 @@ _R = _root()
 if _R not in sys.path:
     sys.path.insert(0, _R)
 
-from finder.compat import argv, ticks_ms, ticks_diff  # noqa: E402
+from finder.compat import ticks_ms, ticks_diff  # noqa: E402
 from finder.motion import MotionTracker  # noqa: E402
 from sim.accel_synth import WristSim, SCENARIOS, G, OFFSET_SD_G  # noqa: E402
+from tools.cli import parse_args  # noqa: E402
 
 CHECK_S = (10, 30, 60)
 
@@ -215,21 +216,9 @@ def bench(n=1500):
 
 
 def main(args):
-    seeds = 5
-    range_g = 4
-    do_bench = False
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--seeds":
-            seeds = int(args[i + 1])
-            i += 1
-        elif a == "--range":
-            range_g = int(args[i + 1])
-            i += 1
-        elif a == "--bench":
-            do_bench = True
-        i += 1
+    o = parse_args(args, {"seeds": "5", "range": "4", "bench": False}, ("bench",))
+    seeds = int(o["seeds"])
+    range_g = int(o["range"])
     nc = len(CHECK_S)
     tot = {}
     steps = {}
@@ -275,10 +264,10 @@ def main(args):
         n, tn, tx = steps[sc]
         print("%s: detected %.1f steps vs %.1f true per run (%+.1f%%), true path %.1f m" % (
             sc, n / seeds, tn / seeds, 100.0 * (n - tn) / tn if tn > 0 else 0.0, tx))
-    if do_bench:
+    if o["bench"]:
         print("")
         print("MotionTracker.add_sample: %.1f us/sample on %s" % (bench(), sys.implementation.name))
 
 
 if __name__ == "__main__":
-    main(argv(globals())[1:])
+    main(sys.argv[1:])

@@ -7,18 +7,18 @@ sensitivity floor, or dropped by the distance-dependent loss model, never arrive
 
 import math
 
-from sim.world import Obstacle
-
 P0_NOM = -45.0      # nominal RSSI at 1 m, dBm (what calibrate() is told)
 FLOOR = -96.0       # receiver sensitivity, dBm
+JITTER_MS = 10      # beacon period jitter, +- ms
 DCORR = 6.0         # shadowing decorrelation distance, m
 TAU_T = 8.0         # temporal (environment) drift time constant, s
 FF_TAIL = 1.5       # fast fading: downward half is this much wider (deep fades)
 DEV_OFF = 1.5       # per-device p0 offset, uniform +-dB (link total up to +-3)
 LINK_ASYM = 1.0     # per-direction asymmetry, uniform +-dB
-CAL_SIGMA = 1.0     # bump-calibration measurement noise, dB
+CAL_SIGMA = 1.0     # 1 m calibration (PAIRING calibrate) measurement noise, dB
 
 PROFILE_NAMES = ["clean", "typical", "harsh", "indoor"]
+INDOOR_PROFILES = ("harsh", "indoor")   # radio profiles where the watches use the indoor exponent
 
 PROFILES = {
     "clean": dict(n=2.0, sigma_ff=2.0, sigma_sh=2.0, body_db=5.0, sigma_t=0.5,
@@ -57,19 +57,18 @@ def add_walls(world, rng, spacing=10.0, db=2.0, extent=160.0):
     for i in range(-k, k + 1):
         x = cx + ox + i * spacing
         y = cy + oy + i * spacing
-        world.obstacles.append(Obstacle(x - 0.1, cy - extent, x + 0.1, cy + extent, db))
-        world.obstacles.append(Obstacle(cx - extent, y - 0.1, cx + extent, y + 0.1, db))
+        world.add_obstacle(x - 0.1, cy - extent, x + 0.1, cy + extent, db)
+        world.add_obstacle(cx - extent, y - 0.1, cx + extent, y + 0.1, db)
 
 
 class Packet:
-    """A received beacon: ``rx`` measured ``rssi``; payload carries the sender's last
+    """A received beacon measured at ``rssi``; payload carries the sender's last
     RSSI of us (``peer_rssi``) and the sender's motion (``peer_motion``)."""
 
-    __slots__ = ("t_ms", "rx", "rssi", "peer_rssi", "peer_motion")
+    __slots__ = ("t_ms", "rssi", "peer_rssi", "peer_motion")
 
-    def __init__(self, t_ms, rx, rssi, peer_rssi, peer_motion):
+    def __init__(self, t_ms, rssi, peer_rssi, peer_motion):
         self.t_ms = t_ms
-        self.rx = rx
         self.rssi = rssi
         self.peer_rssi = peer_rssi
         self.peer_motion = peer_motion
@@ -79,44 +78,40 @@ class Radio:
     """Beacon scheduler + channel for world.a (index 0) and world.b (index 1).
 
     Call ``step(dt)`` right after ``world.step(dt)``; it returns
-    ``(packets_rx_by_a, packets_rx_by_b)``.
+    ``(packets_rx_by_a, packets_rx_by_b)``. ``period_ms[i]`` is watch i's beacon
+    period (a host may change it between steps).
     """
 
-    def __init__(self, world, prof="typical", rng=None, imus=None, rate_hz=10.0,
-                 jitter_ms=10, p0_nom=P0_NOM, floor=FLOOR):
-        from sim.rng import Rng
-        rng = rng or Rng(0)
-        p = profile(prof)
-        self.p = p
+    def __init__(self, world, prof, rng, imus=None, rate_hz=10.0):
         self.world = world
         self.imus = imus
-        self.floor = floor
-        self.p0_nom = p0_nom
-        self.period_ms = int(1000.0 / rate_hz)
-        self.jitter_ms = jitter_ms
+        per = int(1000.0 / rate_hz)
+        self.period_ms = [per, per]    # per transmitter: each watch beacons at its own rate
         dev = rng.fork(1)
         off = dev.uniform(-DEV_OFF, DEV_OFF) + dev.uniform(-DEV_OFF, DEV_OFF)
         asym = dev.uniform(-LINK_ASYM, LINK_ASYM)
-        self.p0_link = [p0_nom + off + asym, p0_nom + off - asym]  # indexed by receiver
-        self.cal = [p0_nom + dev.gauss(0.0, CAL_SIGMA), p0_nom + dev.gauss(0.0, CAL_SIGMA)]
-        self._rs = rng.fork(2)
-        self._rf = (rng.fork(3), rng.fork(4))
+        self.p0_link = [P0_NOM + off + asym, P0_NOM + off - asym]  # indexed by receiver
+        self.cal = [P0_NOM + dev.gauss(0.0, CAL_SIGMA), P0_NOM + dev.gauss(0.0, CAL_SIGMA)]
+        self.set_profile(prof, rng)
         self._rj = rng.fork(5)
-        self.sh = self._rs.gauss(0.0, p["sigma_sh"])
-        self.tv = self._rs.gauss(0.0, p["sigma_t"])
-        self.next_tx = [self._rj.randint(0, self.period_ms - 1), self._rj.randint(0, self.period_ms - 1)]
+        t0 = int(world.t * 1000.0 + 0.5)     # the schedule starts now, also on a running world
+        self.next_tx = [t0 + self._rj.randint(0, per - 1), t0 + self._rj.randint(0, per - 1)]
         self.last_rssi = [None, None]  # last RSSI measured by device i
         self.sent = [0, 0]
-        self.recv = [0, 0]
-        self._t_ms = int(world.t * 1000.0)
+
+    def set_profile(self, prof, rng):
+        """New environment (path loss, noise, shadowing state). The device offsets,
+        their calibration and the beacon schedule are hardware: they stay."""
+        p = profile(prof)
+        self.p = p
+        self._rs = rng.fork(2)
+        self._rf = (rng.fork(3), rng.fork(4))
+        self.sh = self._rs.gauss(0.0, p["sigma_sh"])
+        self.tv = self._rs.gauss(0.0, p["sigma_t"])
 
     def cal_p0(self, rx):
-        """What a bump-to-pair calibration hands device ``rx`` (nominal p0 + noise)."""
+        """What the 1 m PAIRING calibration (ui-spec §5.8) hands device ``rx`` (nominal p0 + noise)."""
         return self.cal[rx]
-
-    def mean_rssi(self, rx):
-        """Noise-free (no fast fading / outliers) RSSI at receiver ``rx``, dBm."""
-        return self.p0_link[rx] + self._common()
 
     def _common(self):
         w = self.world
@@ -152,23 +147,21 @@ class Radio:
                 x -= p["out_db"] * rf.uniform(0.6, 1.4)
             else:
                 x += 0.5 * p["out_db"] * rf.uniform(0.6, 1.4)
-        margin = mean - self.floor
+        margin = mean - FLOOR
         pl = p["loss"] + p["extra_loss"]
         pl += (1.0 - pl) / (1.0 + math.exp((margin - 5.0) / 2.5))
         lost = rf.random() < pl
         rssi = int(math.floor(mean + x + 0.5))
-        if lost or rssi < self.floor:
+        if lost or rssi < FLOOR:
             return None
-        self.recv[rx] += 1
         imu = self.imus[tx] if self.imus else None
-        pk = Packet(t_ms, rx, rssi, self.last_rssi[tx], imu.info if imu else None)
+        pk = Packet(t_ms, rssi, self.last_rssi[tx], imu.info if imu else None)
         self.last_rssi[rx] = rssi
         return pk
 
     def step(self, dt):
         self._advance_channel(dt)
         t_end = int(self.world.t * 1000.0 + 0.5)
-        self._t_ms = t_end
         out = ([], [])
         nt = self.next_tx
         if nt[0] > t_end and nt[1] > t_end:
@@ -183,5 +176,15 @@ class Radio:
             pk = self._receive(t, tx, means[1 - tx])
             if pk is not None:
                 out[1 - tx].append(pk)
-            nt[tx] = t + self.period_ms + self._rj.randint(-self.jitter_ms, self.jitter_ms)
+            nt[tx] = t + self.period_ms[tx] + self._rj.randint(-JITTER_MS, JITTER_MS)
         return out
+
+    def step_with(self, dt, world, prof):
+        """One ``step`` on a stand-in channel (``world`` geometry, full profile dict ``prof``,
+        shadowing and drift from 0): the beacon schedule advances, the real channel stays."""
+        saved = (self.world, self.p, self.sh, self.tv)
+        self.world, self.p, self.sh, self.tv = world, prof, 0.0, 0.0
+        try:
+            return self.step(dt)
+        finally:
+            self.world, self.p, self.sh, self.tv = saved

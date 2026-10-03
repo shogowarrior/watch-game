@@ -7,7 +7,7 @@ e.g. ``turn_t`` (walk_away_back: when A turns round).
 import math
 
 from sim.rng import Rng
-from sim.world import World, Walker, Call, PI, wrap
+from sim.world import World, Walker, WalkTo, Call, PI, wrap
 
 NAMES = ["approach", "both_approach", "stationary", "walk_away_back", "orbit",
          "rotate_in_place", "zigzag_search", "nlos_wall", "far_edge", "pause_and_go"]
@@ -136,28 +136,20 @@ def far_edge(rng):
 
 
 class _PauseGo:
+    """``WalkTo`` on a duty cycle: walk ``walk_s``, stand ``stop_s``, repeat."""
+
     def __init__(self, target, walk_s, stop_s, stop_at):
-        self.target = target
         self.walk_s = walk_s
         self.stop_s = stop_s
-        self.stop_at = stop_at
         self.t = 0.0
+        self._walk = WalkTo(target, None, stop_at)
 
     def step(self, w, dt):
-        dx = self.target.x - w.x
-        dy = self.target.y - w.y
-        d = math.sqrt(dx * dx + dy * dy)
-        if d <= self.stop_at + 1e-6:
-            return True
         ph = self.t % (self.walk_s + self.stop_s)
         self.t += dt
         if ph >= self.walk_s:
             return False
-        w.face(math.atan2(dy, dx), dt)
-        s = min(w.cruise * dt, d - self.stop_at)
-        w.x += dx / d * s
-        w.y += dy / d * s
-        return False
+        return self._walk.step(w, dt)
 
 
 def pause_and_go(rng):

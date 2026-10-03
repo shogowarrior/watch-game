@@ -13,7 +13,7 @@ body blocking, a several-dB step); forced to 0 while both watches are still.
 import math
 
 from finder.compat import ticks_diff
-from finder.estimators.base import RangeEstimator, PathLoss, ACT_STILL, ACT_UNKNOWN
+from finder.estimators.base import RangeEstimator, PathLoss, KDB, ACT_STILL, ACT_UNKNOWN
 
 STRIDE_M = 0.7
 V_MOVE = 0.45        # m/s floor for a walking watch
@@ -35,13 +35,10 @@ TAU_REF_S = 3.0      # CUSUM reference level time constant
 TAU_SIG_S = 10.0     # measurement noise estimate time constant
 CUSUM_K = 0.5        # CUSUM drift, sigmas
 CUSUM_H = 6.0        # CUSUM alarm, sigmas
-USE_CUSUM = True
-CUSUM_DOWN = True
 MAX_GAP_MS = 4000    # longer silence -> trend_conf 0 (trend kept)
-BODY_DB = 3.0        # mean extra loss vs. bump calibration (bodies in the way)
+BODY_DB = 3.0        # mean extra loss vs. the 1 m calibration (bodies in the way)
 N_PL = 2.8           # path-loss exponent used for distance
 PLAY = 0.15          # backlash on ln(distance): jitter below this never moves the readout
-LN10_10 = 10.0 / math.log(10.0)
 
 
 class _Gait:
@@ -80,7 +77,7 @@ class Estimator(RangeEstimator):
     def __init__(self, path_loss=None):
         # N_PL is set once here, not in reset(): Game.set_place() (MENU PLACE)
         # must survive the reset at every round end and after calibration.
-        RangeEstimator.__init__(self, path_loss or PathLoss(-45.0, N_PL))
+        RangeEstimator.__init__(self, path_loss or PathLoss(n=N_PL))
 
     def reset(self):
         RangeEstimator.reset(self)
@@ -112,7 +109,7 @@ class Estimator(RangeEstimator):
         if dt <= 0.0 or self.rssi_f is None:
             return
         d = self.dist_m if self.dist_m is not None and self.dist_m > 1.0 else 1.0
-        g = self.pl.n * LN10_10 * v / d
+        g = self.pl.n * KDB * v / d
         q = Q_STILL + Q_SH * v + Q_RANGE * g * g * dt
         p = self.rssi_var + q * dt
         self.rssi_var = p if p < P_MAX else P_MAX
@@ -212,7 +209,7 @@ class Estimator(RangeEstimator):
         x = self.rssi_f
         if x is None:
             return
-        k = 1.0 / (LN10_10 * self.pl.n)
+        k = 1.0 / (KDB * self.pl.n)
         ln = (self.pl.p0 - x) * k
         a = self._lnd
         if a is None:
@@ -247,6 +244,7 @@ class Estimator(RangeEstimator):
         dt = ticks_diff(t_ms, t_last) * 0.001 if t_last is not None else 0.0
         jump = 0
         if rssi is not None:
+            self._note_noise(t_ms, rssi)
             y = self._correct(rssi, R_OWN)
             self._regress(t_ms, y, 1.0)
             jump = self._cusum(y, dt)
@@ -265,7 +263,7 @@ class Estimator(RangeEstimator):
         else:
             ts = b / sd
             tr = self.trend
-            if USE_CUSUM and jump and jump != tr and (CUSUM_DOWN or jump > 0):
+            if jump and jump != tr:
                 tr = jump
                 self._clear()
             elif tr == 0:

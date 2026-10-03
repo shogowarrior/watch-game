@@ -3,11 +3,7 @@ from tests import fakes
 
 def _pmu(regs=None, irq_pin=None):
     m = fakes.install()
-    r = {0x03: 0x41, 0x12: 0x02}
-    if regs:
-        for k in regs:
-            r[k] = regs[k]
-    dev = m.add_i2c_device(0, 0x35, r)
+    dev = m.add_axp202(regs)
     from hal.axp202 import AXP202
     bus = m.I2C(0, scl=m.Pin(22), sda=m.Pin(21))
     return m, dev, AXP202(bus, irq_pin=irq_pin)
@@ -55,7 +51,7 @@ def test_dcdc3_preserved_on_every_write():
     p.set_ldo3(False)
     p.set_output(0x08, True)    # LDO4
     p.set_output(0x08, False)
-    p.set_output(0x5D, False)   # everything except DCDC3 (and the mask includes it)
+    p.set_output(0x5D, False)   # everything except DCDC3 (0x5D has bit1 clear)
     p.write(0x12, 0x00)         # raw write is guarded too
     ws = _power_writes(dev)
     assert len(ws) >= 6
@@ -122,24 +118,76 @@ def test_pek_irq_clear_writes_ones():
     del dev.writes[:]
     ev = p.poll()
     from hal import axp202 as a
-    assert ev & a.EV_SHORT and ev & a.EV_EDGE and ev & a.EV_VBUS_IN
+    assert ev & a.EV_SHORT and ev & a.EV_RELEASE and ev & a.EV_VBUS_IN
     assert not ev & a.EV_LONG
     assert (0x4A, b"\x02") in dev.writes
     assert (0x4C, b"\x40") in dev.writes
     assert (0x48, b"\x08") in dev.writes
+    assert dev.regs[0x4A] == 0 and dev.regs[0x4C] == 0 and dev.regs[0x48] == 0
     # zero status registers are not written
     assert not [w for w in dev.writes if w[0] in (0x49, 0x4B)]
+    assert p.poll() == 0
+
+
+def test_poll_bus_error_keeps_press():
+    # A NACK on a later status register must not lose a press already read.
+    m, dev, p = _pmu({0x4A: 0x02})
+    from hal import axp202 as a
+    real = dev.read
+    fail = [True]
+
+    def read(reg, n):
+        if reg == 0x4B and fail[0]:
+            fail[0] = False
+            raise OSError(116)
+        return real(reg, n)
+
+    dev.read = read
+    try:
+        p.poll()
+        assert False, "NACK swallowed"
+    except OSError:
+        pass
+    assert dev.regs[0x4A] == 0x02              # nothing cleared yet
+    assert p.poll() == a.EV_SHORT and dev.regs[0x4A] == 0
+
+
+def _nack_write_once(dev, reg):
+    real = dev.write
+    fail = [True]
+
+    def write(r, data):
+        if r == reg and fail[0]:
+            fail[0] = False
+            raise OSError(116)
+        return real(r, data)
+
+    dev.write = write
+
+
+def test_poll_clear_nack_defers_not_drops():
+    # A failed clear keeps that register's bits latched: reported on the next
+    # poll, never dropped with the events already cleared elsewhere.
+    from hal import axp202 as a
+    m, dev, p = _pmu({0x4A: 0x02, 0x4C: 0x40})
+    _nack_write_once(dev, 0x4C)
+    assert p.poll() == a.EV_SHORT
+    assert dev.regs[0x4A] == 0 and dev.regs[0x4C] == 0x40
+    assert p.poll() == a.EV_RELEASE and dev.regs[0x4C] == 0
+    m, dev, p = _pmu({0x4A: 0x02})
+    _nack_write_once(dev, 0x4A)
+    assert p.poll() == 0 and dev.regs[0x4A] == 0x02
+    assert p.poll() == a.EV_SHORT and p.poll() == 0
 
 
 def test_pek_press_release_edges():
     from hal import axp202 as a
     m, dev, p = _pmu({0x4C: 0x20})
-    assert p.poll() == a.EV_EDGE | a.EV_PRESS
+    assert p.poll() == a.EV_PRESS
     m, dev, p = _pmu({0x4C: 0x40})
-    assert p.poll() == a.EV_EDGE | a.EV_RELEASE
+    assert p.poll() == a.EV_RELEASE
     m, dev, p = _pmu({0x4C: 0x60})
-    assert p.poll() == a.EV_EDGE | a.EV_PRESS | a.EV_RELEASE
-    assert a.EV_PEK & (a.EV_PRESS | a.EV_RELEASE) == 0
+    assert p.poll() == a.EV_PRESS | a.EV_RELEASE
     assert (a.EV_PRESS | a.EV_RELEASE) & (a.EV_VBUS_IN | a.EV_VBUS_OUT) == 0
 
 
@@ -164,3 +212,18 @@ def test_poll_skips_i2c_when_line_high():
     assert p.poll() == 0 and dev.writes == []
     pin._v = 0
     assert p.poll() != 0
+
+
+def test_shutdown_sets_off_bit_only():
+    m, dev, p = _pmu({0x32: 0x46})
+    del dev.writes[:]
+    p.shutdown()
+    assert dev.regs[0x32] == 0xC6
+    assert dev.writes == [(0x32, b"\xc6")]    # 0x12 (DCDC3) never touched
+
+
+def test_long_press_time_keeps_hold_bits():
+    m, dev, p = _pmu({0x36: 0x0D})
+    for ms, code in ((1000, 0x0D), (2000, 0x2D), (2500, 0x3D), (1500, 0x1D)):
+        p.set_long_press_ms(ms)
+        assert dev.regs[0x36] == code, (ms, dev.regs[0x36])

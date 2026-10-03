@@ -1,18 +1,10 @@
-from finder.estimators.base import PathLoss, RangeEstimator
 from finder.estimators.ema import Estimator
-
-
-def test_is_range_estimator():
-    e = Estimator()
-    assert isinstance(e, RangeEstimator)
-    e.update(0, None)
-    assert e.dist_m is None and e.trend == 0
 
 
 def test_constant_rssi_distance():
     e = Estimator()
     e.calibrate(-45.0)
-    r = PathLoss(-45.0, 2.2).dist_to_rssi(12.0)
+    r = e.pl.dist_to_rssi(12.0)
     for i in range(100):
         e.update(1000 + 100 * i, r)
     assert abs(e.dist_m - 12.0) < 0.01
@@ -27,12 +19,3 @@ def test_trend_follows_rssi_slope():
     for i in range(100, 250):
         e.update(100 * i, -70.0 - 0.1 * (i - 100))
     assert e.trend == -1
-
-
-def test_ticks_wrap():
-    from finder.compat import ticks_add
-    e = Estimator()
-    t0 = ticks_add(0, -2000)
-    for i in range(40):
-        e.update(ticks_add(t0, 100 * i), -60.0 + 0.1 * i)
-    assert e.trend == 1

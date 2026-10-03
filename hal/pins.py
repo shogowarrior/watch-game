@@ -6,11 +6,7 @@ V3 adds a PDM microphone. Input-only pins (34..39) have no pull-ups and
 cannot drive outputs.
 """
 
-try:
-    from micropython import const
-except ImportError:  # CPython tests
-    def const(x):
-        return x
+from finder.compat import const
 
 CPU_HZ = const(240_000_000)
 

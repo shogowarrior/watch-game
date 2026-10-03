@@ -1,5 +1,6 @@
-from tests import fakes
+from tests import Skip, fakes
 from finder import haptic_patterns as hp
+from finder import tuning as T
 from finder.compat import ticks_add
 from finder.haptic_patterns import HapticPlayer
 
@@ -33,7 +34,7 @@ def _edges(trace, t0=0, step=1):
 def _expected(pattern, t0=0):
     iv = []
     t = t0
-    for on_ms, off_ms, _ in pattern:
+    for on_ms, off_ms in pattern:
         iv.append((t, t + on_ms))
         t += on_ms + off_ms
     return iv
@@ -41,7 +42,7 @@ def _expected(pattern, t0=0):
 
 def _flat(p):
     a = []
-    for on_ms, off_ms, _ in p:
+    for on_ms, off_ms in p:
         a.append(on_ms)
         if off_ms:
             a.append(off_ms)
@@ -54,12 +55,11 @@ def test_patterns_match_tokens():
     assert len(hp.PATTERNS) == 9
     for name in T.HAPTIC_PATTERNS:
         assert _flat(hp.PATTERNS[name]) == list(T.HAPTIC_PATTERNS[name]), name
-        for on_ms, off_ms, st in hp.PATTERNS[name]:
-            assert on_ms >= T.HAPTIC_MIN_PULSE_MS and 0 < st <= 1, name
-        for on_ms, off_ms, st in hp.PATTERNS[name][:-1]:
+        for on_ms, off_ms in hp.PATTERNS[name]:
+            assert on_ms >= T.HAPTIC_MIN_PULSE_MS, name
+        for on_ms, off_ms in hp.PATTERNS[name][:-1]:
             assert off_ms >= T.HAPTIC_MIN_GAP_MS, name
         assert hp.PATTERNS[name][-1][1] == 0, name
-        assert hp.priority_of(hp.PATTERNS[name]) == T.HAPTIC_RANK[name], name
     assert hp.MIN_PULSE_MS == T.HAPTIC_MIN_PULSE_MS == 60
     assert hp.HB_RESUME_MS == 1000 and hp.EVENT_GUARD_MS == 1000
     assert hp.MAX_DUTY_PCT == 12 and hp.BLANKING_MS == T.HAPTIC_BLANKING_MS
@@ -70,16 +70,13 @@ def test_patterns_match_tokens():
 
 
 def test_tokens_json_alignment():
-    import sys
-    if sys.implementation.name != "cpython":
-        return
     import json
     import os
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    f = os.path.join(root, "docs", "design", "tokens.json")
-    if not os.path.exists(f):
-        print("SKIP test_tokens_json_alignment: no tokens.json")
-        return
+    f = "docs/design/tokens.json"          # the runner works from the repo root
+    try:
+        os.stat(f)
+    except OSError:
+        raise Skip("no docs/design/tokens.json")
     with open(f) as fh:
         h = json.load(fh)["haptics"]
     assert set(h["patterns"]) == set(hp.PATTERNS)
@@ -87,7 +84,7 @@ def test_tokens_json_alignment():
         assert _flat(hp.PATTERNS[name]) == arr, name
     assert list(hp.NAMES) == h["priority"]
     assert hp.MIN_PULSE_MS == h["min_pulse_ms"] and hp.MIN_GAP_MS == h["min_gap_ms"]
-    assert list(hp.MODE_NAMES) == sorted(h["modes"], key=hp.MODE_NAMES.index)
+    assert set(h["modes"]) == {"FULL", "EVENTS", "OFF"}   # MODE_FULL / MODE_EVENTS / MODE_OFF
 
 
 def test_every_token_name_plays_with_exact_edges():
@@ -124,7 +121,7 @@ def test_found_timing_and_strength():
 
 def test_pending_start_uses_first_tick():
     pl = HapticPlayer()
-    pl.play(hp.FARTHER)
+    pl.play_named("FARTHER")
     assert pl.tick(500) == 1.0
     assert pl.tick(799) == 1.0
     assert pl.tick(800) == 0.0
@@ -132,19 +129,25 @@ def test_pending_start_uses_first_tick():
 
 def test_late_tick_never_skips_a_pulse():
     pl = HapticPlayer()
-    pl.play(hp.TICK, 0)
+    pl.play_named("TICK", 0)
     assert pl.tick(70) == 1.0          # would have ended at 60: starts late instead
     assert pl.tick(129) == 1.0
     assert pl.tick(130) == 0.0
     # frame-rate ticking (33 ms) still delivers all four FOUND pulses
     pl = HapticPlayer()
-    pl.play(hp.FOUND, 1000)
+    pl.play_named("FOUND", 1000)
     tr = _trace(pl, 1005, 2400, 33)
     assert len(_edges(tr, 1005, 33)) == 4
     # and all five LOST pulses (60/60 stutter)
     pl = HapticPlayer()
-    pl.play(hp.LOST, 0)
+    pl.play_named("LOST", 0)
     assert len(_edges(_trace(pl, 0, 1200, 33), 0, 33)) == 5
+    # a late off tick: the gap is timed from the real off edge (§7 >= 60 ms)
+    pl = HapticPlayer()
+    pl.play_named("FOUND", 0)
+    assert pl.tick(0) == 1.0 and pl.tick(79) == 1.0
+    assert pl.tick(95) == 0.0          # first pulse ends 15 ms late
+    assert _edges(_trace(pl, 96, 290), 96) == [(155, 235)]
 
 
 def test_drop_rule_same_or_higher_within_guard():
@@ -160,6 +163,12 @@ def test_drop_rule_same_or_higher_within_guard():
     assert pl.play_named("CLOSER", 0)
     _trace(pl, 0, 1000)
     assert pl.play_named("FARTHER", 1000)      # exactly 1 s later: allowed
+    # countdown TICKs at ~1 Hz: a TICK is never guarded against a TICK
+    pl = HapticPlayer()
+    assert pl.play_named("TICK", 0)
+    _trace(pl, 0, 990)
+    assert pl.play_named("TICK", 990)
+    assert pl.tick(990) == 1.0
     # the WARM DOUBLE heartbeat never blocks a DOUBLE event (BLIP HUNT bug)
     pl = HapticPlayer()
     assert pl.heartbeat("DOUBLE", 0)
@@ -178,30 +187,53 @@ def test_lower_event_waits_for_higher_to_finish():
     gap = hp.MIN_GAP_MS
     assert ed[1] == (1600 + gap, 1660 + gap)   # then the queued TICK
     assert not pl.busy
+    pl = HapticPlayer()
+    assert pl.play_named("HOLD", 0)
+    _trace(pl, 0, 1200)
+    assert pl.play_named("TICK", 1200)
+    _trace(pl, 1200, 1600)
+    assert pl.tick(1610) == 0.0                # HOLD ends 10 ms late: the gap still counts
+    assert _edges(_trace(pl, 1611, 1800), 1611) == [(1610 + gap, 1670 + gap)]
+
+
+def test_queued_event_latest_wins():
+    pl = HapticPlayer()
+    assert pl.play_named("HOLD", 0)            # 0..1600
+    _trace(pl, 0, 1100)
+    assert pl.play_named("CLOSER", 1100)       # waits for HOLD
+    assert pl.play_named("FARTHER", 1200)      # same rank: replaces CLOSER
+    assert not pl.play_named("TICK", 1250)     # lower than the waiting one: dropped
+    ed = _edges(_trace(pl, 1100, 2500), 1100)
+    gap = hp.MIN_GAP_MS
+    assert ed[1:] == [(1600 + gap, 1900 + gap)], ed   # only FARTHER (300 ms) plays
 
 
 def test_heartbeat_resumes_one_second_after_event():
     pl = HapticPlayer()
     assert pl.heartbeat("TICK", 0)
-    assert pl.tick(0) == 1.0
-    assert pl.play_named("CLOSER", 30)         # event cuts the running heartbeat
-    tr = _trace(pl, 30, 400)
-    assert _edges(tr, 30) == [(30, 90), (150, 210), (270, 400)]
-    _trace(pl, 400, 471)
-    end = 470                                   # CLOSER: 30 + 440
+    tr = _trace(pl, 0, 30)
+    assert pl.play_named("CLOSER", 30)         # the heartbeat pulse plays out, then
+    tr += _trace(pl, 30, 700)                   # CLOSER starts 60 ms after it (§7)
+    assert _edges(tr, 0) == [(0, 60), (120, 180), (240, 300), (360, 560)]
+    end = 560                                   # CLOSER: 120 + 440
     assert not pl.heartbeat("TICK", end + 999)
     assert not pl.heartbeat("TICK", end + 500)
     assert pl.heartbeat("TICK", end + 1000)
     assert pl.tick(end + 1000) == 1.0
-    # renderer frame: [event, heartbeat] -> the event replaces the heartbeat
+    # a frame with an event and a heartbeat: the event replaces the heartbeat
     pl = HapticPlayer()
-    pl.play_frame(["FARTHER", "TICK"], 0, has_event=True)
+    pl.play_named("FARTHER", 0)
+    pl.heartbeat("TICK", 0)
     assert _edges(_trace(pl, 0, 1000), 0) == [(0, 300)]
-    pl.play_frame(["TICK"], 1000)               # heartbeat 700 ms after: dropped
-    pl.play_frame(["TICK"], 1300)               # 1 s after the event: plays
+    pl.heartbeat("TICK", 1000)               # heartbeat 700 ms after: dropped
+    pl.heartbeat("TICK", 1300)               # 1 s after the event: plays
     assert _edges(_trace(pl, 1000, 1500), 1000) == [(1300, 1360)]
-    pl.play_frame(["DOUBLE"], 2000)
+    pl.heartbeat("DOUBLE", 2000)
     assert _edges(_trace(pl, 2000, 2400), 2000) == [(2000, 2060), (2140, 2200)]
+    pl = HapticPlayer()
+    pl.play_named("NOPE", 0)
+    pl.heartbeat("TICK", 0)
+    assert _edges(_trace(pl, 0, 1000), 0) == [(0, 300), (450, 750)]
 
 
 def test_metronome_grid_and_duty_cap():
@@ -224,43 +256,29 @@ def test_metronome_grid_and_duty_cap():
         assert hp.on_ms(p) * 100 <= hp.MAX_DUTY_PCT * hp.min_period(p), name
 
 
-def test_tempo_table_matches_geometric_curve():
-    tab = [hp.tempo_for_bucket(i) for i in range(hp.TEMPO_STEPS + 1)]
-    assert tab[0] == hp.TEMPO_COLD_MS == 2400 and tab[-1] == hp.TEMPO_HOT_MS == 500
-    for a, b in zip(tab, tab[1:]):
-        assert a > b                               # strictly faster when hotter
-    assert hp.tempo_for_bucket(-3) == tab[0] and hp.tempo_for_bucket(99) == tab[-1]
-    ratio = hp.TEMPO_HOT_MS / hp.TEMPO_COLD_MS
-    for i in range(101):
-        c = i / 100
-        exact = hp.TEMPO_COLD_MS * ratio ** c
-        got = hp.tempo_ms(c)
-        assert abs(got - exact) <= exact * 0.04 + 1, (c, got, exact)
-        assert got == tab[hp.tempo_bucket(c)]
-    assert hp.tempo_bucket(0.5) == hp.TEMPO_STEPS // 2
-    assert hp.tempo_ms(-1) == 2400 and hp.tempo_ms(2) == 500
-    assert hp.tempo_ms(0.3) > hp.tempo_ms(0.6)
-    for p in tab:                                  # every tempo keeps TICK <= 12 % duty
+def test_zone_tempos_keep_duty():
+    from finder import tuning as T
+    for p in T.ZONE_PERIOD_MS:                     # every zone keeps TICK <= 12 % duty
         assert p >= hp.min_period(hp.TICK)
 
 
 def test_per_frame_allocation_free_on_micropython():
     import gc
     if not hasattr(gc, "mem_alloc"):
-        return  # CPython: nothing meaningful to measure
+        raise Skip("needs MicroPython gc.mem_alloc")
+    from finder import tuning as T
+    per = T.ZONE_PERIOD_MS
     pl = HapticPlayer()
-    b = hp.tempo_bucket(0.5)
-    pl.set_metronome(hp.tempo_for_bucket(b), 0)
+    pl.set_metronome(per[1], 0)
     ev = ["TICK"]
     gc.collect()
     gc.disable()
     try:
         a0 = gc.mem_alloc()
         for i in range(200):
-            pl.set_metronome(hp.tempo_for_bucket(b + (i & 1)), i)
+            pl.set_metronome(per[1 + (i & 1)], i)
             pl.tick(i)
-            pl.blanked(i)
-        pl.play_frame(ev, 300)
+        pl.heartbeat(ev[0], 300)
         for i in range(300, 400):
             pl.tick(i)
         used = gc.mem_alloc() - a0
@@ -293,25 +311,21 @@ def test_metronome_speedup_fires_immediately_when_overdue():
     assert ed[1] == (2500, 2560) and ed[2] == (3000, 3060)
 
 
-def test_metronome_stop_and_sync():
+def test_metronome_stop():
     pl = HapticPlayer()
     pl.set_metronome(1000, 0)
     assert pl.tick(0) == 1.0
-    pl.stop_metronome()
+    pl.set_metronome(0)
     assert pl.tick(1) == 1.0           # a started beat finishes its pulse
     assert _edges(_trace(pl, 60, 3000), 60) == []
-    pl.set_metronome(1000, 3000)
-    pl.tick(3000)
-    pl.sync(3300)                      # align to a ripple spawn
-    ed = _edges(_trace(pl, 3001, 4400), 3001)
-    assert ed == [(3001, 3060), (3300, 3360), (4300, 4360)]
+    assert pl.period_ms == 0
 
 
 def test_event_preempts_metronome_and_grid_continues():
     pl = HapticPlayer()
     pl.set_metronome(500, 0)
     tr = _trace(pl, 0, 950)
-    pl.play(hp.FOUND, 950)             # 950..2010 (last pulse 1510..2010)
+    pl.play_named("FOUND", 950)             # 950..2010 (last pulse 1510..2010)
     tr += _trace(pl, 950, 3600)
     ed = _edges(tr, 0)
     beats = [e for e in ed if e[1] - e[0] == 60 and e[0] % 500 == 0]
@@ -324,68 +338,103 @@ def test_event_preempts_metronome_and_grid_continues():
 def test_event_cuts_running_beat():
     pl = HapticPlayer()
     pl.set_metronome(1000, 0)
-    assert pl.tick(0) == 1.0
-    pl.play(hp.FARTHER, 10)
-    assert pl.tick(10) == 1.0          # event level replaces beat
-    assert pl.tick(309) == 1.0
-    assert pl.tick(310) == 0.0         # beat does not resume after the event
-    assert pl.tick(1000) == 0.0        # 1000 is < 1 s after the event: dropped
-    assert _edges(_trace(pl, 1001, 2100), 1001) == [(2000, 2060)]
+    tr = _trace(pl, 0, 10)
+    assert pl.play_named("FARTHER", 10)   # the beat pulse plays out, FARTHER 60 ms after it
+    assert pl.active and pl.busy
+    tr += _trace(pl, 10, 2100)         # the 1000 beat is < 1 s after the event: dropped
+    assert _edges(tr, 0) == [(0, 60), (120, 420), (2000, 2060)]
 
 
-def test_priority_override_and_stop():
+def test_event_keeps_min_gap_after_any_pulse():
+    # §7: every pulse and every gap >= 60 ms, also when an event follows a
+    # heartbeat pulse or pre-empts an event
+    def check(tr):
+        ed = _edges(tr, 0)
+        for a, b in ed:
+            assert b - a >= hp.MIN_PULSE_MS, ed
+        for i in range(1, len(ed)):
+            assert ed[i][0] - ed[i - 1][1] >= hp.MIN_GAP_MS, ed
+        return ed
+    for d in range(10, 120, 10):
+        pl = HapticPlayer()
+        assert pl.heartbeat("TICK", 0)
+        tr = _trace(pl, 0, d)
+        assert pl.play_named("DOUBLE", d)     # bump-ready right after a heartbeat
+        tr += _trace(pl, d, 1000)
+        ed = check(tr)
+        assert len(ed) == 3 and ed[0] == (0, 60), (d, ed)
+    for d, first in ((310, (360, 440)), (100, (360, 440))):
+        pl = HapticPlayer()
+        assert pl.play_named("NOPE", 0)       # 0..300, off 300..450, 450..750
+        tr = _trace(pl, 0, d)
+        assert pl.play_named("FOUND", d)      # pre-empts NOPE (in its gap / mid-pulse)
+        tr += _trace(pl, d, 2000)
+        ed = check(tr)
+        assert ed[0] == (0, 300) and ed[1] == first and len(ed) == 5, (d, ed)
+    pl = HapticPlayer()                       # the heartbeat pulse ends on a late tick
+    assert pl.heartbeat("TICK", 0) and pl.tick(0) == 1.0
+    assert pl.play_named("CLOSER", 30)
+    assert pl.tick(30) == 1.0 and pl.tick(59) == 1.0 and pl.tick(75) == 0.0
+    assert _edges(_trace(pl, 76, 250), 76) == [(135, 195)]
+
+
+def test_modes():
     pl = HapticPlayer()
-    assert pl.play(hp.FOUND, 0)
-    assert pl.play(hp.TICK, 1500, priority=9) is True   # explicit rank pre-empts
-    assert pl.tick(1500) == 1.0 and pl.tick(1560) == 0.0
-    pl.stop()
-    assert not pl.busy
-    custom = ((60, 60, 0.5), (60, 0, 0.5))
-    assert hp.priority_of(custom) == 0
-    assert pl.play(custom, 5000)
-    assert pl.tick(5000) == 0.5
-
-
-def test_modes_and_intensity():
-    pl = HapticPlayer(intensity=0.5)
     pl.set_metronome(1000, 0)
-    assert pl.tick(0) == 0.5
-    pl.set_intensity(2)
+    assert pl.tick(0) == 1.0
     assert pl.tick(1) == 1.0
-    pl.set_mode("EVENTS")              # heartbeats muted, events still play
-    assert pl.mode == hp.MODE_EVENTS
+    pl.set_mode(hp.MODE_EVENTS)        # heartbeats muted, events still play
     assert _edges(_trace(pl, 2, 1100), 2) == []
     assert not pl.heartbeat("TICK", 1100)
-    pl.play(hp.FARTHER, 1100)
+    pl.play_named("FARTHER", 1100)
     assert pl.tick(1100) == 1.0
-    pl.set_enabled(False)              # off: cancels and rejects
-    assert not pl.enabled
-    assert pl.tick(1101) == 0.0
-    assert not pl.play(hp.FOUND, 1102)
+    pl.set_mode(hp.MODE_OFF)           # off: cancels and rejects
+    assert pl.tick(1101) == 0.0 and not pl.busy
+    assert not pl.play_named("FOUND", 1102)
     assert _edges(_trace(pl, 1102, 3000), 1102) == []
-    pl.set_mode("FULL")
+    pl.set_mode(hp.MODE_FULL)
     ed = _edges(_trace(pl, 3000, 4100), 3000)
     assert ed == [(3000, 3060), (4000, 4060)]   # grid kept while off
-    pl.set_intensity(0)
-    assert pl.tick(5000) == 0.0
 
 
-def test_blanking_window():
-    pl = HapticPlayer()
-    assert not pl.blanked(0)
-    pl.play(hp.TICK, 0)
-    pl.tick(0)
-    assert pl.blanked(0)
-    pl.tick(59)
-    pl.tick(60)                        # pulse ended
-    assert pl.blanked(60) and pl.blanked(60 + hp.BLANKING_MS - 1)
-    assert not pl.blanked(60 + hp.BLANKING_MS)
+def test_blank_window_merges_and_expires():
+    w = hp.BlankWindow()
+    assert not w.active(0)
+    w.extend(100, hp.TOTAL_MS["TICK"] + hp.BLANKING_MS)       # 60 + 0 + 150
+    assert not w.active(99) and w.active(100) and w.active(309) and not w.active(310)
+    w.extend(400, 100)
+    w.extend(450, 20)                  # inside: keeps the later end
+    assert w.active(499) and not w.active(500)
+    w.extend(600, 100)
+    w.extend(650, 200)                 # overlapping: extends the end
+    assert w.active(849) and not w.active(850)
+    w.reset()
+    t0 = ticks_add(0, -50)             # across the ticks wrap
+    w.extend(t0, 100)
+    assert w.active(ticks_add(t0, 99)) and not w.active(ticks_add(t0, 100))
+    w.extend(1000, 100)
+    w.expire(1099)
+    assert w.active(1050)                  # a late query inside the window still blanks
+    w.expire(1100)
+    assert not w.active(1050) and w.until is None
+    w.extend(1000, 100)
+    w.reset()
+    assert not w.active(1000)
+
+
+def test_stronger_and_total_ms():
+    assert hp.stronger(None, "TICK") == "TICK"
+    assert hp.stronger("TICK", "FOUND") == "FOUND"
+    assert hp.stronger("FOUND", "TICK") == "FOUND"
+    assert hp.stronger("TICK", "TICK") == "TICK"
+    for n in hp.NAMES:
+        assert hp.TOTAL_MS[n] == sum(T.HAPTIC_PATTERNS[n])
 
 
 def test_ticks_wraparound():
     t0 = ticks_add(0, -40)             # just before the ticks wrap point
     pl = HapticPlayer()
-    pl.play(hp.FARTHER, t0)
+    pl.play_named("FARTHER", t0)
     assert pl.tick(t0) == 1.0
     assert pl.tick(ticks_add(t0, 299)) == 1.0
     assert pl.tick(ticks_add(t0, 300)) == 0.0
@@ -395,24 +444,9 @@ def test_ticks_wraparound():
     assert ticks_add(t0, 1800) in ons
 
 
-def _motor_cls():
-    try:
-        from hal.haptics import Motor
-    except ImportError:
-        # tools/mpy/run.mjs does not copy hal/ yet (DIRS lacks "hal")
-        import sys
-        if sys.implementation.name != "micropython":
-            raise
-        print("SKIP test_haptics hal tests: hal/ not mounted in the WASM runner")
-        return None
-    return Motor
-
-
 def test_motor_pwm_apply_on_change():
     m = fakes.install()
-    Motor = _motor_cls()
-    if Motor is None:
-        return
+    from hal.haptics import Motor
     mo = Motor()
     pwm = mo._pwm
     assert pwm.pin.id == 4 and 200 <= pwm.freq() <= 1000
@@ -440,9 +474,7 @@ def test_motor_pwm_apply_on_change():
 
 def test_player_drives_motor():
     fakes.install()
-    Motor = _motor_cls()
-    if Motor is None:
-        return
+    from hal.haptics import Motor
     mo = Motor()
     pl = HapticPlayer()
     pl.set_metronome(500, 0)

@@ -7,12 +7,18 @@ from us (symmetric link), and motion hints from both BMA423s. After each
 
 Conventions
   * time: integer milliseconds (monotonic; use compat.ticks_diff for deltas)
-  * rssi: int/float dBm, ``None`` when no packet arrived this tick
+  * rssi: int/float dBm, or ``None`` on an idle tick. The game calls ``update``
+    once per received packet; tools/bakeoff.py also sends ``None`` every 50 ms.
+    Correctness must not depend on idle ticks (the game's delivery and
+    LINK_LOST gates handle gaps)
   * trend: +1 = getting closer (warmer), -1 = farther (colder), 0 = unsure
   * distances in metres; all fields must be finite floats after first update
 """
 
 import math
+
+from finder import tuning as T
+from finder.compat import ticks_diff
 
 ACT_UNKNOWN = 0
 ACT_STILL = 1
@@ -35,10 +41,18 @@ class MotionInfo:
         return self.step_rate_hz * stride_m
 
 
+KDB = 10.0 / math.log(10.0)   # dB per neper: rssi = p0 - n*KDB*ln(d)
+SD_PER_STEP = math.sqrt(math.pi) / 2.0   # Gaussian sd from mean |x_k - x_(k-1)| (0.886)
+
+JIT_INIT = 4.0      # mean |rssi step| assumed before any data, dB
+JIT_A = T.NOISE_EMA_ALPHA          # its adaptation per packet pair (ui-spec 5.5)
+JIT_GAP_MS = T.NOISE_PAIR_GAP_MS   # packets further apart than this don't form a pair
+
+
 class PathLoss:
     """Log-distance path-loss model: rssi = p0 - 10*n*log10(d / 1 m)."""
 
-    def __init__(self, p0_dbm=-45.0, n=2.2):
+    def __init__(self, p0_dbm=T.P1M_NOMINAL_DBM, n=T.PATH_LOSS_N):
         self.p0 = p0_dbm
         self.n = n
 
@@ -62,7 +76,11 @@ class RangeEstimator:
 
     def reset(self):
         self.rssi_f = None      # filtered RSSI, dBm
-        self.rssi_var = 100.0   # variance of rssi_f, dB^2
+        self.rssi_var = 100.0   # variance of rssi_f, dB^2 (some add shadowing for dist_lo/hi)
+        self.noise_db = None    # learnt packet-to-packet RSSI noise sd, dB (channel roughness)
+        self.jit = JIT_INIT     # mean |rssi_k - rssi_k-1| of own packets, dB (noise_db's source)
+        self._jz = None         # last own RSSI and its time, for the next pair
+        self._jt = 0
         self.rate_db_s = 0.0    # d(rssi_f)/dt, + means getting closer
         self.dist_m = None      # point estimate
         self.dist_lo_m = None   # ~1-sigma lower bound
@@ -72,7 +90,7 @@ class RangeEstimator:
         self.last_t = None      # ms of last accepted measurement
 
     def calibrate(self, rssi_at_1m):
-        """Bump-to-pair calibration: RSSI measured with the watches ~1 m apart."""
+        """1 m calibration (PAIRING calibrate, ui-spec §5.8): RSSI measured with the watches ~1 m apart."""
         self.pl.p0 = rssi_at_1m
 
     def set_exponent(self, n):
@@ -82,7 +100,18 @@ class RangeEstimator:
     def update(self, t_ms, rssi, peer_rssi=None, my_motion=None, peer_motion=None):
         raise NotImplementedError
 
-    # helper for subclasses
+    # helpers for subclasses
+    def _note_noise(self, t_ms, rssi):
+        """Once per own packet: learn ``noise_db`` (ui-spec 5.5), the same way in
+        every estimator so the unreliable gate does not depend on which one runs."""
+        z = self._jz
+        if z is not None and ticks_diff(t_ms, self._jt) < JIT_GAP_MS:
+            d = rssi - z
+            self.jit += JIT_A * ((d if d > 0 else -d) - self.jit)
+        self._jz = rssi
+        self._jt = t_ms
+        self.noise_db = SD_PER_STEP * self.jit
+
     def _set_distance_from_rssi(self):
         if self.rssi_f is None:
             return

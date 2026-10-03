@@ -12,16 +12,18 @@
 # NOT the LilyGO TTGO_TWatch_Library / lewisxhe blob (2017, also 6144 bytes,
 # different FEATURES_IN layout); hal/bma423.py refuses that one.
 #
-# Usage:  tools/fetch_bma423_config.sh [OUT]        (default ./bma423conf.bin)
+# Usage:  tools/fetch_bma423_config.sh [OUT]
+#         (default <repo>/bma423conf.bin, where tools/deploy.py looks)
 # Then:   mpremote cp bma423conf.bin :bma423conf.bin
 # Needs:  curl, python3.
 set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 SRC_URL="https://raw.githubusercontent.com/wasp-os/BMA423-Sensor-API/e65f82683cc2e0d2d4bd8dcfa14089c54bf8787d/bma423.c"
 SRC_SHA256="3103cfa12beb2b31a57981362084c4d27c019c012fe3caf6c744e0537ce75611"
 BLOB_SIZE=6144
 BLOB_SHA256="112f81c8baba6d8abbf000c01e24fa56abd9f0c55e0415600d49109c189a2d3e"
-OUT="${1:-bma423conf.bin}"
+OUT="${1:-$ROOT/bma423conf.bin}"
 
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1

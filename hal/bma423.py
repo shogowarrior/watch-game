@@ -1,6 +1,7 @@
 # BMA423 accelerometer driver for the LILYGO T-Watch 2020 V1 (stock MicroPython).
 #
-# Derived from antirez's pure-MicroPython BMA423 driver (repo root bma423.py,
+# Derived from antirez's pure-MicroPython BMA423 driver (formerly bma423.py in
+# the repo root, removed in 44880ab: git show 44880ab^:bma423.py;
 # https://github.com/antirez/bma423-pure-mp):
 #   Copyright (C) 2024 Salvatore Sanfilippo -- All Rights Reserved
 #   This code is released under the MIT license
@@ -34,31 +35,16 @@ identical in DATA_8..13 and in headerless FIFO frames (6 bytes: x, y, z).
 Axes are the sensor's own frame (no remap).
 """
 
-import time
 from array import array
 
+# module-level names so tests can patch them
+from finder.compat import const, sleep_ms, ticks_diff as _ticks_diff, ticks_ms as _ticks_ms
+
 try:
-    from micropython import const
+    from time import sleep_us
 except ImportError:  # CPython tests
-    def const(x):
-        return x
-
-try:
-    _ticks_ms = time.ticks_ms
-    _ticks_diff = time.ticks_diff
-    sleep_ms = time.sleep_ms
-    sleep_us = time.sleep_us
-except AttributeError:  # CPython tests (module-level so tests can patch them)
-    def _ticks_ms():
-        return int(time.monotonic() * 1000)
-
-    def _ticks_diff(a, b):
-        return a - b
-
-    def sleep_ms(ms):
-        time.sleep(ms / 1000)
-
     def sleep_us(us):
+        import time
         time.sleep(us / 1000000)
 
 CHIP_ID = const(0x13)
@@ -101,17 +87,14 @@ ACC_PERF = const(0x80)        # ACC_CONF.acc_perf_mode (continuous sampling)
 ACC_BWP_NORMAL = const(0x20)  # acc_bwp = 2: normal filter (perf mode)
 PWR_ACC_EN = const(0x04)
 FIFO_ACC_EN = const(0x40)     # FIFO_CONFIG_1.fifo_acc_en; header bit 0x10 off
-FIFO_HEADER_EN = const(0x10)
 IO_LVL_HIGH = const(0x02)
-IO_OD = const(0x04)
 IO_OUTPUT_EN = const(0x08)
 
 ODR_CODES = {25: 6, 50: 7, 100: 8, 200: 9, 400: 10, 800: 11, 1600: 12}
 RANGE_CODES = {2: 0, 4: 1, 8: 2, 16: 3}
 
 FRAME_BYTES = const(6)
-FIFO_BYTES = const(1024)
-FIFO_FRAMES = const(170)      # 1024 // 6
+FIFO_FRAMES = const(170)      # 1024-byte FIFO // 6
 
 # poll_events() bits: INT_STATUS_0 | INT_STATUS_1 << 8 (Bosch int_map layout)
 EV_SINGLE_TAP = const(0x0001)
@@ -243,13 +226,10 @@ class BMA423:
 
     ``start=False`` skips init; then call ``init()`` (blocking, a few ms) or
     ``begin()`` and ``ready()`` from the main loop (non-blocking).
-    ``int_pin`` (Pin or GPIO number, e.g. 39) gates ``poll_events`` so an idle
-    loop costs one GPIO read instead of an I2C transfer; gating starts once
-    ``map_interrupts`` enables INT1 and follows its polarity.
     """
 
     def __init__(self, i2c, addr=None, *, range_g=4, odr=100, fifo=True,
-                 int_pin=None, start=True, fifo_frames=FIFO_FRAMES):
+                 start=True, fifo_frames=FIFO_FRAMES):
         if range_g not in RANGE_CODES:
             raise ValueError("range_g must be 2, 4, 8 or 16")
         if odr not in ODR_CODES:
@@ -260,13 +240,9 @@ class BMA423:
         self.range_mg = range_g * 1000
         self.odr = odr
         self.fifo = fifo
-        if isinstance(int_pin, int):
-            from machine import Pin
-            int_pin = Pin(int_pin, Pin.IN)
-        self.int_pin = int_pin
-        self._int_level = None  # INT1 active level once its output is enabled
         self.feat_state = FEAT_NONE
         self.feat_error = None
+        self._feat_on = False         # game features switched on (poll_features)
         self._state = ST_OFF
         self._t0 = 0
         self._tf = 0
@@ -323,7 +299,7 @@ class BMA423:
         """Verify CHIP_ID and issue a soft reset; finish with ``ready()``.
 
         ``reset=False`` keeps FEAT_ERROR/FEAT_PENDING (INIT_CTRL is already
-        spent until the next reset) and the INT1 setup."""
+        spent until the next reset) and the interrupt mapping."""
         cid = self._r8(REG_CHIP_ID)
         if cid != CHIP_ID:
             raise OSError(19, "BMA423: chip id 0x%02x != 0x13" % cid)
@@ -335,7 +311,7 @@ class BMA423:
             self._configure()
             return
         self.feat_state = FEAT_NONE
-        self._int_level = None  # INT1_IO_CTRL back to output disabled
+        self._feat_on = False         # the soft reset wipes FEATURES_IN and INT1_MAP
         try:
             self._w8(REG_CMD, CMD_SOFTRESET)
         except OSError:
@@ -390,19 +366,6 @@ class BMA423:
             self.feat_state = FEAT_ERROR
             self.feat_error = "internal_status %d (reset to retry)" % msg
 
-    def set_range(self, range_g):
-        if range_g not in RANGE_CODES:
-            raise ValueError("range_g must be 2, 4, 8 or 16")
-        self.range_g = range_g
-        self.range_mg = range_g * 1000
-        self._w8(REG_ACC_RANGE, RANGE_CODES[range_g])
-
-    def set_odr(self, odr):
-        if odr not in ODR_CODES:
-            raise ValueError("odr must be one of 25..1600 Hz")
-        self.odr = odr
-        self._w8(REG_ACC_CONF, ACC_PERF | ACC_BWP_NORMAL | ODR_CODES[odr])
-
     def error(self):
         """ERR_REG (0 = fine)."""
         return self._r8(REG_ERR)
@@ -454,10 +417,6 @@ class BMA423:
             self.i2c.readfrom_mem_into(self.addr, REG_FIFO_DATA, self._view(buf, n))
         return n
 
-    def decode(self, buf, n, out, off=0):
-        """``decode_frames`` at the current range."""
-        return decode_frames(buf, n, out, self.range_mg, off)
-
     def fifo_read_mg(self, out=None):
         """fifo_read + decode into ``out`` (default ``self.fifo_mg``,
         x, y, z interleaved). Returns samples."""
@@ -472,51 +431,42 @@ class BMA423:
 
     # -- interrupts (polled) ----------------------------------------------
 
-    def map_interrupts(self, int1=0, int2=0, latched=True, active_high=True,
-                       open_drain=False):
-        """Route EV_* masks to the INT1/INT2 pins (T-Watch: INT1 -> GPIO39).
+    def map_interrupts(self, int1=0, int2=0, latched=True):
+        """Route EV_* masks to the INT1/INT2 pins (T-Watch: INT1 -> GPIO39),
+        active high, push-pull.
 
         Feature events only work latched. Pins with no events get their
-        output disabled. Stale status is cleared. ``int_pin`` gating uses the
-        polarity chosen here and hides status bits not mapped to INT1.
+        output disabled. Stale status is cleared.
         """
         m1, m2, md = int_map_values(int1, int2)
         if not latched and (m1 | m2):
             raise ValueError("feature interrupts need latched mode")
-        io = IO_OUTPUT_EN | (IO_LVL_HIGH if active_high else 0) | (IO_OD if open_drain else 0)
+        io = IO_OUTPUT_EN | IO_LVL_HIGH
         self._w8(REG_INT_LATCH, 1 if latched else 0)
         self._w8(REG_INT1_IO_CTRL, io if int1 else 0)
         self._w8(REG_INT2_IO_CTRL, io if int2 else 0)
         self._w8(REG_INT1_MAP, m1)
         self._w8(REG_INT2_MAP, m2)
         self._w8(REG_INT_MAP_DATA, md)
-        self._int_level = (1 if active_high else 0) if int1 else None
-        self.read_status()
-
-    def read_status(self):
-        """Read (and thereby clear) INT_STATUS_0/1 -> EV_* bitmask."""
-        self.i2c.readfrom_mem_into(self.addr, REG_INT_STATUS_0, self._b2)
-        return self._b2[0] | self._b2[1] << 8
+        self.poll_events()
 
     def poll_events(self):
-        """EV_* bits since the last poll (clear-on-read). Call from the main
-        loop; if ``int_pin`` is set and INT1 is mapped but not asserted,
-        returns 0 without I2C."""
-        p = self.int_pin
-        lvl = self._int_level
-        if p is not None and lvl is not None and p.value() != lvl:
-            return 0
-        return self.read_status()
+        """EV_* bits since the last poll: reads (and thereby clears)
+        INT_STATUS_0/1. Call from the main loop."""
+        self.i2c.readfrom_mem_into(self.addr, REG_INT_STATUS_0, self._b2)
+        return self._b2[0] | self._b2[1] << 8
 
     # -- feature engine (optional) ----------------------------------------
 
     def features_ok(self):
         return self.feat_state == FEAT_OK
 
-    def load_config(self, path=CONFIG_PATH, wait=True, expect_sha256=CONFIG_SHA256,
-                    chunk=CONFIG_CHUNK, verify=False):
+    def load_config(self, path=CONFIG_PATH, wait=True, expect_sha256=CONFIG_SHA256):
         """Upload the Bosch feature blob and start the engine.
 
+        Starts the engine only; no feature (step counter, activity,
+        wrist-wear) is enabled. ``poll_features()`` or
+        ``enable_step_counter()``/``enable_feature()`` does that.
         Returns False if the file is missing, has the wrong size/sha256, or
         init fails (``feat_error`` says why); the game then uses software
         step detection. With ``wait=False`` returns True once uploaded and
@@ -533,14 +483,13 @@ class BMA423:
             return True
         if self.feat_state == FEAT_ERROR:
             return False  # INIT_CTRL already used since reset
-        chunk &= ~1
         try:
             f = open(path, "rb")
         except OSError:
             self.feat_error = "missing"
             return False
         try:
-            why = _check_blob(f, expect_sha256, chunk)
+            why = _check_blob(f, expect_sha256)
             if why:
                 self.feat_error = why
                 return False
@@ -548,7 +497,7 @@ class BMA423:
             self._w8(REG_PWR_CONF, 0x00)
             sleep_us(APS_WAIT_US)
             self._w8(REG_INIT_CTRL, 0x00)
-            buf = bytearray(chunk)
+            buf = bytearray(CONFIG_CHUNK)
             mv = memoryview(buf)
             idx = 0
             while True:
@@ -558,20 +507,6 @@ class BMA423:
                 self._set_asic(idx)
                 self.i2c.writeto_mem(self.addr, REG_FEATURES_IN, mv[:k])
                 idx += k
-            if verify:
-                f.seek(0)
-                rb = bytearray(chunk)
-                idx = 0
-                while True:
-                    k = f.readinto(buf)
-                    if not k:
-                        break
-                    self._set_asic(idx)
-                    self.i2c.readfrom_mem_into(self.addr, REG_FEATURES_IN, memoryview(rb)[:k])
-                    if rb[:k] != buf[:k]:
-                        self.feat_error = "verify@%d" % idx
-                        return False
-                    idx += k
         finally:
             f.close()
         self._w8(REG_INIT_CTRL, 0x01)
@@ -583,6 +518,26 @@ class BMA423:
             if not self.features_ready():
                 sleep_ms(10)
         return self.feat_state == FEAT_OK
+
+    def start_features(self, **kw):
+        """Game-loop start of the feature engine: ``load_config(wait=False,
+        **kw)``, then ``poll_features`` until it stops returning FEAT_PENDING.
+        False when there is no usable blob (software step detection only)."""
+        self._feat_on = False
+        return self.load_config(wait=False, **kw)
+
+    def poll_features(self):
+        """FEAT_PENDING while the engine starts; FEAT_OK once it runs (the
+        first OK switches on the step counter + activity and maps the latched
+        wrist-wear event to INT1); FEAT_ERROR or FEAT_NONE if it failed."""
+        if not self.features_ready():
+            return self.feat_state
+        if not self._feat_on:
+            self.enable_step_counter()
+            self.enable_feature(FEAT_WRIST_WEAR)
+            self.map_interrupts(int1=EV_WRIST_WEAR, latched=True)
+            self._feat_on = True    # only once all three went through: a bus error retries next poll
+        return FEAT_OK
 
     def features_ready(self):
         """Poll a pending engine init; True once INTERNAL_STATUS = init_ok."""
@@ -645,28 +600,23 @@ class BMA423:
         return self._feat_update(offset, FEAT_EN, FEAT_EN if on else 0)
 
     def steps(self):
-        """On-chip step count (0 without the feature engine)."""
+        """On-chip step count (0 until the step counter is enabled: ``poll_features``)."""
         self.i2c.readfrom_mem_into(self.addr, REG_STEP_COUNTER_0, self._b4)
         b = self._b4
         return b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24
-
-    get_steps = steps
 
     def activity(self):
         """ACT_STILL / ACT_WALK / ACT_RUN / ACT_UNKNOWN."""
         return self._r8(REG_ACTIVITY_TYPE) & 0x03
 
 
-def _check_blob(f, expect_sha256, chunk):
+def _check_blob(f, expect_sha256):
     """None if ``f`` is the expected config blob, else a short reason."""
     h = None
     if expect_sha256:
-        try:
-            import hashlib
-            h = hashlib.sha256()
-        except (ImportError, AttributeError):
-            h = None
-    buf = bytearray(chunk)
+        import hashlib
+        h = hashlib.sha256()
+    buf = bytearray(CONFIG_CHUNK)
     size = 0
     while True:
         k = f.readinto(buf)
@@ -674,7 +624,7 @@ def _check_blob(f, expect_sha256, chunk):
             break
         size += k
         if h is not None:
-            h.update(buf if k == chunk else buf[:k])
+            h.update(buf if k == CONFIG_CHUNK else buf[:k])
     if size != CONFIG_SIZE:
         return "size %d" % size
     if h is not None:

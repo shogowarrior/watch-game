@@ -3,7 +3,7 @@ from finder.compat import ticks_add, ticks_diff
 from finder.estimators.base import ACT_STILL, ACT_WALK
 from finder import scan
 from finder.scan import (ScanSession, fit_harmonic, evaluate, sigma_fit_deg,
-                         tilt_from_gravity, READY, SWEEP, RESULT)
+                         READY, SWEEP, RESULT)
 from sim.rng import Rng
 
 
@@ -67,7 +67,8 @@ def _drive(theta=90.0, noise=3.0, seed=1, model=None, motion=_flat, t0=0,
             if h is not None:
                 haps.append((t, h))
             if trace is not None:
-                trace.append((t, ss.phase, ss.wedge_deg, ss.paused, ss.top_text, ss.countdown))
+                trace.append((t, ss.phase, ss.wedge_deg, ss.paused, ss.top_text, ss.countdown,
+                              ss.fault))
         t += 50
     return ss, haps
 
@@ -124,41 +125,6 @@ def test_evaluate_thresholds():
     assert not ok and r == scan.R_FRIEND_MOVED
 
 
-def test_tilt_from_gravity():
-    assert tilt_from_gravity(0.0, 0.0, 1.0) < 1e-6
-    assert abs(tilt_from_gravity(0.0, 0.0, -1.0) - 180.0) < 1e-6
-    s = math.sin(40 * math.pi / 180)
-    c = math.cos(40 * math.pi / 180)
-    assert abs(tilt_from_gravity(s, 0.0, c) - 40.0) < 1e-3
-    assert abs(tilt_from_gravity(0.0, 0.0, 1.0, z_sign=-1) - 180.0) < 1e-6
-
-
-def test_tokens_match():
-    try:
-        import json
-        f = open("docs/design/tokens.json")
-    except (OSError, ImportError):
-        return  # wasm runner does not mount docs/
-    t = json.load(f)
-    f.close()
-    s = t["thresholds"]["scan"]
-    assert s["duration_ms"] == scan.DURATION_MS
-    assert s["ready_ms"] == scan.READY_MS
-    assert s["deg_per_s"] == scan.DEG_PER_S
-    assert s["min_peak_to_trough_db"] == scan.MIN_P2T_DB
-    assert s["max_s0_deg"] == scan.MAX_S0_DEG
-    assert s["tilt_fault_deg"] == scan.TILT_FAULT_DEG
-    assert s["tilt_fault_ms"] == scan.TILT_FAULT_MS
-    assert s["abort_steps"] == scan.ABORT_STEPS
-    assert s["abort_pause_ms"] == scan.ABORT_PAUSE_MS
-    assert s["bins"] == scan.BINS
-    assert s["min_packets_per_bin"] == scan.MIN_PACKETS
-    assert t["thresholds"]["arrow"]["scan_floor_deg"] == scan.FLOOR_DEG
-    assert t["haptics"]["blanking_ms_after_pulse"] == scan.BLANK_AFTER_MS
-    for k, ms in scan.HAPTIC_MS.items():
-        assert sum(t["haptics"]["patterns"][k]) == ms, k
-
-
 # ---- full sessions -----------------------------------------------------------
 
 def test_known_theta_noise_levels():
@@ -206,7 +172,7 @@ def test_haptic_sequence_and_bins():
     # result: bins in 0..1, peak at theta, trough opposite
     sw = ss.sweep(ticks_add(ss.t_result, 50))
     wedge, bins, ab, paused = sw
-    assert wedge == 360.0 and not paused and ab == ss.best_bin == 3
+    assert wedge == ss.theta_deg and not paused and ab == ss.best_bin == 3
     assert len(bins) == 12 and all(b is not None and 0.0 <= b <= 1.0 for b in bins)
     assert bins[3] == 1.0 and bins[9] == 0.0
     assert ss.sweep(ticks_add(ss.t_result, 250))[2] is None   # blink off
@@ -221,6 +187,26 @@ def test_haptic_sequence_and_bins():
     assert abs(ws[10] - ws[0] - 30.0) < 1e-6
     assert all(row[4] is None for row in sweep_rows)
     assert 0.0 <= ss.mirror <= 1.0
+
+
+def test_mirror_is_the_live_mirror():
+    from finder.session import LiveMirror
+    ss = ScanSession(0)
+    lm = LiveMirror()
+    assert ss.mirror is None
+    ss._start_sweep(0)
+    for i, r in enumerate((-60, -58, -70, -65, -55, -66)):
+        t = 100 + 50 * i
+        ss.on_packet(t, r, None)
+        lm.add(t, r)
+        assert ss.mirror == lm.value, (i, ss.mirror, lm.value)
+
+
+def test_noisy_bins_stay_in_unit_range():
+    for seed in range(60, 66):
+        ss, _ = _drive(theta=40.0 * seed, noise=6.0, seed=seed)
+        for b in ss.bins:
+            assert b is None or 0.0 <= b <= 1.0, (seed, ss.bins)
 
 
 def test_bins_without_data_are_none():
@@ -275,7 +261,7 @@ def test_tilt_pause_and_resume():
     assert ss.result is not None and _cerr(ss.result[0], 120.0) < 10.0
     paused = [r for r in tr if r[1] == SWEEP and r[3]]
     assert paused, "never paused"
-    assert all(r[4] == "HOLD FLAT" for r in paused)
+    assert all(r[4] is None and r[6] == "tilt" for r in paused)   # §6: no chip during the sweep
     ws = [r[2] for r in paused]
     assert max(ws) - min(ws) < 1e-6          # wedge holds its angle
     assert 800 <= len(paused) * 100 <= 1100  # 1.5 s tilt - 0.5 s latency; resumes when flat
@@ -307,7 +293,7 @@ def test_walking_pauses_steps_and_activity():
     tr = []
     ss, haps = _drive(motion=motion, trace=tr)
     paused = [r for r in tr if r[1] == SWEEP and r[3]]
-    assert paused and all(r[4] == "STAND STILL" for r in paused)
+    assert paused and all(r[4] is None and r[6] == "walk" for r in paused)
     assert ss.result is not None and ss.steps == 3
     assert [h for _, h in haps].count("NOPE") == 1
 
@@ -319,6 +305,15 @@ def test_walking_pauses_steps_and_activity():
     ss, _ = _drive(motion=motion2, trace=tr)
     paused = [r for r in tr if r[1] == SWEEP and r[3]]
     assert 800 <= len(paused) * 100 <= 1200 and ss.result is not None
+
+
+def test_fault_on_the_completing_frame_keeps_the_fix():
+    def motion(ss, t):
+        st = _sweep_t(ss, t)
+        return 5.0, 0, ACT_WALK if st is not None and st >= 11950 else ACT_STILL
+    ss, haps = _drive(motion=motion)
+    assert ss.result is not None and not ss.paused
+    assert haps[-1][1] == "CLOSER", haps
 
 
 def test_abort_on_steps():
@@ -373,19 +368,30 @@ def test_partner_walking():
     assert ss.reason == scan.R_FRIEND_MOVED and ss.toast == "FRIEND MOVED"
 
 
-def test_cancel_on_tap_any_phase():
+def test_partner_walk_counts_only_reported_frames():
+    # Game calls on_peer only while the partner's beacon is fresh: once the
+    # reports stop (beacons stale) the scan stops counting on the next frame
+    ss = ScanSession(0)
+    ss._start_sweep(0)
+    for t in range(0, 5100, 100):
+        if 1000 <= t < 2000:
+            ss.on_peer(t, True)            # fresh "walking" reports for 1 s ...
+        ss.update(t)                       # ... then none
+    assert ss.phase == SWEEP and ss.peer_walk_ms == 1000, ss.peer_walk_ms
+
+
+def test_cancel_any_phase():
     ss = ScanSession(0)
     ss.on_motion(0, 5.0, 0, ACT_STILL)
     ss.update(100)
-    assert not ss.on_input(150, 3)          # long press is not a cancel
-    assert ss.on_input(200, 1)              # TAP
+    assert ss.cancel(200)                   # tap or short press
     assert ss.phase == RESULT and ss.reason == scan.R_CANCEL
     assert ss.result is None and ss.toast is None and ss.done(200)
     assert not ss.active
 
     def motion(s, t):
         if s.phase == SWEEP and s.active_ms >= 3000:
-            s.on_input(t, 2)                # DOUBLE_TAP
+            s.cancel(t)
         return 5.0, 0, ACT_STILL
     ss, haps = _drive(motion=motion)
     assert ss.reason == scan.R_CANCEL and ss.result is None
@@ -398,8 +404,7 @@ def test_tap_during_result_keeps_fix():
     assert ss.phase == RESULT and ss.result is not None
     fix = ss.result
     t = ss.t_result + 300
-    assert not ss.on_input(t, 1)            # TAP
-    assert not ss.cancel(t + 10)            # short press
+    assert not ss.cancel(t)                 # tap or short press
     assert ss.result == fix and ss.reason is None
     assert not ss.done(t + 10)
     assert ss.done(ss.t_result + scan.BLINK_MS + scan.MORPH_MS)
@@ -410,47 +415,24 @@ def test_tap_during_result_keeps_fix():
     assert ss.reason == scan.R_CANCEL and ss.t_result == 100
 
 
-def test_blanking_flag_and_callback():
-    def motion(ss, t):
-        st = _sweep_t(ss, t)
-        if st is not None and 3000 <= st < 4200:
-            ss.set_blank(True)
-            return 60.0, 5, ACT_STILL      # tilt + step burst from the motor
-        ss.set_blank(False)
-        return 5.0, 5 if st is not None and st >= 3000 else 0, ACT_STILL
-    tr = []
-    ss, _ = _drive(motion=motion, trace=tr)
-    assert not any(r[3] for r in tr) and ss.result is not None and ss.steps == 0
-
+def test_blanking_callback():
     win = [None]
 
     def blank_fn(t):
         return win[0] is not None and 0 <= ticks_diff(t, win[0]) < 1200
 
-    def motion2(ss, t):
+    def motion(ss, t):
         st = _sweep_t(ss, t)
         if st is not None and 3000 <= st < 4200:
             if win[0] is None:
                 win[0] = t
-            return 60.0, 0, ACT_STILL
-        return 5.0, 0, ACT_STILL
+            return 60.0, 5, ACT_STILL      # tilt + step burst from the motor
+        return 5.0, 5 if st is not None and st >= 3000 else 0, ACT_STILL
     ss = ScanSession(0, blank_fn=blank_fn)
     tr = []
-    _drive(ss=ss, motion=motion2, trace=tr)
-    assert not any(r[3] for r in tr) and ss.result is not None
-
-
-def test_self_blanking_window():
-    ss = ScanSession(0)
-    ss.on_motion(0, 5.0, 0, ACT_STILL)
-    ss.update(500)
-    assert ss.pop_haptic() == "TICK"
-    assert ss.blanked(500) and ss.blanked(700)
-    assert not ss.blanked(500 + 60 + 150)
-    ss2 = ScanSession(0, self_blank=False)
-    ss2.on_motion(0, 5.0, 0, ACT_STILL)
-    ss2.update(500)
-    assert ss2.pop_haptic() == "TICK" and not ss2.blanked(510)
+    _drive(ss=ss, motion=motion, trace=tr)
+    assert not any(r[3] for r in tr) and ss.result is not None and ss.steps == 0
+    assert not ScanSession(0).blanked(0)
 
 
 def test_ticks_wrap():
@@ -458,13 +440,3 @@ def test_ticks_wrap():
     ss, haps = _drive(theta=210.0, noise=2.0, seed=7, t0=t0)
     assert ss.result is not None and _cerr(ss.result[0], 210.0) < 10.0
     assert len(haps) == 11
-
-
-def test_feed_tracker():
-    from finder.motion import MotionTracker
-    mt = MotionTracker(rate_hz=50)
-    for i in range(50):
-        mt.add_sample(i * 20, 0.0, 0.0, 1.0)
-    ss = ScanSession(0)
-    ss.feed_tracker(1000, mt)
-    assert ss.tilt_deg is not None and ss.tilt_deg < 1.0

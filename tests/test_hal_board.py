@@ -3,25 +3,7 @@ from tests import fakes
 
 def _setup(regs=None, pmu=True):
     m = fakes.install()
-
-    class W1C(m.FakeI2CDevice):
-        """AXP202 with write-1-to-clear IRQ status registers."""
-
-        def write(self, reg, data):
-            if 0x48 <= reg <= 0x4C:
-                self.writes.append((reg, bytes(data)))
-                self.regs[reg] &= ~data[0] & 0xFF
-                return
-            m.FakeI2CDevice.write(self, reg, data)
-
-    dev = None
-    if pmu:
-        r = {0x03: 0x41, 0x12: 0x02}
-        if regs:
-            for k in regs:
-                r[k] = regs[k]
-        dev = W1C(0x35, r)
-        m.i2c_devices[(0, 0x35)] = dev
+    dev = m.add_axp202(regs) if pmu else None
     import hal.board as hb
     return m, dev, hb
 
@@ -95,6 +77,8 @@ def test_init_order_and_backlight():
     assert dev.regs[0x12] & 0x04
     assert b.imu == "imu" and b.radio == "radio"
     assert m.spi_log and m.spi_log[0][2] == b"\x01"   # SWRESET first
+    cmds = [p for (_, _, p) in m.spi_log if len(p) == 1]
+    assert cmds.index(b"\x2c") < cmds.index(b"\x29")  # GRAM cleared before DISPON
 
 
 def test_init_non_strict_records_errors():
@@ -115,9 +99,12 @@ def test_init_non_strict_records_errors():
 
 
 def test_button_events():
-    m, dev, hb = _setup({0x4A: 0x02})
+    # Short + long latched before this boot (the power-on hold) are dropped.
+    m, dev, hb = _setup({0x4A: 0x03, 0x4C: 0x60})
     from hal import axp202
     b = hb.Board()
+    assert b.button() == 0
+    dev.regs[0x4A] = 0x02
     assert b.button() & axp202.EV_SHORT
     assert b.button() == 0
 
@@ -236,13 +223,10 @@ def test_safe_boot_without_pmu_runs_app():
 
 def test_radio_part_is_espnow_and_started():
     m, dev, hb = _setup(pmu=False)
-    try:
-        import hal.radio  # noqa: F401 - owned by the radio group
-    except ImportError:
-        return
     r = hb.Board(cpu_hz=None, channel=11).radio
     assert type(r).__name__ == "EspNowRadio" and r.channel == 11
     assert r._e is not None and r._e.active()
+    assert hb.Board(cpu_hz=None).radio.channel == 6
 
 
 def test_pmu_sets_ldo2_to_3v3_before_enabling():
@@ -301,35 +285,3 @@ def test_safe_boot_bus_error_keeps_press_seen():
         dev.write = write
 
     assert hb.safe_boot(b, window_ms=1000, flag="/nope", sleep=sleep) == "pek"
-
-
-def _deploy():
-    try:
-        import tools.deploy as d                # CPython host tool only
-    except ImportError:
-        return None
-    return d
-
-
-def _tree(tmp):
-    import os
-    for d in ("finder", "hal"):
-        os.makedirs(os.path.join(tmp, d))
-        open(os.path.join(tmp, d, "x.py"), "w").close()
-    for f in ("main.py", "secrets.py"):
-        open(os.path.join(tmp, f), "w").close()
-
-
-def test_deploy_secrets_opt_in():
-    d = _deploy()
-    if d is None:
-        return
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp:
-        _tree(tmp)
-        _, files, notes = d.collect(tmp)
-        assert "secrets.py" not in [r for _, r in files]
-        assert any("--secrets" in n for n in notes)
-        _, files, notes = d.collect(tmp, secrets=True)
-        assert "secrets.py" in [r for _, r in files]
-        assert any(n.startswith("WARNING") for n in notes)

@@ -9,8 +9,7 @@
 """
 
 from sim.rng import Rng
-from sim.world import World, Walker
-from sim.radio import Radio, add_walls, profile
+from sim.radio import Radio, add_walls
 from sim.imu import Imu
 
 
@@ -20,11 +19,19 @@ class Sim:
     def __init__(self, world, prof="typical", seed=0, imu="typical", rate_hz=10.0):
         rng = Rng(seed)
         self.world = world
-        self.prof = profile(prof)
         self.imus = (Imu(world.a, rng.fork(11), imu), Imu(world.b, rng.fork(12), imu))
-        if self.prof["walls"] and not world.obstacles:
-            add_walls(world, rng.fork(13))
-        self.radio = Radio(world, self.prof, rng.fork(14), self.imus, rate_hz)
+        self.radio = Radio(world, prof, rng.fork(14), self.imus, rate_hz)
+        self._walls(rng)
+
+    def set_profile(self, prof, rng):
+        """New radio environment, same devices (``Radio.set_profile``); a profile
+        with walls adds them unless the world has obstacles already."""
+        self.radio.set_profile(prof, rng.fork(14))
+        self._walls(rng)
+
+    def _walls(self, rng):
+        if self.radio.p["walls"] and not self.world.obstacles:
+            add_walls(self.world, rng.fork(13))
 
     @property
     def t(self):
@@ -32,10 +39,18 @@ class Sim:
 
     def step(self, dt):
         """Advance dt seconds; returns (packets received by A, packets received by B)."""
+        self._move(dt)
+        return self.radio.step(dt)
+
+    def step_with(self, dt, world, prof):
+        """``step`` with the radio on a stand-in channel (``Radio.step_with``)."""
+        self._move(dt)
+        return self.radio.step_with(dt, world, prof)
+
+    def _move(self, dt):
         self.world.step(dt)
         self.imus[0].step(dt)
         self.imus[1].step(dt)
-        return self.radio.step(dt)
 
     def motion(self, i):
         return self.imus[i].info

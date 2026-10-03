@@ -2,15 +2,17 @@
 
 How the code is layered, what happens on each tick, and how fast things run.
 Behaviour is defined in [`design/ui-spec.md`](design/ui-spec.md); the drivers
-are described in [`../hal/README.md`](../hal/README.md).
+are described in [`../hal/README.md`](../hal/README.md). Terms such as
+hysteresis and dwell are explained in the
+[ui-spec glossary](design/ui-spec.md#13-glossary).
 
 ## Layers
 
 | Layer | Where | Runs on | Depends on |
 |---|---|---|---|
-| Hardware abstraction | `hal/` | watch (and CPython/WASM against `tests/fakes/`) | `machine`, `network`, `espnow`, `framebuf` |
+| Hardware abstraction | `hal/` | watch (and CPython/WASM against `tests/fakes/`) | `machine`, `network`, `espnow`; `finder.compat` (ticks, `const`), `finder.link` (the radio's `TxScheduler`) |
 | Game logic | `finder/` | watch, CPython, browser (MicroPython WASM) | nothing hardware-specific; `finder/compat.py` only |
-| Renderer | `ui/` | watch, browser (needs `framebuf`, so MicroPython only) | `finder.render_params`, `finder.tuning` |
+| Renderer | `ui/` | watch, browser (needs `framebuf`, so MicroPython only) | `finder.tuning`, `finder.compat`; hint strings from `finder.scan`, `finder.pairing` |
 | Watch runtime | `app/`, `main.py`, `boot.py` | watch (tested on CPython with fakes) | `hal.board.Board`, `finder`, `ui` |
 | Simulation | `sim/` (+ `sim/webhost.py`, `web/sim/index.html`) | CPython, browser | `finder`, `ui` (webhost only) |
 | Tooling | `tools/`, `tests/` | host (some scripts on the watch) | all of the above |
@@ -18,14 +20,18 @@ are described in [`../hal/README.md`](../hal/README.md).
 Rules that keep the layers apart:
 
 - Only `hal/` imports `machine`, `network` or `espnow`. `app/runtime.py`
-  receives hardware through `Board` parts and even copies the few `hal` constants
-  it needs, so it runs against fakes.
+  receives hardware through `Board` parts and takes only constants and the
+  watchdog from `hal`, so it runs against fakes.
 - `finder/` never reads hardware or the clock by itself: every call takes a
   `t_ms` (ticks ms, compared only with `ticks_diff`). That is what lets one fake
   clock drive two games in the simulator and in `tests/test_episode.py`.
-- The renderer reads **only** `RenderParams` (plus `game.runes`,
-  `game.menu_rows`, `game.sun`). It never sees estimator internals. The same
-  `RenderParams` stream can be logged as JSON and replayed.
+- The renderer reads **only** `RenderParams` (runes, menu rows and sun mode are
+  fields too). It never sees estimator internals. `RenderParams` is
+  JSON-serialisable (`to_dict` / `from_dict`), so the stream could be logged and
+  replayed. No replay tool exists yet (R-08, R-14 in
+  [user-research](research/user-research.md)): `app/telemetry.py` logs a
+  5 Hz state subset, not `RenderParams`, and the web simulator has no replay
+  input.
 - Constants come from `docs/design/tokens.json` through `tools/gen_tuning.py`
   into `finder/tuning.py`, which the logic and the renderer share.
 
@@ -45,6 +51,7 @@ flowchart LR
   subgraph APP["app/runtime.py"]
     LINK["finder.link.LinkMonitor<br/>MAC lock, dedup, loss"]
     FEED["app.imu_feed.ImuFeed<br/>25 Hz g + bump spikes"]
+    MT["motion.MotionTracker"]
     GEST["finder.gestures<br/>GestureRecognizer"]
     PLAYER["finder.haptic_patterns<br/>HapticPlayer"]
   end
@@ -55,7 +62,7 @@ flowchart LR
     SCAN["scan<br/>360° body-shadow fit"]
     ARROW["arrow<br/>lifecycle, sigma"]
     PAIR["pairing / session"]
-    MT["motion.MotionTracker"]
+    MENU["menu<br/>MENU rows, END ROUND"]
     RP["RenderParams"]
   end
 
@@ -66,16 +73,19 @@ flowchart LR
   SCAN -->|theta, s0| ARROW
   IMU --> FEED --> MT
   FEED -->|on_accel_tap| GAME
-  MT --> EST
-  MT --> SCAN
+  MT -->|set_tracker| EST
+  MT -->|set_tracker| SCAN
+  TOUCH -->|on_touch_down| GAME
   TOUCH --> GEST -->|on_gesture| GAME
   PEK -->|on_button, set_battery| GAME
   PX --> RP
   ARROW --> RP
   PAIR --> RP
+  MENU --> RP
   RP --> REND["ui.renderer.Renderer<br/>10 strips of 240x24"]
   REND --> DISP
-  REND -->|haptic events| PLAYER --> MOTOR
+  REND -->|heartbeats| PLAYER --> MOTOR
+  RP -.->|haptic| PLAYER
   GAME -->|fill_beacon, beacon_hz| RADIO
 ```
 
@@ -88,39 +98,63 @@ stages in order:
    `game.on_packet(t_rx, mac, rssi, beacon)`. The game updates the partner view,
    feeds pairing/calibration, calls `est.update(t, rssi, peer_rssi, my_motion,
    peer_motion)` and, while scanning, `scan.on_packet` with the raw RSSI.
-2. **imu**: `ImuFeed.poll` drains the BMA423 FIFO, block-averages to 25 Hz for
-   `MotionTracker.add_sample` (steps, activity, stillness, tilt, face-up) and
-   runs the bump spike detector on every 100 Hz sample (-> `game.on_accel_tap`),
-   ignoring samples inside haptic blanking. Once a second the optional feature
-   engine adds chip steps and activity, and wrist-wear -> `game.on_wake`.
-3. **touch**: `FT6336.read()` -> `GestureRecognizer` -> `game.on_gesture`.
+2. **touch**: `FT6336.read()` -> `GestureRecognizer` (multi-touch ignored).
+   Touch is also sampled after every 2nd strip while a frame renders (about
+   8 ms apart, so a 60 ms tap measures right); what those samples find waits
+   for this stage: `game.on_touch_down` when a finger landed
+   (`GestureRecognizer.began`) and `game.on_gesture`, in time order: a press
+   lands before its gesture; when a gesture ends on the sample where a new
+   finger lands, the gesture goes first. It runs before imu, so the finger's
+   own spike is guarded.
+3. **imu**: `ImuFeed.poll` drains the BMA423 FIFO, averages each block of 4
+   samples into one 25 Hz sample for `MotionTracker.add_sample` (steps,
+   activity, stillness, tilt, face-up) and runs the bump spike detector on
+   every 100 Hz sample (-> `game.on_accel_tap`), ignoring samples inside haptic
+   blanking (the motor shakes the accelerometer, so samples from the start of a
+   buzz until 150 ms after it are ignored). There are two blanking windows:
+   ImuFeed's own, from the actual motor edges (`ImuFeed.blanked`, which the
+   game also gets as `blank_fn`), and Game's `BlankWindow`, set for each haptic
+   event it raises (also the only one in the simulator, which has no feed).
+   `Game.blanked` ORs them and the scan uses it, so a tap must clear both. Once
+   a second the optional feature engine adds chip steps and activity, and
+   wrist-wear -> `game.on_wake` (only while the screen is off).
 4. **button**: `AXP202.poll()` -> `game.on_button(t, long)`.
 5. **logic** (every 100 ms): `game.set_tracker`, battery every 10 s, then
-   `game.tick(t)`. Inside `tick`: the delivery meter and `Proximity.update_est`
+   `game.tick(t)`. Inside `tick`: the delivery meter (the share of the partner's
+   beacons that arrived over the last 5 s) and `Proximity.update_est`
    turn the estimate into zone (with hysteresis and dwell), intensity, band and
-   gated trend; the active mode runs (`pairing`, hunt with `arrow`, `scan`,
+   gated trend (WARMER/COLDER, shown only once the change is clearly bigger
+   than the noise); the active mode runs (`pairing`, hunt with `arrow`, `scan`,
    link-lost, found, menu); FOUND is checked from the bump match; the result is
-   one `RenderParams`. The runtime then applies screen power and backlight, and
-   shuts the PMU down only once `game.power_off`.
+   one `RenderParams`. The runtime then applies screen power (the panel wakes
+   dark; the backlight follows `params.backlight` after each rendered frame),
+   and shuts the PMU down only once `game.power_off`.
 6. **render** (at `params.fps_cap`): `Renderer.frame(params, display, now)`
-   composes each 240x24 strip off-screen (GS8 ring-index map blitted through a
-   256-entry byte-swapped RGB565 palette, then glyph and text overlays) and
+   composes each 240x24 strip off-screen (a map of each pixel's ring number,
+   coloured through a 256-entry palette of byte-swapped RGB565, then glyph and
+   text overlays) and
    pushes it with `display.push_strip`. With the screen off it runs with
-   `display=None`, so ring and heartbeat timing continue. It returns haptic
-   events (heartbeats locked to ring spawns, plus `params.haptic` once).
+   `display=None`, so ring and heartbeat timing continue. It returns only the
+   heartbeat names, locked to ring spawns.
 7. **tx**: when due, `game.fill_beacon` fills the 16-byte beacon (seq, own and
    filtered RSSI of the partner, steps, activity, battery, state byte, flags,
-   bump age) and `radio.maybe_send` broadcasts it. The period is
-   `1000 // game.beacon_hz` with about 10 % jitter from `TxScheduler`, so two
-   watches never transmit in lock-step.
-8. **haptic**: renderer events go into `HapticPlayer.play_frame`; `tick(now)`
-   gives the motor level, applied by `Motor.set` only on change. The motor is
-   also serviced after every strip, and in `idle` while a pattern plays.
+   bump age) and `radio.maybe_send` broadcasts it. `radio.set_rate` keeps the
+   period at `1000 // game.beacon_hz` with about 10 % jitter from
+   `TxScheduler`, so two watches never transmit in lock-step.
+8. **haptic**: `params.haptic` (once, when its frame is first drawn, via
+   `play_named`; telemetry logs it only if the player accepted it) and the
+   renderer's heartbeats (`heartbeat`, one call per beat) go into
+   `HapticPlayer`; `tick(now)` gives the motor level, applied by `Motor.set`
+   only on change. The motor is also serviced after every strip, and in
+   `idle` while a pattern plays.
 9. **gc**: `gc.collect()` once a second when the next frame is at least 10 ms
    away (forced after 4 s).
 
 `step` returns the ms to the next deadline; `run` sleeps that long (at most
-50 ms). I2C errors are counted in `io_errors` and never stop the loop.
+50 ms). OSErrors that reach the loop from a part are counted in `io_errors` and
+never stop the loop; any other exception stops it, logged first as a telemetry
+`crash` event when logging is on; the touch and radio drivers count their own bus errors
+(`touch_errors`, `radio_stats` in `stats()`).
 
 ### Direction (scan -> arrow)
 
@@ -128,35 +162,38 @@ The player holds the watch flat at the chest and turns on the spot for 12 s of
 active time, guided by a wedge that turns at 30°/s. The body shadows the signal,
 so RSSI (own, and the partner's reported `rssi_last`) is lowest facing away.
 `ScanSession` tags each raw sample with the wedge angle φ and fits
-`rssi = a0 + a1·cos(φ − θ)`. A good fit gives an arrow at θ with a cone s0.
-A weak or noisy fit is an honest `NO FIX`. Tilt or walking pauses the sweep. The
-arrow is relative to the heading at scan start, and `arrow.py` grows its sigma
-with steps and time until it expires.
+`rssi = a0 + a1·cos(φ − θ)` (a0: the average level, a1: how much the body dims
+the signal facing away, θ: the partner's direction). A good fit gives an arrow
+at θ with a cone of half-width s0 (its uncertainty). A weak or noisy fit is an
+honest `NO FIX`. Tilt or walking pauses the sweep. The arrow is relative to the
+heading at scan start, and `arrow.py` grows its sigma with steps and time until
+it expires.
 
 ### FOUND
 
 `Game` never enters FOUND from RSSI. Each beacon carries `bump_ago_ms`, so the
 receiver puts the partner's accelerometer spike on its own clock (the unknown
-clock offset cancels). Both spikes within 400 ms while both watches are in HOT
-is a match. The fallback is both short presses within 3 s in HOT.
+clock offset cancels). Both spikes within 400 ms, each made in HOT (the
+beacon's `ST_TAP_HOT` bit), while both watches are in HOT is a match. The
+fallback is both short presses within 3 s in HOT.
 
 ## Timing
 
 | What | Rate | Where |
 |---|---|---|
-| Game logic (`Game.tick`) | 10 Hz (100 ms) | `app.runtime.TICK_MS` |
-| Render | 20 fps (15 in saver / low battery); a frame is about 40 ms on the watch, about 35 ms of it SPI at 26.67 MHz | `params.fps_cap`, `tuning.FPS_*` |
+| Game logic (`Game.tick`) | 10 Hz (100 ms) | `finder.tuning.LOGIC_MS` |
+| Render | 20 fps (15 in saver / low battery); a frame is about 40 ms on the watch, about 35 ms of it SPI at 26.67 MHz | `params.fps_cap`, `tuning.FPS_TARGET`, `tuning.SAVER_FPS` |
 | Beacons | 10 Hz normal, 20 Hz in HOT and while scanning, 5 Hz in saver | `game.beacon_hz`, `tuning.BEACON_HZ_*` |
 | BMA423 FIFO | 100 Hz, drained every loop (holds 1.7 s) | `app.imu_feed` |
 | Motion tracker | 25 Hz | `app.runtime.IMU_OUT_HZ` |
 | Feature engine poll | 1 Hz | `app.runtime.CHIP_MS` |
-| Touch / button poll | every loop, at least every 20 ms | `app.runtime.INPUT_MS` |
+| Touch / button poll | touch: every loop and after every 2nd display strip (about 8 ms apart while a frame renders); button: every loop, at least every 20 ms | `app.runtime.INPUT_MS` |
 | Battery | every 10 s; a shutdown-level reading must repeat 3 times, 1 s apart, off USB | `BATTERY_MS`, `BATT_LOW_READS` |
 | Haptics | pulses and gaps >= 60 ms; motor serviced every strip and every 1 ms while a pattern plays | `finder.haptic_patterns` |
 | Link loss | 5 s with no packet after a fix -> LINK_LOST | `finder.game`, ui-spec §6 |
 
 Budgets: an estimator update should stay well under 2 ms on the ESP32
-(kalman2 is about 30 µs per packet on the WebAssembly port). The render loop
+(kalman2 is about 33 µs per packet on the WebAssembly port). The render loop
 allocates nothing, so gc stays short and predictable.
 
 ## Simulation and the web simulator
@@ -168,14 +205,20 @@ hints with realistic errors (`imu.py`). `sim/accel_synth.py` makes raw wrist
 accelerometer data for the drift study. `Sim` binds them; `scenarios.py` names
 repeatable runs.
 
-- `tools/bakeoff.py` replays the same traces into every estimator.
-- `tests/test_episode.py` wires two full `Game`s to the sim, with beacons packed
-  and unpacked through `finder.proto`, and plays a round to FOUND.
+- `tools/bakeoff.py` replays the same traces into every estimator, set up as
+  the game sets it up, and through the game's `finder.proximity`.
+- `tests/test_episode.py` wires two full `Game`s to the sim through
+  `sim/link.py` (`GameLink`: each watch beacons at its own `Game.beacon_hz`,
+  and beacons are packed and unpacked through `finder.proto`), and plays a
+  round to FOUND.
 - `sim/webhost.py` (`TwoWatchSim`) does the same with a `Renderer` +
-  `FrameCapture` per watch. `web/sim/index.html` loads MicroPython WebAssembly,
+  `FrameCapture` and a `HapticPlayer` per watch (nothing is drawn while a
+  screen is off, as on the watch). `web/sim/index.html` loads MicroPython WebAssembly,
   steps it from `requestAnimationFrame` and blits both 240x240 frames straight
   from wasm memory. `tools/build_sim.py` bundles `finder/`, `ui/` and `sim/` into
   `dist/sim/`.
 
 The browser therefore runs the same state machine, constants and renderer as the
-watch. Only the drivers, the runtime loop and the physics differ.
+watch. Only the drivers, the runtime loop and the physics differ, plus the
+page's Auto-pair switch (on by default), a demo shortcut: a 5 s split,
+auto-confirm and a 1 m proxy calibration.

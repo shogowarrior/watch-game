@@ -2,43 +2,24 @@
 
 Strings are rendered once per distinct (face, text) into MONO_HLSB
 FrameBuffers and blitted with a 2-entry RGB565 palette plus a transparent
-key. MicroPython 1.29 compares the blit key *after* the palette lookup
-(verified in the wasm port), older ports compare the raw source pixel;
-``KEY_POST`` is probed at import and the key chosen to work either way.
+key. MicroPython compares the blit key after the palette lookup, so the key
+is the palette's background entry.
 
 All ``draw_*`` helpers take the strip FrameBuffer and its top row ``y0`` and
 use absolute screen coordinates. Nothing here allocates on a cache hit.
 """
 
+import framebuf
+
+from finder import tuning as T
 from finder.compat import const
-from ui import (CRIT, GREY, LINE_SUBTLE, PROX, SURF_CHIP, SURF_TOAST, TEXT_PRI,
-                TEXT_SEC, TEXT_TER, WARN, ACC_COLD)
+from ui import (ACC_COLD, CRIT, LINE_SUBTLE, PROX, SURF_CHIP, SURF_TOAST, TEXT_PRI,
+                TEXT_SEC, TEXT_TER, WARN)
 from ui import font
 from ui.font import DISPLAY, LABEL, MICRO, WORD
 from ui.glyphs import draw_diamond, draw_mark, rrect
 
-try:
-    import framebuf
-except ImportError:  # CPython
-    framebuf = None
-
 CACHE_MAX = const(24)     # strings per face before the face cache is flushed
-
-
-def _probe_key_post():
-    """True if FrameBuffer.blit compares ``key`` after the palette lookup."""
-    if framebuf is None:
-        return True
-    src = framebuf.FrameBuffer(bytearray(1), 8, 1, framebuf.MONO_HLSB)   # all 0
-    pal = framebuf.FrameBuffer(bytearray(4), 2, 1, framebuf.RGB565)
-    pal.pixel(0, 0, 0x1234)
-    dst = framebuf.FrameBuffer(bytearray(2), 1, 1, framebuf.RGB565)
-    dst.pixel(0, 0, 0x5555)
-    dst.blit(src, 0, 0, 0x1234, pal)
-    return dst.pixel(0, 0) == 0x5555
-
-
-KEY_POST = _probe_key_post()
 
 
 class TextCache:
@@ -69,7 +50,7 @@ class TextCache:
             fb = framebuf.FrameBuffer(bytearray(4), 2, 1, framebuf.RGB565)
             fb.pixel(0, 0, k)
             fb.pixel(1, 0, c)
-            e = (fb, k if KEY_POST else 0)
+            e = (fb, k)
             self._pal[c] = e
         return e
 
@@ -104,10 +85,9 @@ def chip(fb, y0, x, y, w, h, r, fill, border=-1):
         rrect(fb, x, y, w, h, r, fill)
 
 
-TOP_Y = const(12)
-TOP_H = const(24)
-BOT_Y = const(186)
-BOT_H = const(40)
+TOP_Y = T.TOP_SLOT[1]
+TOP_H = T.TOP_SLOT[3]       # y 12..35 (§2)
+BOT_X, BOT_Y, BOT_W, BOT_H = T.BOTTOM_SLOT
 
 
 def draw_top_chip(tc, fb, y0, s, c, mark=0):
@@ -127,9 +107,9 @@ def draw_top_chip(tc, fb, y0, s, c, mark=0):
 def _batt_col(pct):
     if pct is None:
         return LINE_SUBTLE
-    if pct <= 10:
+    if pct <= T.BATT_CRITICAL_PCT:
         return CRIT
-    if pct <= 20:
+    if pct <= T.BATT_WARN_PCT:
         return WARN
     return TEXT_SEC
 
@@ -146,10 +126,10 @@ def _battery_icon(fb, y0, x, y, pct, c):
             fb.fill_rect(x + 4, y + 4, w, 4, c)
 
 
-LINK_H = (4, 7, 10, 13)
+LINK_W, LINK_GAP, LINK_H = T.LINK_BARS
 
 
-def draw_status(tc, fb, y0, own, partner, link_q, unreliable=False):
+def draw_status(tc, fb, y0, own, partner, link_q, unreliable):
     """StatusStrip (y 12..31): own battery | link bars | partner battery.
 
     Link bars turn status.warn at link_q <= 1 or while ``unreliable`` (§5.5).
@@ -159,13 +139,14 @@ def draw_status(tc, fb, y0, own, partner, link_q, unreliable=False):
     chip(fb, y0, 12, 12, 52, 20, 6, SURF_CHIP)
     _battery_icon(fb, y0, 18, 16, own, c)
     if own is not None and own < 100:
-        tc.draw(fb, y0, MICRO, tc.num(own), 46, 18, TEXT_TER if own > 20 else c)
+        tc.draw(fb, y0, MICRO, tc.num(own), 46, 18, TEXT_TER if own > T.BATT_WARN_PCT else c)
     # link bars 98..141 (4 bars, w4 gap2, bottom-aligned at y 28)
     chip(fb, y0, 98, 12, 44, 20, 6, SURF_CHIP)
     lc = WARN if (link_q <= 1 or unreliable) else TEXT_SEC
     for k in range(4):
         h = LINK_H[k]
-        fb.fill_rect(109 + 6 * k, 29 - h - y0, 4, h, lc if k < link_q else LINE_SUBTLE)
+        fb.fill_rect(109 + (LINK_W + LINK_GAP) * k, 29 - h - y0, LINK_W, h,
+                     lc if k < link_q else LINE_SUBTLE)
     # partner 176..227: diamond mark + battery
     chip(fb, y0, 176, 12, 52, 20, 6, SURF_CHIP)
     pc = _batt_col(partner)
@@ -178,15 +159,12 @@ def readout_width(band, slot):
     return 12 + (18 if slot else 0) + 16 * len(band) + 2 + 8 + 12
 
 
-def draw_readout(tc, fb, y0, band, mark, slot=None, c=TEXT_SEC):
+def draw_readout(tc, fb, y0, band, mark, slot):
     """DistanceReadout pill: [mark] numeral + 'M' (h 40, radius h/2).
 
-    ``slot`` (default: ``mark != 0``) keeps the mark's slot even while the
-    trend is 0, so the pill and numerals hold still as the mark comes and
-    goes.
+    ``slot`` keeps the mark's slot even while the trend is 0, so the pill
+    and numerals hold still as the mark comes and goes.
     """
-    if slot is None:
-        slot = mark != 0
     w = readout_width(band, slot)
     x = 120 - w // 2
     chip(fb, y0, x, BOT_Y, w, BOT_H, 20, SURF_CHIP)
@@ -195,8 +173,8 @@ def draw_readout(tc, fb, y0, band, mark, slot=None, c=TEXT_SEC):
         if mark:
             draw_mark(fb, y0, x + 6, BOT_Y + 20, mark, PROX[6], ACC_COLD, SURF_CHIP)
         x += 18
-    x += tc.draw(fb, y0, WORD, band, x, BOT_Y + 4, c)
-    tc.draw(fb, y0, LABEL, "M", x + 2, BOT_Y + 18, c)
+    x += tc.draw(fb, y0, WORD, band, x, BOT_Y + 4, TEXT_SEC)
+    tc.draw(fb, y0, LABEL, "M", x + 2, BOT_Y + 18, TEXT_SEC)
 
 
 def draw_word(tc, fb, y0, s, c):
@@ -210,22 +188,23 @@ def draw_word(tc, fb, y0, s, c):
 SEV_COL = {"info": PROX[5], "warn": WARN, "critical": CRIT}
 
 
-def draw_toast(tc, fb, y0, s, border, dy=0):
-    """Toast / banner: full bottom slot, radius.lg, 2 px border, label text."""
-    y = BOT_Y + dy
-    chip(fb, y0, 24, y, 192, BOT_H, 8, SURF_TOAST, border)
+def _pill(tc, fb, y0, y, s, border):
+    """Bottom-slot-wide surface.toast pill (radius.lg) with centred label text."""
+    chip(fb, y0, BOT_X, y, BOT_W, BOT_H, 8, SURF_TOAST, border)
     tc.draw(fb, y0, LABEL, s, 120 - width(LABEL, s) // 2, y + 12, TEXT_PRI)
+
+
+def draw_toast(tc, fb, y0, s, border, dy):
+    """Toast / banner: full bottom slot, 2 px border, ``dy`` px below it."""
+    _pill(tc, fb, y0, BOT_Y + dy, s, border)
 
 
 def draw_menu_row(tc, fb, y0, y, s, selected):
-    chip(fb, y0, 24, y, 192, 40, 8, SURF_TOAST, PROX[5] if selected else -1)
-    tc.draw(fb, y0, LABEL, s, 120 - width(LABEL, s) // 2, y + 12, TEXT_PRI)
+    """MENU row at ``y`` (h 40); the selected row has a prox.5 border."""
+    _pill(tc, fb, y0, y, s, PROX[5] if selected else -1)
 
 
-def draw_countdown(tc, fb, y0, s, c=TEXT_PRI):
+def draw_countdown(tc, fb, y0, s):
     """type.display digits centred at (120, 120): 1 digit x 108..132, y 96..144."""
     w = width(DISPLAY, s)
-    tc.draw(fb, y0, DISPLAY, s, 120 - w // 2, 96, c)
-
-
-GREY6 = GREY[6]
+    tc.draw(fb, y0, DISPLAY, s, 120 - w // 2, 96, TEXT_PRI)

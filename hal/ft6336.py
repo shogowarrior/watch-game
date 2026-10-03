@@ -18,11 +18,7 @@ Registers (FT6x36 datasheet): 0x02 TD_STATUS (touch count, low nibble),
 import machine
 from hal import pins
 
-try:
-    from micropython import const
-except ImportError:  # CPython tests
-    def const(x):
-        return x
+from finder.compat import const
 
 ADDR = const(0x38)
 _TD_STATUS = const(0x02)
@@ -59,7 +55,7 @@ class FT6336:
         self.mirror_y = mirror_y
         self.errors = 0
         self._buf = bytearray(5)
-        self._res = [False, 0, 0]
+        self._res = [False, 0, 0, 0]
         self._int = None
         self._gate = False
         if int_pin is not None:
@@ -82,11 +78,13 @@ class FT6336:
         return self.width, self.height
 
     def read(self):
-        """Poll once -> ``[touching, x, y]``.
+        """Poll once -> ``[touching, x, y, contacts]``.
 
         The SAME list is returned every call (allocation-free); copy it if you
-        need to keep it. x/y keep their last value while not touching. Bus
-        errors count in ``errors`` and read as "not touching".
+        need to keep it. x/y are point 1 and keep their last value while not
+        touching; ``contacts`` is 1 or 2 while touching (2 = two fingers or a
+        palm: callers ignore multi-touch), else 0. Bus errors count in
+        ``errors`` and read as "not touching".
         """
         r = self._res
         if self._gate and not r[0] and self._int.value():
@@ -97,10 +95,12 @@ class FT6336:
         except OSError:
             self.errors += 1
             r[0] = False
+            r[3] = 0
             return r
         n = b[0] & 0x0F
         if n == 0 or n > 2 or (b[1] >> 6) == _EV_LIFT:
             r[0] = False
+            r[3] = 0
             return r
         w = self.width
         h = self.height
@@ -127,6 +127,7 @@ class FT6336:
         r[0] = True
         r[1] = x
         r[2] = y
+        r[3] = n
         return r
 
     def int_active(self):

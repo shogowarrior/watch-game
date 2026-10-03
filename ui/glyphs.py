@@ -11,18 +11,18 @@ precomputed at import; per-frame rotation writes into preallocated
 import array
 import math
 
+from finder import tuning as T
 from ui import (ACC_COLD, ACC_FOUND, BG_BASE, BG_IRIS, GREY, LINE_SUBTLE, PROX,
                 TEXT_PRI, WARN)
 from ui.field import COS, SIN
 
-CX = 120
-CY = 120
+CX, CY = T.CENTER
 
 # ---- geometry helpers (import time; floats allowed) -------------------------
-DART = ((0, -50), (30, 34), (0, 16), (-30, 34))
-CHEVRON = ((-24, 4), (0, -16), (24, 4), (24, 14), (0, -6), (-24, 14))
-CHECK = ((-28, 2), (-20, -6), (-8, 6), (20, -22), (28, -14), (-8, 22))
-TURN_HEAD = ((22, 14), (33, -2), (11, -2))
+DART = T.DART_PTS
+CHEVRON = T.CHEVRON_UP_PTS
+CHECK = T.CHECK_PTS
+TURN_HEAD = T.TURN_HEAD_PTS
 
 
 def _area(pts):
@@ -116,13 +116,13 @@ CHEV_UP = _arr(CHEVRON)
 # arm-end corners, so no mitre spikes stick out past the band
 CHEV_DN_OUT = _arr(_rot180(offset_poly(CHEVRON, 2.0, 1.5, True)))
 CHEV_DN_IN = _arr(_rot180(offset_poly(CHEVRON, -2.0)))
-CHEV_STRONG_DY = 8          # warmer: copies at y 112 / 128 (+-8)
+CHEV_STRONG_DY = T.CHEVRON_STACK_PX // 2   # warmer: copies at y 112 / 128 (+-8)
 CHEV_DN_STRONG_DY = 13      # colder: +-13 (107 / 133), so the bands stay apart
 CHECK_A = _arr(CHECK)
-TURN_R = _arr(arc_band(19, 25, -150, 90, 15))
+_TA = T.TURN_ARC            # (r, from_deg, to_deg, stroke)
+_TURN = arc_band(_TA[0] - _TA[3] // 2, _TA[0] + _TA[3] // 2, _TA[1], _TA[2], 15)
+TURN_R = _arr(_TURN)
 TURN_R_HEAD = _arr(TURN_HEAD)
-TURN_L = _arr([(-x, y) for x, y in arc_band(19, 25, -150, 90, 15)])
-TURN_L_HEAD = _arr([(-x, y) for x, y in TURN_HEAD])
 MARK_UP = _arr(((0, -6), (6, 5), (-6, 5)))
 MARK_DN_OUT = _arr(((-6, -5), (6, -5), (0, 6)))
 MARK_DN_IN = _arr(offset_poly(((-6, -5), (6, -5), (0, 6)), -2.0))
@@ -133,7 +133,7 @@ _dart = array.array("h", [0] * len(DART_Q4))
 _dart_key = array.array("h", [0] * len(DART_KEY_Q4))
 _dart_in = array.array("h", [0] * len(DART_IN_Q4))
 # beam sector: centre + n+1 arc points, n = 3..12 segments (<= 14 vertices)
-BEAM_R = 60
+BEAM_R = T.BEAM_R
 _beam = [None, None, None] + [array.array("h", [0] * (2 * (n + 2))) for n in range(3, 13)]
 _wedge = array.array("h", [0] * 16)
 _wedge_key = array.array("h", [0] * 16)
@@ -162,9 +162,8 @@ def _polar(dst, k, r, deg):
 
 
 # ---- arrow (dart + beam + keyline) ------------------------------------------
-STYLE_A = 1
-STYLE_B = 2
-STYLE_OUT = 3
+STYLES = {name: k + 1 for k, name in enumerate(T.ARROW_STYLES)}   # solid_a 1 .. outline 3
+STYLE_OUT = STYLES["outline"]
 DART_COL = (0, PROX[7], PROX[6], PROX[5])
 BEAM_COL = (0, PROX[4], PROX[3], PROX[2])
 
@@ -207,8 +206,8 @@ def draw_arrow(fb, y0, style, beam):
 # ---- chevrons ----------------------------------------------------------------
 def chevron_nudge(t):
     """0..6 px, 800 ms in_out_sine each way (1600 ms loop)."""
-    deg = (t % 1600) * 360 // 1600
-    return (6 * (16384 - COS[deg]) + 16384) >> 15
+    deg = (t % (2 * T.CHEVRON_NUDGE_MS)) * 180 // T.CHEVRON_NUDGE_MS
+    return (T.CHEVRON_NUDGE_PX * (16384 - COS[deg]) + 16384) >> 15
 
 
 def draw_chevrons(fb, y0, trend, strong, nudge):
@@ -237,30 +236,35 @@ def draw_chevrons(fb, y0, trend, strong, nudge):
 
 
 # ---- seeker, check, turn, battery, dots ------------------------------------
-def draw_seeker(fb, y0, c=GREY[7]):
+_SR, _SS = T.SEEKER_RING                    # ring r 14, stroke 4
+_SK = T.SEEKER_TICKS                        # ticks at 0/90/180/270 deg, r 20..28, stroke 4
+_SK_LEN = _SK[2] - _SK[1]
+
+
+def draw_seeker(fb, y0):
+    """Seeker: ring r 14 plus 4 ticks r 20..28, stroke.m, grey.7 (§6 SEARCHING)."""
+    c = GREY[7]
+    w = _SK[3]
     y = CY - y0
-    fb.ellipse(CX, y, 16, 16, c, True)
-    fb.ellipse(CX, y, 12, 12, BG_IRIS, True)
-    fb.fill_rect(118, 92 - y0, 4, 8, c)
-    fb.fill_rect(118, 140 - y0, 4, 8, c)
-    fb.fill_rect(92, 118 - y0, 8, 4, c)
-    fb.fill_rect(140, 118 - y0, 8, 4, c)
+    fb.ellipse(CX, y, _SR + _SS // 2, _SR + _SS // 2, c, True)
+    fb.ellipse(CX, y, _SR - _SS // 2, _SR - _SS // 2, BG_IRIS, True)
+    fb.fill_rect(CX - w // 2, y - _SK[2], w, _SK_LEN, c)
+    fb.fill_rect(CX - w // 2, y + _SK[1], w, _SK_LEN, c)
+    fb.fill_rect(CX - _SK[2], y - w // 2, _SK_LEN, w, c)
+    fb.fill_rect(CX + _SK[1], y - w // 2, _SK_LEN, w, c)
 
 
 def draw_check(fb, y0):
     y = CY - y0
-    fb.ellipse(CX, y, 40, 40, ACC_FOUND, True)
+    fb.ellipse(CX, y, T.CHECK_DISC_R, T.CHECK_DISC_R, ACC_FOUND, True)
     fb.poly(CX, y, CHECK_A, BG_BASE, True)
 
 
-def draw_turn(fb, y0, left=False, c=PROX[6]):
+def draw_turn(fb, y0):
+    """SCANNING sweep / result: the turn-right arc (the scan always turns right)."""
     y = CY - y0
-    if left:
-        fb.poly(CX, y, TURN_L, c, True)
-        fb.poly(CX, y, TURN_L_HEAD, c, True)
-    else:
-        fb.poly(CX, y, TURN_R, c, True)
-        fb.poly(CX, y, TURN_R_HEAD, c, True)
+    fb.poly(CX, y, TURN_R, PROX[6], True)
+    fb.poly(CX, y, TURN_R_HEAD, PROX[6], True)
 
 
 def rrect(fb, x, y, w, h, r, c):
@@ -293,12 +297,14 @@ def draw_battery(fb, y0, pct):
 
 
 def draw_dots(fb, y0):
-    for x in (64, 120, 176):
+    """PAIRING looking: 3 line.subtle dots r 5 at the rune centres."""
+    for x in RUNE_X:
         fb.ellipse(x, CY - y0, 5, 5, LINE_SUBTLE, True)
 
 
 # ---- runes (tokens.glyphs.runes) -------------------------------------------
-RUNE_STROKE = 6
+RUNE_STROKE = T.RUNE_STROKE
+RUNE_X = T.RUNE_CENTERS_X
 R_POLY = 0
 R_DISC = 1
 R_RING = 2
@@ -332,18 +338,7 @@ def _rune_ops(prims):
     return tuple(ops)
 
 
-RUNE_PRIMS = (
-    (("ring", 0, 0, 16), ("disc", 0, 0, 5)),
-    (("closed", ((0, -18), (18, 14), (-18, 14))),),
-    (("line", (-14, 18), (-14, -12)), ("line", (14, 18), (14, -12)), ("line", (-20, -16), (20, -16))),
-    (("open", ((-20, 6), (-10, -8), (0, 6), (10, -8), (20, 6))),),
-    (("closed", ((0, -20), (18, 0), (0, 20), (-18, 0))),),
-    (("line", (0, 20), (0, 0)), ("line", (0, 0), (-16, -18)), ("line", (0, 0), (16, -18))),
-    (("line", (0, -20), (0, 20)), ("line", (-20, 0), (20, 0))),
-    (("disc", 0, 0, 18), ("cut_disc", 7, -4, 15)),
-)
-RUNES = tuple(_rune_ops(p) for p in RUNE_PRIMS)
-RUNE_X = (64, 120, 176)
+RUNES = tuple(_rune_ops(prims) for _, prims in T.RUNES)
 
 
 def draw_rune(fb, y0, rid, cx, c):
@@ -363,8 +358,8 @@ def draw_rune(fb, y0, rid, cx, c):
 
 
 # ---- sweep wedge, bins, pacer ----------------------------------------------
-SW_R0 = 70
-SW_R1 = 110
+SW_R0 = T.SWEEP_R_INNER
+SW_R1 = T.SWEEP_R_OUTER
 # keyline arc angles: 2 px beside a radial side is +1.0 deg at r 112, +1.7 at r 68
 KEY_OUT = (-16, -5, 5, 16)
 KEY_IN = (-17, -6, 6, 17)
@@ -380,7 +375,6 @@ def prep_wedge(deg):
         _polar(w, 14 - 2 * k, SW_R0, deg - 15 + 10 * k)
         _polar(kw, 2 * k, SW_R1 + 2, deg + KEY_OUT[k])
         _polar(kw, 14 - 2 * k, SW_R0 - 2, deg + KEY_IN[k])
-    return w
 
 
 def draw_wedge(fb, y0, c):
@@ -431,24 +425,22 @@ def draw_bin(fb, y0, k, norm_q8, c, track=BG_IRIS, full=True):
     a = k * 30
     y = CY - y0
     b = _bin
-    r1 = SW_R0 + ((40 * norm_q8) >> 8)
+    r1 = SW_R0 + (((SW_R1 - SW_R0) * norm_q8) >> 8)
     if r1 < SW_R0 + 3:
         r1 = SW_R0 + 3
-    if track >= 0:
-        _bin_box(b, a, SW_R0 - 2, SW_R1 + 2 if full else r1 + 2, 4)
-        fb.poly(CX, y, b, track, True)
+    _bin_box(b, a, SW_R0 - 2, SW_R1 + 2 if full else r1 + 2, 4)
+    fb.poly(CX, y, b, track, True)
     _bin_box(b, a, SW_R0, r1, 3)
     fb.poly(CX, y, b, c, True)
 
 
-def draw_bin_hollow(fb, y0, k, c, track=BG_IRIS):
+def draw_bin_hollow(fb, y0, k, c):
     """No-data bin: 2 px outline of the full 70..110 box, in its track."""
     a = k * 30
     y = CY - y0
     b = _bin
-    if track >= 0:
-        _bin_box(b, a, SW_R0 - 2, SW_R1 + 2, 4)
-        fb.poly(CX, y, b, track, True)
+    _bin_box(b, a, SW_R0 - 2, SW_R1 + 2, 4)
+    fb.poly(CX, y, b, BG_IRIS, True)
     _bin_box(b, a, SW_R0, SW_R1, 3)
     fb.poly(CX, y, b, c, False)
     b = _bin_in

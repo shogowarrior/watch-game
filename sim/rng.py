@@ -48,9 +48,6 @@ class Rng:
     def choice(self, seq):
         return seq[int(self.random() * len(seq))]
 
-    def chance(self, p):
-        return self.random() < p
-
     def gauss(self, mu=0.0, sigma=1.0):
         z = self._spare
         if z is not None:

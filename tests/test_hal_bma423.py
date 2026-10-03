@@ -41,6 +41,9 @@ class _Dev(_fm.FakeI2CDevice):
         _fm.FakeI2CDevice.write(self, reg, data)
         if reg == 0x7E and data[0] == 0xB6:
             self.regs[0x2A] = 0
+            self.feat[:] = bytes(70)          # a soft reset wipes FEATURES_IN
+            for r in (0x55, 0x56, 0x57, 0x58):
+                self.regs[r] = 0              # and the interrupt map
             self.regs[0x7C] = 0x03
             self.nacks_left = self.boot_nacks
         if reg == 0x59 and data[0] == 1:
@@ -267,41 +270,6 @@ def test_poll_events_reads_and_clears():
     dev.regs[0x1D] = 0x80
     assert imu.poll_events() == b.EV_STEP | b.EV_ACC_DRDY
     assert imu.poll_events() == 0
-    # int_pin but INT1 output not enabled yet: no gating (pin would float)
-    pin = m.Pin(39, m.Pin.IN)
-    imu.int_pin = pin
-    dev.regs[0x1C] = 0x04
-    assert imu.poll_events() == b.EV_ACTIVITY
-    # gated by the INT1 GPIO once mapped: low pin -> no I2C, status kept
-    imu.map_interrupts(int1=b.EV_ACTIVITY)
-    dev.regs[0x1C] = 0x04
-    assert imu.poll_events() == 0 and dev.regs[0x1C] == 0x04
-    pin._v = 1
-    assert imu.poll_events() == b.EV_ACTIVITY and dev.regs[0x1C] == 0
-
-
-def test_poll_events_active_low_gating():
-    m, dev, b, imu = _imu()
-    pin = m.Pin(39, m.Pin.IN)
-    imu.int_pin = pin
-    imu.map_interrupts(int1=b.EV_STEP, active_high=False)
-    assert dev.regs[0x53] == 0x08         # output_en, active low
-    dev.regs[0x1C] = 0x02
-    pin._v = 1                            # idle (high) -> no I2C
-    assert imu.poll_events() == 0 and dev.regs[0x1C] == 0x02
-    pin._v = 0                            # asserted (low)
-    assert imu.poll_events() == b.EV_STEP and dev.regs[0x1C] == 0
-    # INT1 unmapped again -> gating off
-    imu.map_interrupts(int2=b.EV_STEP)
-    dev.regs[0x1C] = 0x02
-    pin._v = 1
-    assert imu.poll_events() == b.EV_STEP
-    # soft reset disables the INT1 output -> gating off
-    imu.map_interrupts(int1=b.EV_STEP)
-    imu.reset()
-    dev.regs[0x1C] = 0x02
-    pin._v = 0
-    assert imu.poll_events() == b.EV_STEP
 
 
 def test_temperature():
@@ -346,12 +314,9 @@ def _rm(path):
 
 
 def _sha(data):
-    try:
-        import hashlib
-        import binascii
-        return binascii.hexlify(hashlib.sha256(data).digest()).decode()
-    except (ImportError, AttributeError):
-        return None
+    import hashlib
+    import binascii
+    return binascii.hexlify(hashlib.sha256(data).digest()).decode()
 
 
 def test_load_config_missing_file():
@@ -369,9 +334,8 @@ def test_load_config_rejects_wrong_blob():
         assert imu.feat_error.startswith("size")
         blob = _blob()
         _write(p, blob)
-        if _sha(blob) is not None:
-            assert imu.load_config(p) is False        # not the Bosch v2.14.13 hash
-            assert imu.feat_error == "sha256"
+        assert imu.load_config(p) is False            # not the Bosch v2.14.13 hash
+        assert imu.feat_error == "sha256"
         assert _w(dev, 0x59) == [] and dev.chunks == []
     finally:
         _rm(p)
@@ -404,6 +368,64 @@ def test_load_config_upload_and_step_counter():
     assert dev.feat[0x3B] == 0x01 | 0x10
     assert imu.reset_step_counter() and dev.feat[0x3B] == 0x01 | 0x10 | 0x04
     assert imu.enable_feature(b.FEAT_DOUBLE_TAP) and dev.feat[0x3E] & 1
+
+
+def test_start_and_poll_features():
+    m, dev, b, imu = _imu()
+    p = _tmp("t_bma423_sp.bin")
+    _write(p, _blob())
+    try:
+        dev.init_status = 0
+        _clock[0] = 0
+        assert imu.start_features(path=p, expect_sha256=None) is True
+        assert imu.poll_features() == b.FEAT_PENDING and dev.feat[0x3B] == 0
+        dev.regs[0x2A] = 1                            # engine up
+        assert imu.poll_features() == b.FEAT_OK
+        assert dev.feat[0x3B] & 0x30 == 0x30          # step counter + activity
+        assert dev.feat[0x40] & 0x01                  # wrist wear
+        assert dev.regs[0x56] & 0x08 and dev.regs[0x55] == 1   # INT1, latched
+        n = len(dev.writes)
+        assert imu.poll_features() == b.FEAT_OK and len(dev.writes) == n   # once
+        dev.init_status = 1
+        imu.reset()                                   # REPL recovery: features again
+        assert imu.load_config(p, expect_sha256=None) and imu.poll_features() == b.FEAT_OK
+        assert dev.feat[0x3B] & 0x30 == 0x30 and dev.regs[0x56] & 0x08
+    finally:
+        _rm(p)
+    m, dev, b, imu = _imu()
+    assert imu.start_features(path=_tmp("no_such_bma423conf.bin")) is False
+    assert imu.poll_features() == b.FEAT_NONE
+
+
+def test_poll_features_retries_after_bus_error():
+    # A NACK while switching the features on must not leave them off for good.
+    m, dev, b, imu = _imu()
+    p = _tmp("t_bma423_retry.bin")
+    _write(p, _blob())
+    try:
+        assert imu.start_features(path=p, expect_sha256=None) is True
+    finally:
+        _rm(p)
+    dev.regs[0x2A] = 1                                # engine up
+    real = dev.write
+    fail = [True]
+
+    def write(reg, data):
+        if reg == 0x5E and fail[0]:
+            fail[0] = False
+            raise OSError(116)
+        return real(reg, data)
+
+    dev.write = write
+    try:
+        imu.poll_features()
+        assert False, "NACK swallowed"
+    except OSError:
+        pass
+    assert imu.poll_features() == b.FEAT_OK
+    assert dev.feat[0x3B] & 0x30 == 0x30              # step counter + activity
+    assert dev.feat[0x40] & 0x01                      # wrist wear
+    assert dev.regs[0x56] & 0x08                      # on INT1
 
 
 def test_load_config_nonblocking_and_error():

@@ -22,8 +22,9 @@ Beacons are the real 16-byte ``finder.proto`` format with ``GAME_ID``;
 """
 
 from array import array
-from finder.compat import ticks_ms, ticks_add, ticks_diff, argv
+from finder.compat import ticks_ms, ticks_diff
 from finder import proto
+from finder.link import TxScheduler
 
 GAME_ID = 0xEE
 KIND_PING = 1
@@ -55,7 +56,7 @@ class Pinger:
     def __init__(self, radio, n=1000, period_ms=50, tail_ms=1000):
         self.r = radio
         self.n = n
-        self.period = period_ms
+        self.sched = TxScheduler(period_ms, 0)   # the game's grid, no jitter
         self.tail_ms = tail_ms
         self.b = proto.Beacon(GAME_ID)
         self.b.state = KIND_PING
@@ -65,7 +66,6 @@ class Pinger:
         self.got = bytearray(n)
         self.sent = 0
         self.recv = 0
-        self.next_t = None
         self.last_send_t = None
         self.last_rx_t = None
         self.rtt = []
@@ -77,7 +77,7 @@ class Pinger:
         self._cb = self.on_rx
 
     def step(self, now):
-        if self.sent < self.n and (self.next_t is None or ticks_diff(now, self.next_t) >= 0):
+        if self.sent < self.n and self.sched.due(now):
             b = self.b
             b.seq = self.sent
             b.rssi_last = self.last_rssi
@@ -86,9 +86,7 @@ class Pinger:
             self.r.send(self.buf, now)
             self.sent += 1
             self.last_send_t = now
-            self.next_t = ticks_add(now if self.next_t is None else self.next_t, self.period)
-            if ticks_diff(now, self.next_t) > self.period:
-                self.next_t = now
+            self.sched.mark_sent(now)
         self.r.poll(now, callback=self._cb)
 
     def on_rx(self, mac, buf, n, rssi, t):
@@ -189,11 +187,8 @@ class RenderLoad:
     STRIP = 240 * 24 * 2
 
     def __init__(self):
-        from machine import Pin, SPI
-        from hal import pins
-        self.cs = Pin(pins.TFT_CS, Pin.OUT, value=1)
-        self.spi = SPI(pins.TFT_SPI_ID, baudrate=pins.TFT_BAUD, sck=Pin(pins.TFT_SCK),
-                       mosi=Pin(pins.TFT_MOSI), miso=None)
+        from hal.st7789 import ST7789
+        self.spi = ST7789(init=False, backlight=None).spi   # CS stays high
         self.strip = bytearray(self.STRIP)
         self.frames = 0
 
@@ -221,19 +216,14 @@ def print_report(rep, radio=None, frames=0):
 def run(role="ping", n=1000, period_ms=50, render=False, channel=6, radio=None):
     """Run one side of the benchmark on a watch; returns the report dict."""
     import machine
-    try:
-        machine.freq(240_000_000)
-    except Exception:  # noqa: BLE001 - benchmark still useful at other clocks
-        pass
+    from time import sleep_ms
+    from hal import pins
+    machine.freq(pins.CPU_HZ)
     if radio is None:
         from hal.radio import EspNowRadio
         radio = EspNowRadio(channel=channel).begin()
     load = RenderLoad() if render else None
     x = Pinger(radio, n, period_ms) if role == "ping" else Ponger(radio)
-    try:
-        from time import sleep_ms
-    except ImportError:
-        sleep_ms = None
     print("radio_pingpong: %s on ch %d, n=%d, render=%s" % (role, radio.channel, n, bool(render)))
     while True:
         now = ticks_ms()
@@ -242,20 +232,12 @@ def run(role="ping", n=1000, period_ms=50, render=False, channel=6, radio=None):
             break
         if load is not None:
             load.frame()
-        elif sleep_ms is not None:
+        else:
             sleep_ms(1)
     rep = x.report()
     print_report(rep, radio, load.frames if load else 0)
     return rep
 
 
-def main(args):
-    """Host/WASM runners only (they set argv); on a watch use ``run()``."""
-    role = args[1] if len(args) > 1 else "ping"
-    n = int(args[2]) if len(args) > 2 else 1000
-    render = "render" in args[3:]
-    run(role, n, render=render)
-
-
 if __name__ == "__main__":
-    main(argv(globals()))
+    run()   # mpremote run: no arguments reach the device, so the default ping

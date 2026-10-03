@@ -1,64 +1,11 @@
 """Minimal PNG encoder (RGB8), pure Python for CPython and MicroPython.
 
-Compression: ``zlib.compress`` on CPython; ``deflate.DeflateIO(..., ZLIB)``
-on MicroPython (present in the 1.29 wasm port); otherwise stored
-(uncompressed) deflate blocks, which every PNG reader accepts.
+Compression: ``zlib.compress`` (CPython and the 1.29 wasm port).
 """
 
 import struct
-
-try:
-    from binascii import crc32
-except ImportError:  # pragma: no cover
-    from zlib import crc32
-
-
-def _adler32(data):
-    a = 1
-    b = 0
-    for i in range(0, len(data), 3800):
-        for c in data[i:i + 3800]:
-            a += c
-            b += a
-        a %= 65521
-        b %= 65521
-    return (b << 16) | a
-
-
-def _stored(data):
-    out = bytearray(b"\x78\x01")
-    n = len(data)
-    i = 0
-    while True:
-        blk = data[i:i + 65535]
-        last = 1 if i + 65535 >= n else 0
-        ln = len(blk)
-        out += struct.pack("<BHH", last, ln, ln ^ 0xFFFF)
-        out += blk
-        i += 65535
-        if last:
-            break
-    out += struct.pack(">I", _adler32(data))
-    return bytes(out)
-
-
-def zcompress(data):
-    try:
-        import zlib
-        if hasattr(zlib, "compress"):
-            return zlib.compress(bytes(data))
-    except ImportError:
-        pass
-    try:
-        import deflate
-        import io
-        s = io.BytesIO()
-        d = deflate.DeflateIO(s, deflate.ZLIB)
-        d.write(data)
-        d.close()
-        return s.getvalue()
-    except (ImportError, AttributeError, OSError):
-        return _stored(bytes(data))
+import zlib
+from binascii import crc32
 
 
 def _chunk(tag, data):
@@ -75,7 +22,7 @@ def encode(w, h, rgb):
         raw[o + 1:o + 1 + stride] = rgb[y * stride:(y + 1) * stride]
     return (b"\x89PNG\r\n\x1a\n"
             + _chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
-            + _chunk(b"IDAT", zcompress(raw))
+            + _chunk(b"IDAT", zlib.compress(bytes(raw)))
             + _chunk(b"IEND", b""))
 
 
@@ -97,7 +44,6 @@ def rgb565sw_to_rgb(buf, w, h):
 
 def decode_rgb(png):
     """Decode a PNG written by ``encode`` (tests): -> (w, h, rgb bytes)."""
-    import zlib
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
     i = 8
     idat = b""

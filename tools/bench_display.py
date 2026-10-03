@@ -1,11 +1,12 @@
 """Display pipeline benchmark -- runs ON THE WATCH (T-Watch 2020 V1, stock
 MicroPython 1.29, pure-Python hal/st7789.py).
 
-    mpremote cp -r hal :                 # once (hal/__init__.py, pins.py, st7789.py)
+    python3 tools/deploy.py --noapp      # once: hal/, finder/ and ui/ (st7789 uses finder.compat)
     mpremote run tools/bench_display.py
 
-Each ``# %%`` section is self-contained after section 1, so the file can also
-be pasted cell-by-cell into a Jupyter MicroPython kernel. Measures:
+The ``# %%`` sections can also be pasted one per cell into a Jupyter
+MicroPython kernel: run them in order once, after which any section can be
+re-run on its own. Measures:
   * print(spi): the real SPI clock the IDF picked (80 MHz / integer)
   * T_push  : push_frame of a full 115,200 B frame, and 10 x push_strip(24 rows)
   * T_blit  : GS8 -> RGB565 palette blit (framebuf.blit with palette), per strip
@@ -21,37 +22,17 @@ import gc
 import time
 import machine
 import framebuf
-from hal import pins
-from hal.st7789 import ST7789, rgb565
+from hal.board import Board
+from hal.st7789 import rgb565
 
 FAST = False      # 40 MHz: custom build only!
 N = 20            # repetitions per measurement
-STRIP = 24        # rows per strip -> 10 strips, 11,520 B each
 
-machine.freq(pins.CPU_HZ)
-i2c0 = machine.I2C(pins.I2C0_ID, scl=machine.Pin(pins.I2C0_SCL),
-                   sda=machine.Pin(pins.I2C0_SDA), freq=pins.I2C0_FREQ)
-
-
-def ldo2(on):
-    """AXP202 LDO2 on at 3.3 V, ON only: on V1 LDO2 powers the backlight AND
-    the ST7789, so ``on=False`` is ignored. Read-modify-write of reg 0x28
-    (bits 7:4 = LDO2 voltage, 0xF = 3.3 V; bits 3:0 = LDO4, kept) then reg
-    0x12 bit2 (LDO2). Bit1 of 0x12 is DCDC3 = the ESP32's own supply: kept
-    set, never cleared."""
-    if not on:
-        return
-    v = i2c0.readfrom_mem(pins.AXP202_ADDR, 0x28, 1)[0]
-    i2c0.writeto_mem(pins.AXP202_ADDR, 0x28, bytes([(v & 0x0F) | 0xF0]))
-    r = i2c0.readfrom_mem(pins.AXP202_ADDR, 0x12, 1)[0]
-    i2c0.writeto_mem(pins.AXP202_ADDR, 0x12, bytes([r | 0x06]))
-
-
-# Panel supply BEFORE the init sequence (the driver's init() also calls
-# bl_power(True) first; doing it here too keeps the ordering explicit).
-ldo2(True)
-time.sleep_ms(10)
-disp = ST7789(fast=FAST, bl_power=ldo2, strip_rows=STRIP)
+# 240 MHz, the one shared I2C0, AXP202 LDO2 at 3.3 V before the panel init
+# (DCDC3 kept). In a notebook that already has a Board ``b``: board = b
+board = Board(fast_spi=FAST)
+disp = board.display
+STRIP = disp.strip_rows   # 24 rows per strip -> 10 strips, 11,520 B each
 disp.fill(0)
 disp.brightness(0.6)
 print("cpu", machine.freq() // 1_000_000, "MHz;", disp.spi)   # real SPI clock
@@ -171,6 +152,8 @@ T_frame = report("frame (pal+blit+push)", 240 * 240 * 2)
 print("  => %.1f fps; heap alloc per frame %d B" % (1e6 / T_frame, (a1 - a0) // N))
 
 # %% [8] summary ---------------------------------------------------------------
+import ui.field  # noqa: E402  (needs ui/ deployed: tools/deploy.py copies it)
+print("palette kernel:", ui.field.KERNEL)   # 'viper', 'python' or 'self-check failed'
 print("SUMMARY clk=%d fast=%s T_push=%.1fms T_strips=%.1fms T_blit=%.1fms T_gc=%.1fms frame=%.1fms"
       % (BAUD, FAST, T_push / 1000, T_strips / 1000, T_blit / 1000, T_gc / 1000, T_frame / 1000))
 disp.fill(0)

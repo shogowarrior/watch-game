@@ -26,21 +26,9 @@ This driver only ever calls ``bl_power(True)``; backlight off is PWM duty
 call ``init()`` (full SWRESET sequence) after restoring it, not ``wake()``.
 """
 
-import time
 import machine
 from hal import pins
-
-try:
-    from micropython import const
-except ImportError:  # CPython tests
-    def const(x):
-        return x
-
-try:
-    _sleep_ms = time.sleep_ms
-except AttributeError:  # CPython
-    def _sleep_ms(ms):
-        time.sleep(ms / 1000)
+from finder.compat import const, sleep_ms as _sleep_ms, ticks_diff, ticks_ms
 
 SWRESET = const(0x01)
 SLPIN = const(0x10)
@@ -61,9 +49,7 @@ MADCTL_ROT2 = const(0xC0)   # MY|MX: this watch's upright orientation ...
 ROW_OFFSET_ROT2 = const(80)  # ... shows GRAM rows 80..319 of 320
 MAX_STOCK_BAUD = pins.TFT_BAUD
 FAST_BAUD = pins.TFT_BAUD_FAST
-
-BLACK = 0x0000
-WHITE = 0xFFFF
+SLP_MS = const(120)          # ST7789 minimum from SLPIN to SLPOUT, and after SLPOUT
 
 
 def swap16(c):
@@ -75,12 +61,6 @@ def rgb565(r, g, b):
     """8-bit r, g, b -> byte-swapped RGB565 int ready for framebuf/palettes."""
     c = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xFF) >> 3)
     return ((c & 0xFF) << 8) | (c >> 8)
-
-
-def unswap_rgb(c):
-    """Byte-swapped RGB565 -> approximate (r, g, b) 8-bit tuple (debug/sim)."""
-    c = swap16(c)
-    return ((c >> 8) & 0xF8, (c >> 3) & 0xFC, (c << 3) & 0xF8)
 
 
 class ST7789:
@@ -133,6 +113,7 @@ class ST7789:
         if backlight is not None:
             self._pwm = machine.PWM(machine.Pin(backlight, machine.Pin.OUT), freq=bl_freq, duty_u16=0)
         self.asleep = False
+        self._slpin_t = None      # ticks_ms of the last SLPIN
         if init:
             self.init()
 
@@ -179,19 +160,14 @@ class ST7789:
         self.spi.write(self._c1)
         self._dc(1)
 
-    def set_window(self, x0, y0, x1, y1):
-        """Set the inclusive draw window (panel coords; offsets added here)."""
-        self._cs(0)
-        self._addr(CASET, x0 + self.xoff, x1 + self.xoff)
-        self._addr(RASET, y0 + self.yoff, y1 + self.yoff)
-        self._cs(1)
-
     # --- setup -----------------------------------------------------------
     def init(self):
-        """Software reset + init (no RST pin on this watch). Blocks ~300 ms.
+        """Software reset + init (no RST pin on this watch). Blocks ~340 ms.
 
         With ``bl_power`` set, powers LDO2 (panel supply on V1) first and
-        waits for the panel's power-on reset before SWRESET.
+        waits for the panel's power-on reset before SWRESET. GRAM is cleared
+        to black before DISPON (~35 ms): it is random after power-on and
+        SWRESET keeps it, so the panel never shows noise or a stale frame.
         """
         if self._bl_power is not None:
             self._bl_power(True)
@@ -200,28 +176,20 @@ class ST7789:
         self._cmd(SWRESET)
         _sleep_ms(150)
         self._cmd(SLPOUT)
-        _sleep_ms(120)
+        _sleep_ms(SLP_MS)
         self._cmd1(COLMOD, 0x55)  # 16-bit RGB565
         _sleep_ms(10)
         self._cmd1(MADCTL, self.madctl)
-        self.set_window(0, 0, self.width - 1, self.height - 1)
         self._cmd(INVON)          # this IPS panel needs inversion on
         _sleep_ms(10)
         self._cmd(NORON)
         _sleep_ms(10)
+        self.fill(0)              # black GRAM before DISPON (see above)
         self._cmd(DISPON)
         _sleep_ms(10)
         self.asleep = False
 
     # --- pixels ----------------------------------------------------------
-    def blit(self, x, y, w, h, buf):
-        """Push ``buf`` (exactly w*h*2 bytes, byte-swapped RGB565) at x, y."""
-        if len(buf) != w * h * 2:
-            raise ValueError("buf must be w*h*2 bytes")
-        self._begin(x, y, x + w - 1, y + h - 1)
-        self.spi.write(buf)
-        self._cs(1)
-
     def push_strip(self, y0, h, buf):
         """Push a full-width strip of ``h`` rows starting at row ``y0``."""
         if len(buf) != self.width * h * 2:
@@ -320,15 +288,25 @@ class ST7789:
         self._level = 0.0
         self._cmd(DISPOFF)
         self._cmd(SLPIN)
+        self._slpin_t = ticks_ms()
         _sleep_ms(5)
         self.asleep = True
 
-    def wake(self, level=None):
+    def wake(self, level=None, wait=None):
         """SLPOUT + DISPON, then restore the last non-zero brightness (or
-        ``level``; pass 0 to keep the backlight off). Blocks ~120 ms.
+        ``level``; pass 0 to keep the backlight off). Blocks ~120 ms, up to
+        120 ms more when ``sleep()`` was recent (SLPOUT >= 120 ms after
+        SLPIN). ``wait(ms)`` does these delays (default ``sleep_ms``); pass
+        the main loop's idle so the motor keeps its timing.
         """
+        wait = wait or _sleep_ms
+        t = self._slpin_t
+        if t is not None:
+            e = ticks_diff(ticks_ms(), t)
+            if 0 <= e < SLP_MS:
+                wait(SLP_MS - e)
         self._cmd(SLPOUT)
-        _sleep_ms(120)
+        wait(SLP_MS)
         self._cmd(DISPON)
         self.asleep = False
         self.brightness(self._last_level if level is None else level)
@@ -336,7 +314,4 @@ class ST7789:
     def deinit(self):
         if self._pwm is not None:
             self._pwm.deinit()
-        try:
-            self.spi.deinit()
-        except AttributeError:
-            pass
+        self.spi.deinit()

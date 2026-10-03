@@ -1,31 +1,28 @@
 """Two-state Kalman filter [rssi, rate] with IMU-bounded process noise.
 
-The rate is a mean-reverting (Singer) state whose spread is capped by what the
-step counters allow: |d rssi/dt| <= 10 n / ln10 * (v_me + v_peer) / d. Both
-watches still -> the rate is pinned to 0 and the RSSI is averaged hard. The
-IMU is never integrated, so step-counter drift only loosens or tightens the
-bound. Peer-reported RSSI is a second measurement (own bias learnt slowly).
-Innovations are Huber-clipped, tighter on the fade side. Measurement noise is
-learnt from packet-to-packet jitter, which also sets the body/fade bias.
+The rate is a mean-reverting (Singer) state whose spread follows what the step
+counters allow, |d rssi/dt| <= 10 n / ln10 * (v_me + v_peer) / d, with a hard
+clamp at CAP_K times that bound. Both watches still -> the rate is pinned to 0
+and the RSSI is averaged hard. The IMU is never integrated, so step-counter
+drift only loosens or tightens the bound. Peer-reported RSSI is a second
+measurement (own bias learnt slowly). Innovations are Huber-clipped, tighter on
+the fade side. Measurement noise is the shared packet-to-packet noise_db (base,
+ui-spec 5.5) clamped to [SIG_MIN, SIG_MAX], which also sets the body/fade bias.
 """
 
 import math
 
 from finder.compat import ticks_diff
-from finder.estimators.base import RangeEstimator, PathLoss, ACT_STILL, ACT_UNKNOWN
+from finder.estimators.base import (RangeEstimator, PathLoss, KDB, SD_PER_STEP, JIT_INIT,
+                                    ACT_STILL)
+from finder.tuning import PATH_LOSS_N as N_EFF   # outdoor; Game.set_place() switches
 
-try:
-    from finder.tuning import PATH_LOSS_N as N_EFF   # outdoor default; Game.set_place() switches indoors
-except ImportError:
-    N_EFF = 2.6
-BIAS_A = -6.0       # p0 = cal - (BIAS_A + BIAS_B * fading sigma): rougher channels
-BIAS_B = 1.0        # also mean more body blocking / deep fades
-BIAS_MAX = 14.0
-KDB = 10.0 / math.log(10.0)
+BIAS_A = -6.0       # p0 = cal - (BIAS_A + BIAS_B * fading sigma): -4.5 dB (p0 above cal) on the
+BIAS_B = 1.0        # cleanest channel (sigma 1.5) to +2 dB on the roughest (sigma 8): body blocking
 STRIDE_M = 0.8      # generous stride for the speed bound
 V_UNKNOWN = 1.5     # m/s assumed when a watch sends no motion
 STILL_HZ = 0.7      # cadence below this with activity "still" -> not walking
-STEP_HOLD_MS = 1000  # no new step for this long -> that watch is still
+STEP_HOLD_MS = 1300  # no new step for this long -> still (> 1 s BMA423 counter poll + logic tick)
 D_MIN = 1.5         # m, floor for the rate bound
 TAU_V = 60.0        # s, rate mean reversion while moving
 TAU_V_STILL = 0.3   # s, rate decay while both still
@@ -33,10 +30,8 @@ START_K = 0.5       # rate spread (units of the bound) when a walk starts
 CAP_K = 1.5         # hard clamp on |rate| in units of the bound
 Q_R_STILL = 0.1     # dB^2/s, slow environment drift
 Q_R_MOVE = 0.15     # dB^2/s per m/s walked (shadowing decorrelation)
-SIG_INIT = 4.0      # dB, fading sigma before any data
-SIG_MIN = 1.5
+SIG_MIN = 1.5       # dB, clamp on the fading sigma (noise_db)
 SIG_MAX = 8.0
-SIG_ALPHA = 0.02    # adaptation rate of the fading sigma
 K_UP = 2.5          # Huber clip (sigmas) for innovations above the prediction
 K_DOWN = 1.0        # ... and below it (fades, blocking)
 PEER_ALPHA = 0.02   # bias learning for peer-reported RSSI
@@ -44,11 +39,11 @@ Z_ON = 0.05         # |rate|/sd to start a trend while moving
 Z_FLIP = 0.3        # opposite-sign |rate|/sd to flip it
 MAX_GAP_MS = 3000   # longer silence -> trend unsure, rate reset
 SH_VAR = 9.0        # dB^2 of shadowing added to the distance spread
-DEAD_DB = 1.5       # displayed-distance deadband (fewer zone flips)
 
 
 class _Mot:
-    """Speed hint from one watch: cadence * stride, zeroed as soon as steps stop."""
+    """Speed hint from one watch: cadence * stride, zeroed as soon as steps stop
+    (whatever the activity code: an unknown one is usually a fidgeting wrist)."""
 
     __slots__ = ("steps", "t", "v")
 
@@ -61,14 +56,15 @@ class _Mot:
         if m is None:
             self.v = V_UNKNOWN
             return
-        if m.steps != self.steps:
+        if self.steps is None:
+            self.steps = m.steps      # first sight: a count, not a step
+        elif m.steps != self.steps:
             self.steps = m.steps
             self.t = t_ms
-        act = m.activity
         hz = m.step_rate_hz
         if self.t is None or ticks_diff(t_ms, self.t) >= STEP_HOLD_MS:
-            self.v = V_UNKNOWN if act == ACT_UNKNOWN else 0.0
-        elif act == ACT_STILL and hz < STILL_HZ:
+            self.v = 0.0
+        elif m.activity == ACT_STILL and hz < STILL_HZ:
             self.v = 0.0
         else:
             v = hz * STRIDE_M
@@ -79,7 +75,7 @@ class Estimator(RangeEstimator):
     name = "kalman2"
 
     def __init__(self, path_loss=None):
-        pl = path_loss or PathLoss(-45.0, N_EFF)
+        pl = path_loss or PathLoss(n=N_EFF)
         self.cal = pl.p0
         RangeEstimator.__init__(self, pl)
 
@@ -89,13 +85,11 @@ class Estimator(RangeEstimator):
         self.p00 = 100.0
         self.p01 = 0.0
         self.p11 = 1.0
-        self.sig = SIG_INIT
-        self.last_z = None
+        self.sig = SD_PER_STEP * JIT_INIT   # noise_db's prior; set from it on every packet
         self.peer_bias = 0.0
         self.peer_n = 0
         self.speed = V_UNKNOWN
         self.vmax = 1.0
-        self.r_disp = None
         self._me = _Mot()
         self._peer = _Mot()
 
@@ -114,10 +108,9 @@ class Estimator(RangeEstimator):
                 self.trend = 0
                 self.trend_conf = 0.0
             return
-        if self.last_z is not None:
-            s = self.sig + SIG_ALPHA * (0.886 * abs(rssi - self.last_z) - self.sig)
-            self.sig = SIG_MIN if s < SIG_MIN else SIG_MAX if s > SIG_MAX else s
-        self.last_z = rssi
+        self._note_noise(t_ms, rssi)
+        s = self.noise_db           # fading sigma = the shared ui-spec 5.5 noise, clamped
+        self.sig = SIG_MIN if s < SIG_MIN else SIG_MAX if s > SIG_MAX else s
         if self.rssi_f is None:
             self.rssi_f = float(rssi)
             self.p00 = self.sig * self.sig
@@ -197,17 +190,8 @@ class Estimator(RangeEstimator):
 
     def _publish(self):
         b = BIAS_A + BIAS_B * self.sig
-        b = BIAS_MAX if b > BIAS_MAX else b
         if self.bias is None or abs(b - self.bias) > 0.5:
             self.bias = b
             self.pl.p0 = self.cal - b
-            self.r_disp = None
-        r = self.rssi_f
-        if self.r_disp is None or abs(r - self.r_disp) > DEAD_DB:
-            self.r_disp = r
         self.rssi_var = self.p00 + SH_VAR
-        sd = math.sqrt(self.rssi_var)
-        pl = self.pl
-        self.dist_m = pl.rssi_to_dist(self.r_disp)
-        self.dist_lo_m = pl.rssi_to_dist(self.r_disp + sd)
-        self.dist_hi_m = pl.rssi_to_dist(self.r_disp - sd)
+        self._set_distance_from_rssi()   # display hysteresis is proximity's (ui-spec 5.2/5.4)

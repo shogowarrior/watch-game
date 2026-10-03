@@ -19,7 +19,7 @@ def test_roundtrip_all_fields():
     b.set_flags(sweeping=True, taps=5, walking=True)
     b.bump_ago_ms = 420
     buf = b.pack_into(bytearray(proto.SIZE))
-    assert bytes(buf[:4]) == b"SK\x01\x07"
+    assert bytes(buf[:4]) == b"SK\x03\x07"      # magic, VERSION 3, game id
     assert proto.valid(buf, 16, 7) and proto.seq_of(buf) == 65535
     r = proto.Beacon().unpack_from(buf)
     assert (r.game_id, r.seq, r.rssi_last, r.rssi_filt, r.steps) == (7, 65535, -71, -64, 1234)

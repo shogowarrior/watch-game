@@ -5,8 +5,8 @@
 //   node tools/mpy/run.mjs tools/bakeoff.py --quick
 //
 // The repo's Python packages (app/, finder/, hal/, sim/, ui/, tests/, tools/) are copied
-// into the WebAssembly filesystem at /repo and cwd is /repo. This port cannot
-// set sys.argv, so scripts read their args via finder.compat.argv(globals()).
+// into the WebAssembly filesystem at /repo and cwd is /repo, and sys.argv is set
+// as CPython would set it.
 import { loadMicroPython } from "./node_modules/@micropython/micropython-webassembly-pyscript/micropython.mjs";
 import fs from "node:fs";
 import path from "node:path";
@@ -46,13 +46,16 @@ import sys, os
 os.chdir('/repo')
 sys.path.insert(0, '/repo')
 _argv = list(__argv)
+sys.argv[:] = _argv
 _src = open(_argv[0]).read()
-_g = {'__name__': '__main__', '__file__': '/repo/' + _argv[0], '__argv__': _argv}
+_g = {'__name__': '__main__', '__file__': '/repo/' + _argv[0]}
 try:
     exec(compile(_src, _argv[0], 'exec'), _g)
     __rc = 0
 except SystemExit as e:
     __rc = e.value if isinstance(e.value, int) else (0 if e.value is None else 1)
+    if __rc == 1 and not isinstance(e.value, int):
+        print(e.value, file=sys.stderr)
 `);
   exitCode = mp.globals.get("__rc") ?? 0;
 } catch (e) {

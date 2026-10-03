@@ -26,40 +26,15 @@ side (PEK) key gets a fresh double press, or a fresh press held ~1.5 s, starting
 within the first second after boot. Holding the key to power on and letting go
 never counts.
 
-IMU and radio drivers are looked up by module name (``_IMU``/``_RADIO``);
-pass ``factories={"imu": fn}`` (fn(board) -> driver) to override any part.
+Pass ``factories={"imu": fn}`` (fn(board) -> driver) to override any part.
 """
 
-import sys
 import machine
+from finder.compat import sleep_ms as _sleep_ms
 from hal import pins
 from hal import axp202
 
-try:
-    from time import sleep_ms as _sleep_ms
-except ImportError:  # CPython tests
-    import time as _t
-
-    def _sleep_ms(ms):
-        _t.sleep(ms / 1000)
-
 ORDER = ("pmu", "display", "backlight", "imu", "touch", "haptics", "radio")
-
-# (module, class) candidates; first importable wins.
-_IMU = (("hal.bma423", "BMA423"), ("hal.imu", "IMU"), ("hal.imu", "BMA423"))
-_RADIO = (("hal.radio", "EspNowRadio"), ("hal.radio", "Radio"))
-
-
-def _find(cands):
-    for mod, cls in cands:
-        try:
-            __import__(mod)
-        except ImportError:
-            continue
-        c = getattr(sys.modules[mod], cls, None)
-        if c is not None:
-            return c
-    raise ImportError("none of " + ", ".join(m for m, _ in cands))
 
 
 class Board:
@@ -141,12 +116,15 @@ class Board:
         p.set_ldo2_mv(3300)       # LDO2 feeds panel + backlight (as TTGO.h)
         p.set_ldo2(True)          # backlight supply (PWM duty still 0)
         p.enable_pek()
+        p.clear_irqs()            # drop latches from before this boot (power-on hold)
         return p
 
     def _bl_power(self):
         try:
             return self.pmu.set_ldo2
-        except OSError as e:      # no PMU answering: panel still works on USB
+        except OSError as e:
+            # PMU not answering on I2C0 (bus fault): build the panel anyway;
+            # it only shows if LDO2 is already on
             self.errors["pmu"] = e
             return None
 
@@ -160,7 +138,8 @@ class Board:
         return d
 
     def _make_imu(self):
-        return _find(_IMU)(self.i2c0)
+        from hal.bma423 import BMA423
+        return BMA423(self.i2c0)
 
     def _make_touch(self):
         from hal.ft6336 import FT6336
@@ -171,12 +150,9 @@ class Board:
         return Motor()
 
     def _make_radio(self):
-        cls = _find(_RADIO)
-        r = cls() if self.channel is None else cls(channel=self.channel)
-        begin = getattr(r, "begin", None)
-        if begin is not None:
-            begin()               # STA up, channel/txpower/pm set, ESP-NOW active
-        return r
+        from hal.radio import EspNowRadio, DEFAULT_CHANNEL
+        # STA up, channel/txpower/pm set, ESP-NOW active
+        return EspNowRadio(channel=self.channel or DEFAULT_CHANNEL).begin()
 
     # -- helpers ----------------------------------------------------------------
     def init(self, parts=ORDER, strict=True):

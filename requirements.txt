@@ -4,4 +4,3 @@ jupyter
 jupyter_micropython_kernel
 micropython-esp32-stubs
 mpremote
-rshell

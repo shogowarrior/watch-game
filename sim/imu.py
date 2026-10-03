@@ -5,13 +5,12 @@ Error sources ("IMU drift") the estimators must tolerate:
     a constant scale error on cadence -> speed and on steps -> odometry
   * slow random walk of that scale (pace/terrain/fatigue), ``drift`` per sqrt(min)
   * missed steps when shuffling slowly, phantom step bursts from arm gestures
+  * turning on the spot counts TURN_STEPS_PER_REV shuffle steps per revolution
   * activity classification latency (2-3 s) and 3 s cadence smoothing
 """
 
 import math
 from finder.estimators.base import MotionInfo, ACT_STILL, ACT_WALK, ACT_RUN
-
-IMU_NAMES = ["ideal", "typical", "drifty"]
 
 IMU_PROFILES = {
     "ideal": dict(stride_err=0.0, count_err=0.0, drift=0.0, phantom_hz=0.0,
@@ -27,6 +26,9 @@ RATE_WIN_S = 3.0
 RATE_SAMPLE_S = 0.5
 V_STILL = 0.25
 V_RUN = 2.3
+TURN_STEPS_PER_REV = 6.0   # shuffle steps per 360 deg turned on the spot (unsourced starting
+                           # value: a 12 s guided scan sweep counts ~4-5, clear of
+                           # scan.abort_steps 8; field test T4 logs the real count)
 
 
 def stride_at(stride, v):
@@ -42,12 +44,12 @@ def stride_at(stride, v):
 class Imu:
     """Motion hints for one walker; ``step(dt)`` after ``world.step``; read ``info``."""
 
-    def __init__(self, walker, rng, prof="typical", stride_m=STRIDE_M):
+    def __init__(self, walker, rng, prof="typical"):
         p = IMU_PROFILES[prof] if isinstance(prof, str) else prof
         self.p = p
         self.w = walker
         self.rng = rng
-        self.stride = stride_m * (1.0 + rng.uniform(-p["stride_err"], p["stride_err"]))
+        self.stride = STRIDE_M * (1.0 + rng.uniform(-p["stride_err"], p["stride_err"]))
         self.gain = 1.0 + rng.uniform(-p["count_err"], p["count_err"])
         self.latency = rng.uniform(p["lat_lo"], p["lat_hi"])
         self.scale = 1.0
@@ -62,7 +64,6 @@ class Imu:
         self._hn = 0
         self._since = RATE_SAMPLE_S
         self.step_rate_hz = 0.0
-        self.cadence = 0.0  # true cadence, Hz (ground truth for analysis)
         self.info = MotionInfo(ACT_STILL, 0.0, 0)
 
     def step(self, dt):
@@ -78,8 +79,7 @@ class Imu:
             cad = 0.0
             tr = abs(w.turn) / dt if dt > 0 else 0.0
             if tr > 0.1:  # shuffling round on the spot
-                cad = min(1.5, 1.5 * tr)
-        self.cadence = cad
+                cad = min(1.5, tr * TURN_STEPS_PER_REV / (2.0 * math.pi))
         if p["drift"] > 0.0:
             s = self.scale + rng.gauss(0.0, p["drift"] * math.sqrt(dt / 60.0))
             self.scale = 0.8 if s < 0.8 else 1.2 if s > 1.2 else s

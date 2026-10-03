@@ -12,26 +12,31 @@ the runtime uses 25, a quarter of the tracker's float work of 100 Hz) and
 handed to the tracker in g. The spike detector always sees every 100 Hz sample.
 
 Bump spike (ui-spec §6 HOT/FOUND, §7): the gravity-removed magnitude
-``|a - g_lp|`` above ``spike_g`` (2.5 g) for a run ``spike_min_ms``..
-``spike_max_ms`` wide (10-20 ms: one or two 100 Hz samples). Longer runs
-(shakes, falls, slaps) are rejected, as are runs within ``refractory_ms`` of
+``|a - g_lp|`` above ``SPIKE_G`` (2.5 g) for a run ``SPIKE_MIN_MS``..
+``SPIKE_MAX_MS`` wide (10-20 ms: one or two 100 Hz samples). Longer runs
+(shakes, falls, slaps) are rejected, as are runs within ``REFRACTORY_MS`` of
 the last accepted one. Blanking (§7): a run that overlaps a motor pulse, from
 its start until ``BLANKING_MS`` after it ends, is ignored. The feed keeps its
-own short history of pulses because samples reach it up to a batch late,
-after ``HapticPlayer.blanked`` has already moved on.
+own short history of pulses (``motor``) because samples reach it up to a
+batch late, after the motor has already moved on; it is also the game's
+``blank_fn``. The thresholds are
+attributes (``thr2`` = threshold in mg squared, ``spike_min_ms``,
+``spike_max_ms``, ``refractory_ms``, ``blank_ms``), so a notebook can tune
+them on a running feed.
 
 Per sample the work is integer maths plus one tracker update per
-``odr_hz // out_hz`` samples.
+``ODR_HZ // out_hz`` samples.
 """
 
+from finder import tuning as T
 from finder.compat import ticks_add, ticks_diff
 from finder.motion import MotionTracker
 from finder.haptic_patterns import BLANKING_MS
 
-SPIKE_G = 2.5
-SPIKE_MIN_MS = 10
-SPIKE_MAX_MS = 20
-REFRACTORY_MS = 200       # ringing after a knock is not a second bump
+ODR_HZ = 100              # BMA423 FIFO rate (hal.bma423 default odr)
+SPIKE_G = T.BUMP_SPIKE_G                      # ui-spec §6 HOT (generated SPEC rows)
+SPIKE_MIN_MS, SPIKE_MAX_MS = T.BUMP_SPIKE_MS
+REFRACTORY_MS = T.BUMP_REFRACTORY_MS          # ringing after a knock is not a second bump
 RESYNC_MS = 40            # batch clock this far from ``now``: re-anchor
 G_SHIFT = 4               # gravity low-pass: tau ~ 16 samples (160 ms at 100 Hz)
 _NP = 4                   # motor pulses remembered for blanking
@@ -40,25 +45,22 @@ _NP = 4                   # motor pulses remembered for blanking
 class ImuFeed:
     """Drains a BMA423-like FIFO (``fifo_read_mg`` + ``fifo_mg``)."""
 
-    def __init__(self, imu, tracker=None, on_tap=None, odr_hz=100, out_hz=50,
-                 spike_g=SPIKE_G, spike_min_ms=SPIKE_MIN_MS, spike_max_ms=SPIKE_MAX_MS,
-                 refractory_ms=REFRACTORY_MS, blank_ms=BLANKING_MS, z_sign=1):
+    def __init__(self, imu, on_tap=None, out_hz=50, z_sign=1):
         self.imu = imu
-        self.dt = 1000 // odr_hz
-        d = odr_hz // out_hz
+        self.dt = 1000 // ODR_HZ
+        d = ODR_HZ // out_hz
         self.dec = d if d > 1 else 1
-        self.tracker = tracker if tracker is not None else MotionTracker(
-            rate_hz=odr_hz // self.dec, z_sign=z_sign)
+        self.tracker = MotionTracker(rate_hz=ODR_HZ // self.dec, z_sign=z_sign)
         self.on_tap = on_tap
-        thr = int(spike_g * 1000)
+        thr = int(SPIKE_G * 1000)
         self.thr2 = thr * thr
-        self.spike_min_ms = spike_min_ms
-        self.spike_max_ms = spike_max_ms
-        self.refractory_ms = refractory_ms
-        self.blank_ms = blank_ms
+        self.spike_min_ms = SPIKE_MIN_MS
+        self.spike_max_ms = SPIKE_MAX_MS
+        self.refractory_ms = REFRACTORY_MS
+        self.blank_ms = BLANKING_MS
         self._k = 1.0 / (1000.0 * self.dec)
         self._on = [0] * _NP      # pulse start times (ring)
-        self._off = [0] * _NP     # pulse end times; valid while _used
+        self._off = [0] * _NP     # pulse end times (the newest: its start while on)
         self._pi = 0
         self._pn = 0
         self._lvl_on = False

@@ -11,12 +11,10 @@ has no ``framebuf``, so a stub renderer with the same ``frame`` contract is
 used there.
 """
 
-import sys
 from array import array
 
 from tests import fakes
 
-MPY = sys.implementation.name == "micropython"
 MAC_A = b"\x24\x0a\xc4\x10\x00\x0a"
 MAC_B = b"\x24\x0a\xc4\x10\x00\x0b"
 RUN_MS = 60000
@@ -63,23 +61,66 @@ class FakeIMU:
         return n
 
 
+class ChipIMU(FakeIMU):
+    """FakeIMU plus a BMA423 feature engine that comes up on the 3rd poll
+    (``ok`` None: no blob, False: init fails); ``events`` latch until read."""
+
+    def __init__(self, clock, ok):
+        FakeIMU.__init__(self, clock)
+        self.ok = ok
+        self.feat_state = 0
+        self.polls = 0
+        self.calls = []
+        self.events = 0
+
+    def start_features(self):
+        self.calls.append("start")
+        if self.ok is None:
+            return False               # bma423conf.bin missing
+        self.feat_state = 1
+        return True
+
+    def poll_features(self):
+        self.polls += 1
+        if self.polls >= 3 and self.feat_state == 1:
+            self.feat_state = 2 if self.ok else -1
+            if self.ok:
+                self.calls.append("on")
+        return self.feat_state
+
+    def features_ok(self):
+        return self.feat_state == 2
+
+    def steps(self):
+        return 0
+
+    def activity(self):
+        return 0
+
+    def poll_events(self):
+        ev = self.events
+        self.events = 0
+        return ev
+
+
 class FakeTouch:
     def __init__(self, clock, presses=()):
         self.clock = clock
         self.presses = list(presses)   # (t_down, t_up, x, y)
-        self.r = [False, 0, 0]
-        self.reads = 0
+        self.contacts = 1              # fingers while touching (2: multi-touch)
+        self.r = [False, 0, 0, 0]
 
     def read(self):
-        self.reads += 1
         t = self.clock.now
         r = self.r
         r[0] = False
+        r[3] = 0
         for t0, t1, x, y in self.presses:
             if t0 <= t < t1:
                 r[0] = True
                 r[1] = x
                 r[2] = y
+                r[3] = self.contacts
         return r
 
 
@@ -89,10 +130,17 @@ class FakePMU:
         self.events = list(events)     # (t_ms, EV_* mask)
         self.pct = pct
         self.off = False
-        self.polls = 0
+        self.fail_off = 0              # shutdown() raises OSError this many times
+        self.cleared = 0
+
+    def set_long_press_ms(self, ms):
+        pass
+
+    def clear_irqs(self):
+        self.cleared += 1
+        self.events = [e for e in self.events if e[0] > self.clock.now]
 
     def poll(self):
-        self.polls += 1
         ev = 0
         now = self.clock.now
         while self.events and self.events[0][0] <= now:
@@ -105,7 +153,13 @@ class FakePMU:
     def battery_voltage(self):
         return 3900
 
+    def is_charging(self):
+        return False
+
     def shutdown(self):
+        if self.fail_off:
+            self.fail_off -= 1
+            raise OSError(5)
         self.off = True
 
 
@@ -114,7 +168,6 @@ class FakeDisplay:
         self.pushes = 0
         self.level = None
         self.asleep = False
-        self.sleeps = 0
 
     def push_strip(self, y0, h, buf):
         self.pushes += 1
@@ -126,9 +179,8 @@ class FakeDisplay:
 
     def sleep(self):
         self.asleep = True
-        self.sleeps += 1
 
-    def wake(self, level=None):
+    def wake(self, level=None, wait=None):
         self.asleep = False
         self.brightness(level)
 
@@ -137,11 +189,7 @@ class StubRenderer:
     """``ui.renderer.Renderer.frame`` contract without framebuf (CPython)."""
 
     def __init__(self):
-        self.runes = (0, 3, 6)
-        self.sun = False
-        self.menu_rows = []
         self.buf = bytearray(240 * 24 * 2)
-        self._hap_t = None
         self._hb_t = None
 
     def frame(self, p, display=None, now=0):
@@ -154,16 +202,12 @@ class StubRenderer:
         if display is not None:
             for s in range(10):
                 display.push_strip(s * 24, 24, self.buf)
-        if p.haptic and p.t_ms != self._hap_t:
-            self._hap_t = p.t_ms
-            return [p.haptic, hb] if hb else [p.haptic]
-        return [hb] if hb else ()
+        return [hb] if hb else ()           # heartbeats only: params.haptic is the runtime's
 
 
 def _renderer():
     try:
-        import framebuf  # noqa: F401
-        from ui.renderer import Renderer
+        from ui.renderer import Renderer      # needs framebuf (MicroPython)
         return Renderer()
     except ImportError:
         return StubRenderer()
@@ -177,7 +221,7 @@ class Board:
             setattr(self, k, parts[k])
 
 
-def _watch(clock, mac, radio, imu_spikes=(), touches=(), buttons=()):
+def _watch(clock, radio, imu_spikes=(), touches=(), buttons=()):
     from hal.haptics import Motor
     from app.runtime import Runtime
     b = Board(pmu=FakePMU(clock, buttons), display=FakeDisplay(),
@@ -194,32 +238,27 @@ def _watch(clock, mac, radio, imu_spikes=(), touches=(), buttons=()):
     return rt
 
 
-def _nonzero(hist):
-    for d in hist:
-        if d:
-            return True
-    return False
-
-
 # ---- the two-watch minute -----------------------------------------------------------
 def test_two_watches_one_minute():
     fakes.install()
     from hal.radio import SimRadio
     from finder.game import BUZZ_OFF, BUZZ_FULL, M_PAIRING
     from finder import pairing as P
-    from app.runtime import EV_SHORT
+    from hal.axp202 import EV_SHORT
+    from finder import tuning as T
     clock = Clock(0)
     ra = SimRadio(MAC_A, seed=11).begin()
     rb = SimRadio(MAC_B, seed=22).begin()
     ra.connect(rb, rssi=-50)
-    a = _watch(clock, MAC_A, ra, imu_spikes=((20000, 2, 3000), (22000, 6, 3000)),
+    a = _watch(clock, ra, imu_spikes=((20000, 2, 3000), (22000, 6, 3000)),
                buttons=((2000, EV_SHORT),))
-    y_buzz = 120 + 20                  # MENU_ROWS_Y[2] (row 2: BUZZ)
-    b = _watch(clock, MAC_B, rb, buttons=((2500, EV_SHORT),),
+    y_buzz = T.MENU_ROWS_Y[2] + T.MENU_ROW_H // 2       # row 2: BUZZ
+    y_resume = T.MENU_ROWS_Y[0] + T.MENU_ROW_H // 2     # row 0: RESUME
+    b = _watch(clock, rb, buttons=((2500, EV_SHORT),),
                touches=((45000, 46000, 120, 120),          # long press: MENU
                         (47000, 47080, 120, y_buzz),       # BUZZ: EVENTS
                         (48000, 48080, 120, y_buzz),       # BUZZ: OFF
-                        (49000, 49080, 120, 52)))          # RESUME
+                        (49000, 49080, 120, y_resume)))    # RESUME
     rts = (a, b)
     for rt in rts:
         rt.begin(0)
@@ -244,7 +283,7 @@ def test_two_watches_one_minute():
     for rt in rts:
         assert not rt.errors, rt.errors
         assert rt.game.screen_on and not rt.display.asleep
-        n = rt.frames_total
+        n = rt.frames
         assert 0.95 * 20 * RUN_MS / 1000 <= n <= 20 * RUN_MS / 1000 + 2, n
         assert rt.display.pushes == 10 * n
         assert rt.ticks >= 0.98 * RUN_MS / 100, rt.ticks
@@ -273,43 +312,26 @@ def test_two_watches_one_minute():
     assert a.feed.n_samples >= 5900
 
     # haptics: the motor was driven; buzz OFF (via the menu) silenced watch B
-    assert _nonzero(a.motor._pwm.history)
-    assert _nonzero(b.motor._pwm.history[:off_idx])
+    assert any(a.motor._pwm.history)
+    assert any(b.motor._pwm.history[:off_idx])
     assert off_at is not None and 48000 <= off_at < 49000, off_at
-    assert not _nonzero(b.motor._pwm.history[off_idx:]), b.motor._pwm.history[off_idx:]
+    assert not any(b.motor._pwm.history[off_idx:]), b.motor._pwm.history[off_idx:]
     assert b.motor.duty_u16 == 0
     assert a.game.buzz == BUZZ_FULL
-    assert _nonzero(a.motor._pwm.history[a_idx:])     # A (FULL) kept buzzing
+    assert any(a.motor._pwm.history[a_idx:])     # A (FULL) kept buzzing
     assert not b.game.menu_open
     for rt in rts:
         assert not rt.pmu.off and not rt.powered_off
 
     # timing stats are printable from the REPL
+    n = a.frames
     s = a.stats()
-    assert s["frames"] == a.frames_total and s["render"][2] == a.frames_total
+    assert s["frames"] == n and s["render"][2] == n
     assert s["collect"][0] == a.gc_count[0] and s["gc"][2] == a.gc_count[0]
     assert a.frames == 0
 
 
 # ---- smaller pieces -----------------------------------------------------------------
-def test_power_off_shuts_pmu_down():
-    fakes.install()
-    from hal.radio import SimRadio
-    clock = Clock(1000)
-    r = SimRadio(MAC_A).begin()
-    rt = _watch(clock, MAC_A, r)
-    rt.board.pmu.pct = 2                     # below BATT_SHUTDOWN_PCT: BYE, goodbye beacons
-    rt.begin(clock.now)
-    for _ in range(4000):
-        if rt.powered_off:
-            break
-        clock.sleep(max(1, rt.step(clock.now)))
-    assert rt.powered_off and rt.pmu.off
-    assert rt.display.asleep
-    assert rt.motor.duty_u16 == 0
-    assert not rt.running
-
-
 def test_missing_parts_and_screen_off():
     fakes.install()
     from app.runtime import Runtime
@@ -322,7 +344,7 @@ def test_missing_parts_and_screen_off():
                  gc_collect=lambda: None)
     rt.run(max_ms=1000)
     assert "touch" in rt.errors and "radio" in rt.errors and "pmu" in rt.errors
-    assert rt.frames_total >= 18 and d.pushes == 10 * rt.frames_total
+    assert rt.frames >= 18 and d.pushes == 10 * rt.frames
     # face down (z = -1 g) for > WRIST_DOWN_MS: display sleeps, frames stop
     imu.spikes.append((clock.now, 100000, -2000))
     n0 = d.pushes
@@ -332,6 +354,12 @@ def test_missing_parts_and_screen_off():
     n1 = d.pushes
     rt.run(max_ms=1000)
     assert d.pushes == n1
+    # a new runtime on the same board (notebook re-run): it wakes the asleep panel
+    del imu.spikes[:]
+    rt = Runtime(b, parts=("display", "imu"), clock=clock, sleep_ms=clock.sleep,
+                 renderer=_renderer(), gc_collect=lambda: None)
+    rt.run(max_ms=500)
+    assert not d.asleep and rt.frames > 0 and d.level > 0, (d.asleep, rt.frames, d.level)
 
 
 def test_no_renderer_uses_metronome():
@@ -345,7 +373,7 @@ def test_no_renderer_uses_metronome():
                  renderer=None, gc_collect=lambda: None)
     rt.begin(0)
     rt.renderer = None
-    rt.params = make_params(t_ms=0, heartbeat="TICK", pulse_period_ms=500)
+    rt.params = make_params(t_ms=0, heartbeat="TICK", pulse_period_ms=500, ring_live=True)
     rt._fresh = True
     for _ in range(300):
         rt._stage_render(clock.now)
@@ -357,6 +385,18 @@ def test_no_renderer_uses_metronome():
         if d:
             on += 1
     assert on >= 4, m._pwm.history
+    # no packets (ghost ring, ui-spec §4 rule 5): the metronome stops
+    rt.params = make_params(t_ms=clock.now, heartbeat="TICK", pulse_period_ms=500)
+    for _ in range(10):                    # let a running pulse end
+        rt._stage_render(clock.now)
+        rt._stage_haptic(clock.now)
+        clock.sleep(10)
+    n = len(m._pwm.history)
+    for _ in range(300):
+        rt._stage_render(clock.now)
+        rt._stage_haptic(clock.now)
+        clock.sleep(10)
+    assert rt.player.period_ms == 0 and not any(m._pwm.history[n:]), m._pwm.history[n:]
 
 
 def test_imu_feed_spikes_blanking_and_rate():
@@ -390,7 +430,7 @@ def test_telemetry_ring_and_state_record():
     import json
     clock = Clock(0)
     r = SimRadio(MAC_A).begin()
-    rt = _watch(clock, MAC_A, r)
+    rt = _watch(clock, r)
     tl = Telemetry(cap=8, hz=5, dev="A", sid="t1")
     rt.tele = tl
     rt.run(max_ms=3000)
@@ -398,10 +438,11 @@ def test_telemetry_ring_and_state_record():
     ls = tl.lines()
     assert len(ls) == 8
     d = json.loads(ls[-1])
-    for k in ("t", "ev", "rssi", "zone", "ui", "scr", "bl", "fps", "batt_pct", "seq"):
+    for k in ("t", "ev", "rssi", "zone", "ui", "scr", "bl", "fps", "batt_pct", "seq",
+              "steps_since_scan"):
         assert k in d, k
     assert d["dev"] == "A" and d["ev"] == "s" and d["scr"] is True
-    assert d["batt_pct"] == 90 and d["batt_mv"] == 3900
+    assert d["batt_pct"] == 90 and d["batt_mv"] == 3900 and d["chg"] is False
     tl.event(5, "btn", ("kind", "short"))
     assert json.loads(tl.lines(1)[0]) == {"t": 5, "ev": "btn", "kind": "short"}
     assert len(tl.lines(3)) == 3
@@ -412,17 +453,10 @@ def test_real_board_drivers_short_run():
     m = fakes.install()
     from hal import axp202
     from hal import bma423 as B
-    pmu = m.add_i2c_device(0, 0x35, {0x03: 0x41, 0x12: 0x02, 0xB9: 80})
+    pmu = m.add_axp202({0xB9: 80})
     w1c = axp202.REG_INTSTS1
-
-    def pmu_write(reg, data, _w=pmu.write):
-        if w1c <= reg < w1c + 5:           # IRQ status: write 1 to clear
-            pmu.regs[reg] &= ~data[0] & 0xFF
-            return
-        _w(reg, data)
-    pmu.write = pmu_write
     imu = m.add_i2c_device(0, 0x19, {0x00: 0x13})
-    m.add_i2c_device(1, 0x38, {0xA3: 0x64})
+    tp = m.add_i2c_device(1, 0x38, {0xA3: 0x64})
     clock = Clock(5000)
     frame = bytes((0, 0, 0, 0, 0x00, 0x20))       # z = +1 g at +-4 g
 
@@ -434,6 +468,12 @@ def test_real_board_drivers_short_run():
             return (frame * (n // 6 + 1))[:n]
         return _r(reg, n)
     imu.read = imu_read
+
+    def tp_read(reg, n, _r=tp.read):
+        if reg == 0x02 and clock.now & 64:        # TD_STATUS: NACK now and then
+            raise OSError(19)
+        return _r(reg, n)
+    tp.read = tp_read
     import hal.board as hb
     from app.runtime import Runtime
     board = hb.Board()
@@ -445,11 +485,13 @@ def test_real_board_drivers_short_run():
         clock.sleep(max(1, rt.step(clock.now)))
         del m.spi_log[:]
     assert not rt.errors, rt.errors
-    assert not any(rt.io_errors), rt.io_errors
+    assert not any(rt.io_errors), rt.io_errors     # the touch driver counts its own
+    assert rt.stats(reset=False)["touch_errors"] == board.touch.errors > 0
     assert rt.game.battery == 80
     assert rt.feed.n_samples > 0 and rt.feed.tracker.face_up
-    assert rt.frames_total >= 5
+    assert rt.frames >= 5
     assert pmu.regs[w1c + 2] == 0          # PEK IRQ consumed
+    assert pmu.regs[axp202.REG_POK_SET] & 0x30 == 0x10   # PEK long press 1.5 s (tokens)
     assert board.radio.n_tx >= 3
 
 
@@ -500,15 +542,15 @@ def test_haptic_pulses_keep_floor_with_slow_frames():
     serviced between strips and while idle, so pulses keep MIN_PULSE_MS."""
     fakes.install()
     from hal.radio import SimRadio
-    from app.runtime import EV_SHORT
+    from hal.axp202 import EV_SHORT
     from finder.haptic_patterns import MIN_PULSE_MS
     ra = SimRadio(MAC_A, seed=11).begin()
     rb = SimRadio(MAC_B, seed=22).begin()
     ra.connect(rb, rssi=-50)
     ca = Clock(0)
     cb = Clock(0)
-    a = _watch(ca, MAC_A, ra, buttons=((2000, EV_SHORT),))
-    b = _watch(cb, MAC_B, rb, buttons=((2500, EV_SHORT),))
+    a = _watch(ca, ra, buttons=((2000, EV_SHORT),))
+    b = _watch(cb, rb, buttons=((2500, EV_SHORT),))
     rts = ((a, ca), (b, cb))
     for rt, c in rts:
         rt.board.display = SlowDisplay(c)
@@ -526,16 +568,68 @@ def test_haptic_pulses_keep_floor_with_slow_frames():
         due[k] = c.now
     strip = 4
     for rt, c in rts:
-        assert rt.frames_total >= 0.95 * 20 * end / 1000, rt.frames_total
+        assert rt.frames >= 0.95 * 20 * end / 1000, rt.frames
         p = _pulses(rt.motor.log)
         assert len(p) >= 6, rt.motor.log
         ticks = [on for on, g0, g1 in p if (g0 is None or g0 >= 200) and (g1 is None or g1 >= 200)]
         assert len(ticks) >= 3, p
         for on in ticks:                   # single TICK: exact start, end within a strip
             assert MIN_PULSE_MS <= on <= MIN_PULSE_MS + strip, p
-        for on, g0, g1 in p:               # a later pulse may start up to a strip late
-            assert on >= MIN_PULSE_MS - strip, p
+        for on, g0, g1 in p:               # a later pulse may start a strip late, never shorter
+            assert on >= MIN_PULSE_MS, p
         assert rt.feed.dec == 4            # tracker fed at 25 Hz
+
+
+class JitterDisplay(SlowDisplay):
+    """Strips cost 3, 4 or 5 ms in turn (SPI and GC jitter)."""
+
+    def push_strip(self, y0, h, buf):
+        self.pushes += 1
+        self.clock.now += 3 + self.pushes % 3
+
+
+def test_scan_countdown_ticks_all_reach_the_motor():
+    """The scan ``ready`` countdown TICKs (1 s apart, ui-spec §6) each become a
+    full motor pulse, though frames take ~40 ms with jitter."""
+    fakes.install()
+    from hal.radio import SimRadio
+    from hal.axp202 import EV_SHORT
+    from finder.haptic_patterns import MIN_PULSE_MS
+    from finder.game import M_SCANNING
+    ra = SimRadio(MAC_A, seed=3).begin()
+    rb = SimRadio(MAC_B, seed=4).begin()
+    ra.connect(rb, rssi=-50)
+    ca = Clock(0)
+    cb = Clock(0)
+    a = _watch(ca, ra, buttons=((1000, EV_SHORT),))      # both confirm: calibrate
+    b = _watch(cb, rb, buttons=((1000, EV_SHORT),))
+    rts = ((a, ca), (b, cb))
+    for rt, c in rts:
+        rt.board.display = JitterDisplay(c)
+        rt.board.haptics = RecMotor(c)
+        rt.begin(0)
+    due = [0, 0]
+    t_scan = None
+    while ca.now < 7000:
+        if t_scan is None and ca.now >= 2000:
+            t_scan = ca.now
+            a.game._start_scan(t_scan)
+            del a.motor.log[:]
+        k = 0 if due[0] <= due[1] else 1
+        rt, c = rts[k]
+        if c.now < due[k]:
+            c.now = due[k]
+        w = rt.step(c.now)
+        rt.idle(w if w > 0 else 1)
+        due[k] = c.now
+    assert a.game.mode == M_SCANNING
+    on = [t for t, v in a.motor.log if v]
+    p = _pulses(a.motor.log)
+    assert len(on) >= 3, a.motor.log
+    assert 950 <= on[1] - on[0] <= 1050 and 950 <= on[2] - on[1] <= 1050, on
+    assert on[0] - t_scan <= 500 + 100 + 60, (t_scan, on)   # flat held 0.5 s, logic + frame
+    for d, g0, g1 in p[:3]:
+        assert d >= MIN_PULSE_MS, p
 
 
 class _AxpBus:
@@ -543,17 +637,7 @@ class _AxpBus:
 
     def __init__(self, m, pct, vbus):
         from hal import axp202
-        dev = m.add_i2c_device(0, 0x35, {0x03: 0x41, 0x12: 0x02, 0xB9: pct,
-                                         0x00: 0x20 if vbus else 0x00, 0x32: 0x46})
-        w1c = axp202.REG_INTSTS1
-
-        def write(reg, data, _w=dev.write):
-            if w1c <= reg < w1c + 5:
-                dev.regs[reg] &= ~data[0] & 0xFF
-                return
-            _w(reg, data)
-        dev.write = write
-        self.dev = dev
+        self.dev = m.add_axp202({0xB9: pct, 0x00: 0x20 if vbus else 0x00, 0x32: 0x46})
         self.pmu = axp202.AXP202(m.I2C(0, scl=m.Pin(22), sda=m.Pin(21)))
 
 
@@ -570,7 +654,7 @@ def test_low_battery_shutdown_needs_confirmation_and_no_usb():
     from finder import tuning as T
     bus = _AxpBus(m, pct=2, vbus=True)
     clock = Clock(1000)
-    rt = _watch(clock, MAC_A, SimRadio(MAC_A).begin())
+    rt = _watch(clock, SimRadio(MAC_A).begin())
     rt.board.pmu = bus.pmu
     rt.begin(clock.now)
     _run(rt, clock, 25000)                 # on USB: 2 % never powers off
@@ -578,27 +662,540 @@ def test_low_battery_shutdown_needs_confirmation_and_no_usb():
     assert rt.game.battery == T.BATT_SHUTDOWN_PCT + 1
     assert bus.dev.regs[0x32] & 0x80 == 0
     bus.dev.regs[0x00] = 0                 # unplugged
-    t_unplug = clock.now
+    while not rt._low_n:                   # first off-USB reading (unconfirmed)
+        t_low = clock.now
+        clock.sleep(max(1, rt.step(t_low)))
+    assert rt.game.battery == T.BATT_SHUTDOWN_PCT + 1 and rt.game._bye_t is None
     _run(rt, clock, 30000)
     assert rt.powered_off and not rt.running
     assert bus.dev.regs[0x32] == 0x46 | 0x80   # REG 32H bit 7 via the real driver
-    assert clock.now - t_unplug >= (BATT_LOW_READS - 1) * BATT_RECHECK_MS
+    assert rt.game._bye_t - t_low == (BATT_LOW_READS - 1) * BATT_RECHECK_MS, rt.game._bye_t - t_low
+    assert rt.display.asleep and rt.motor.duty_u16 == 0
 
 
 def test_one_low_battery_reading_is_ignored():
+    """An unconfirmed shutdown-level reading never reaches the game: it keeps
+    its last value (100 at boot), so no BATTERY 5% toast, BATT buzz or saver."""
     fakes.install()
     from hal.radio import SimRadio
-    from finder import tuning as T
     clock = Clock(1000)
-    rt = _watch(clock, MAC_A, SimRadio(MAC_A).begin())
-    rt.board.pmu.pct = 0                   # a sagging voltage-fallback reading
+    rt = _watch(clock, SimRadio(MAC_A).begin())
+    pmu = rt.board.pmu
+    pmu.pct = 0                            # a sagging voltage-fallback reading at boot
     rt.begin(clock.now)
     rt.step(clock.now)
-    assert rt.game.battery == T.BATT_SHUTDOWN_PCT + 1
-    rt.board.pmu.pct = 60
-    _run(rt, clock, 15000)
-    assert not rt.powered_off and not rt.pmu.off
-    assert rt.game._bye_t is None and rt.game.battery == 60
+    g = rt.game
+    assert g.battery == 100 and not g.saver and g._toast is None, (g.battery, g._toast)
+    pmu.pct = 60
+    _run(rt, clock, 11000)
+    assert g.battery == 60
+    pmu.pct = 0                            # one more, at a later 10 s reading
+    rt._t_batt = clock.now
+    while not rt._low_n:
+        clock.sleep(max(1, rt.step(clock.now)))
+    pmu.pct = 60
+    haps = []
+    t_end = clock.now + 3000
+    while clock.now < t_end:
+        clock.sleep(max(1, rt.step(clock.now)))
+        if rt.params.haptic:
+            haps.append(rt.params.haptic)
+    assert g.battery == 60 and not g.saver and g._toast is None, (g.battery, g._toast)
+    assert "BATT" not in haps, haps
+    assert not rt.powered_off and not pmu.off and g._bye_t is None
+
+
+def test_power_off_survives_panel_and_bus_errors():
+    """A panel error never skips the AXP202 power-off, and a glitched
+    power-off write on the shared I2C0 is retried."""
+    fakes.install()
+    from hal.radio import SimRadio
+    from app.runtime import S_LOGIC
+    clock = Clock(1000)
+    rt = _watch(clock, SimRadio(MAC_A).begin())
+    pmu = rt.board.pmu
+    pmu.fail_off = 2
+
+    def panel_error():
+        raise OSError(5)
+    rt.board.display.sleep = panel_error
+    rt.begin(clock.now)
+    rt._power_off(clock.now)
+    assert pmu.off and rt.powered_off and not rt.running
+    assert rt.io_errors[S_LOGIC] == 3, rt.io_errors
+
+
+def test_no_radio_still_powers_off_at_shutdown_level():
+    """ui-spec LOW-BATTERY 3 %: BYE ends in the AXP202 power-off even when no
+    goodbye beacon can be sent (R-12: never die silently)."""
+    fakes.install()
+    from hal.haptics import Motor
+    from app.runtime import Runtime
+    clock = Clock(1000)
+    pmu = FakePMU(clock, pct=2)
+    rt = Runtime(Board(pmu=pmu, display=FakeDisplay(), imu=FakeIMU(clock), haptics=Motor()),
+                 clock=clock, sleep_ms=clock.sleep, renderer=_renderer(), gc_collect=lambda: None)
+    rt.begin(clock.now)
+    _run(rt, clock, 10000)
+    assert "radio" in rt.errors
+    assert rt.powered_off and pmu.off
+
+
+def test_press_latched_before_begin_is_dropped():
+    """A side-key press latched before the loop starts (e.g. during the app
+    import) never reaches the game, so it never opens MENU."""
+    fakes.install()
+    from hal.radio import SimRadio
+    from hal.axp202 import EV_LONG
+    clock = Clock(1000)
+    rt = _watch(clock, SimRadio(MAC_A).begin(), buttons=((500, EV_LONG),))
+    rt.begin(clock.now)
+    seen = []
+    ob = rt.game.on_button
+    rt.game.on_button = lambda t, long=False: (seen.append((t, long)), ob(t, long))
+    _run(rt, clock, 1000)
+    assert rt.pmu.cleared == 1 and not seen and not rt.game.menu_open, seen
+
+
+def test_no_renderer_wake_restores_backlight():
+    """Without a renderer no frame lights the woken panel: _screen does."""
+    fakes.install()
+    from app.runtime import Runtime
+    clock = Clock(0)
+    d = FakeDisplay()
+    imu = FakeIMU(clock)
+    rt = Runtime(Board(display=d, imu=imu), parts=("display", "imu"), clock=clock,
+                 sleep_ms=clock.sleep, gc_collect=lambda: None)
+    rt.begin(0)
+    rt.renderer = None                     # MicroPython: begin() built a Renderer
+    imu.spikes.append((1000, 100000, -2000))   # face down: the screen goes off
+    rt.run(max_ms=5000)
+    assert d.asleep and not rt.screen_is_on
+    rt.game.on_wake(clock.now)
+    rt.run(max_ms=500)
+    assert not d.asleep and d.level is not None and d.level > 0, d.level
+
+
+class WakeDisplay(FakeDisplay):
+    """Logs pushes and backlight levels; ``wake`` blocks 120 ms (SLPOUT) on
+    the watch's clock unless given the loop's ``wait``."""
+
+    def __init__(self, clock):
+        FakeDisplay.__init__(self)
+        self.clock = clock
+        self.log = []
+
+    def push_strip(self, y0, h, buf):
+        self.pushes += 1
+        self.log.append("push")
+
+    def brightness(self, level=None):
+        if level is not None:
+            self.log.append(level)
+        return FakeDisplay.brightness(self, level)
+
+    def wake(self, level=None, wait=None):
+        self.log.append("wake")
+        if wait is None:
+            self.clock.now += 120
+        else:
+            wait(120)
+        FakeDisplay.wake(self, level)
+
+
+def test_wake_lights_a_fresh_frame_and_keeps_motor_timing():
+    """ui-spec §8: the panel wakes dark and is lit only once a fresh frame is
+    out; the motor is serviced through the 120 ms SLPOUT wait."""
+    fakes.install()
+    from app.runtime import Runtime
+    from finder.haptic_patterns import LOST
+    clock = Clock(0)
+    d = WakeDisplay(clock)
+    imu = FakeIMU(clock)
+    m = RecMotor(clock)
+    rt = Runtime(Board(display=d, imu=imu, haptics=m), parts=("display", "imu", "haptics"),
+                 clock=clock, sleep_ms=clock.sleep, renderer=_renderer(), gc_collect=lambda: None)
+    rt.run(max_ms=1000)
+    imu.spikes.append((clock.now, 100000, -2000))    # face down: the screen goes off
+    rt.run(max_ms=4000)
+    assert d.asleep and not rt.screen_is_on
+    del d.log[:]
+    del m.log[:]
+    drawn = []                                       # (frame's now, real time) when lit
+    frame = rt.renderer.frame
+
+    def rec(p, disp, now):
+        if disp is not None:
+            drawn.append((now, clock.now))
+        return frame(p, disp, now)
+    rt.renderer.frame = rec
+    rt.game.on_wake(clock.now)
+    rt.player.play_named("LOST", clock.now)          # 5 x 60 ms on, 60 ms off
+    rt.run(max_ms=1000)
+    assert drawn[0][0] == drawn[0][1], drawn[:2]     # no stale frame after the SLPOUT wait
+    i = d.log.index("wake")
+    lit = [k for k in range(i, len(d.log)) if d.log[k] not in ("wake", "push") and d.log[k] > 0]
+    assert lit and d.log[i + 1:lit[0]].count("push") >= 10, d.log[:20]
+    on_ms, off_ms = LOST[0][0], LOST[0][1]
+    p = _pulses(m.log)
+    assert len(p) == len(LOST), m.log
+    for on, g0, g1 in p:                             # every edge within the 1 ms idle slice
+        assert on_ms <= on <= on_ms + 1, m.log
+        assert g1 is None or off_ms <= g1 <= off_ms + 1, m.log
+
+
+class UsbPMU(FakePMU):
+    """VBUS present except from ``unplug[0]`` to ``unplug[1]``."""
+
+    unplug = (15000, 25000)
+
+    def vbus_present(self):
+        return not (self.unplug[0] <= self.clock.now < self.unplug[1])
+
+
+def test_watchdog_turns_hardware_once_unplugged():
+    """Started on USB: the stoppable soft watchdog. The first battery reading
+    (every 10 s) without VBUS switches it, one way, to the hardware WDT."""
+    m = fakes.install()
+    from hal.radio import SimRadio
+    from hal.watchdog import MODE_HW
+    clock = Clock(1000)
+    rt = _watch(clock, SimRadio(MAC_A).begin())
+    rt.board.pmu = UsbPMU(clock)
+    rt.watchdog_ms = 8000
+    rt.run(max_ms=11000)                             # battery reads at 1 s, 11 s: on USB
+    assert not m.wdts and rt.wd is None              # soft, switched off on exit
+    rt.run(max_ms=20000)                             # unplugged 15-25 s: switch at the 21 s read
+    assert len(m.wdts) == 1 and m.wdts[0].feeds > 50, m.wdts
+    assert rt.wd.mode == MODE_HW                     # cannot be stopped: still armed
+
+
+def test_touch_down_spike_is_not_a_bump():
+    """ui-spec §6/§8: the accelerometer spike of the finger itself is no bump
+    tap, whether it reaches the game just before or after the touch-down."""
+    fakes.install()
+    from hal.radio import SimRadio
+    from app.telemetry import Telemetry
+    import json
+    clock = Clock(0)
+    rt = _watch(clock, SimRadio(MAC_A).begin(),
+                imu_spikes=((4990, 2, 3000), (5250, 2, 3000), (7000, 2, 3000)),
+                touches=((5050, 5350, 120, 120), (8000, 8100, 120, 120)))
+    rt.tele = Telemetry(cap=200, hz=0)
+    rt.begin(0)
+    _run(rt, clock, 6000)
+    ev = [json.loads(s) for s in rt.tele.lines()]
+    taps = [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"]
+    assert taps == [(4990, True), (5250, False)], taps   # 4990: before the finger was seen
+    assert rt.game.bump_t is None                    # ... dropped at touch-down
+    assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"]
+    _run(rt, clock, 1500)
+    assert rt.game.bump_t == 7000                    # a real knock still counts
+    rt.board.touch.contacts = 2                      # two fingers: ignored (§8)
+    n = rt.tele.n
+    _run(rt, clock, 1000)
+    assert not [s for s in rt.tele.lines(rt.tele.n - n) if '"touch"' in s]
+
+
+def _touch_downs(rt):
+    """Times of ``game.on_touch_down`` calls (the game still sees them)."""
+    out = []
+    od = rt.game.on_touch_down
+    rt.game.on_touch_down = lambda t: (out.append(t), od(t))
+    return out
+
+
+def test_short_taps_count_while_frames_render():
+    """ui-spec §8: a 60-400 ms touch is a TAP. A frame takes 40 ms, so touch
+    is also sampled between strips: 70 ms taps at every phase all count."""
+    fakes.install()
+    from hal.radio import SimRadio
+    from app.telemetry import Telemetry
+    import json
+    clock = Clock(0)
+    taps = [(5000 + 507 * i, 5070 + 507 * i, 120, 120) for i in range(40)]
+    rt = _watch(clock, SimRadio(MAC_A).begin(), touches=taps)
+    rt.board.display = SlowDisplay(clock)
+    rt.tele = Telemetry(cap=400, hz=0)
+    rt.begin(0)
+    downs = _touch_downs(rt)
+    _run(rt, clock, 26000)
+    ev = [json.loads(s) for s in rt.tele.lines()]
+    assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"] * 40, ev
+    assert len(downs) == 40 and all(0 <= d - t[0] <= 10 for d, t in zip(downs, taps)), downs
+
+
+def test_finger_spike_after_a_mid_frame_touch_down():
+    """A touch-down sampled between strips reaches the game before the next
+    FIFO read, so the finger's spike just after it is no bump (§6)."""
+    fakes.install()
+    from hal.radio import SimRadio
+    from app.telemetry import Telemetry
+    import json
+    clock = Clock(0)
+    rt = _watch(clock, SimRadio(MAC_A).begin(), imu_spikes=((5030, 2, 3000),),
+                touches=((5020, 5150, 120, 120),))
+    rt.board.display = SlowDisplay(clock)
+    rt.tele = Telemetry(cap=200, hz=0)
+    rt.begin(0)
+    _run(rt, clock, 6000)
+    ev = [json.loads(s) for s in rt.tele.lines()]
+    assert [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"] == [(5030, False)], ev
+    assert rt.game.bump_t is None
+
+
+def test_touch_down_seen_when_a_press_follows_a_gap():
+    """A sample gap over the 60 ms debounce (panel wake, GC) can end one press
+    and start the next on the same sample: that finger still lands (§6)."""
+    fakes.install()
+    from hal.radio import SimRadio
+    clock = Clock(0)
+    rt = _watch(clock, SimRadio(MAC_A).begin(),
+                touches=((5000, 5500, 120, 120), (5555, 5705, 120, 120)))
+    rt.begin(0)
+    downs = _touch_downs(rt)
+    _run(rt, clock, 5500)
+    rt.step(clock.now)                     # lifted
+    clock.now += 60                        # no sample for 60 ms; touching again
+    _run(rt, clock, 500)
+    assert downs == [5000, 5560], downs
+
+
+def test_tap_never_beats_its_own_touch_down():
+    """§8 burst filter: a press that lands and ends between two stage samples
+    (mid-frame samples, then a GC pause) reaches the game landing first, so
+    as the 3rd landing in 1 s it blocks its own TAP."""
+    fakes.install()
+    from hal.radio import SimRadio
+    clock = Clock(0)
+    rt = _watch(clock, SimRadio(MAC_A).begin(),
+                touches=((5000, 5100, 120, 120), (5300, 5400, 120, 120), (5605, 5680, 120, 120)))
+    _run(rt, clock, 5600)
+    g = rt.game
+    rt.step(clock.now)
+    t = clock.now
+    for dt in (10, 90):                    # mid-frame samples: landed, lifted
+        clock.now = t + dt
+        rt._sample_touch(clock.now)
+    clock.now = t + 160                    # next stage: the TAP is due as well
+    i0 = g._input_t
+    rt._stage_touch(clock.now)
+    assert g._touch_block is not None and g._input_t == i0, (g._touch_block, g._input_t, i0)
+
+
+def test_touch_that_lands_in_the_wake_window_is_ignored():
+    """ui-spec §8: touches are ignored for 300 ms after a wake, judged by when
+    the finger landed: a tap landing 150 ms after the wake is dropped, though
+    it is reported (lift + 60 ms debounce) after the window."""
+    fakes.install()
+    from hal.radio import SimRadio
+    clock = Clock(0)
+    rt = _watch(clock, SimRadio(MAC_A).begin(), imu_spikes=((1000, 400, -2000),))
+    _run(rt, clock, 4500)                  # face down 1-5 s: the screen goes off
+    g = rt.game
+    assert not g.screen_on
+    while not g.screen_on:                 # face up: wake
+        clock.sleep(max(1, rt.step(clock.now)))
+    t = g._wake_t
+    rt.board.touch.presses.append((t + 150, t + 250, 120, 120))
+    _run(rt, clock, 1000)
+    assert g._input_t == t, (g._input_t, t)
+
+
+def test_wrist_wear_on_a_lit_screen_keeps_taps():
+    """The chip's wrist-wear event is polled up to 1 s late: on a screen that
+    is already on (face up) it is no new wake, so a tap just after it counts."""
+    fakes.install()
+    from app.runtime import Runtime, CHIP_ON
+    from hal.bma423 import EV_WRIST_WEAR
+    clock = Clock(0)
+    imu = ChipIMU(clock, True)
+    touch = FakeTouch(clock)
+    rt = Runtime(Board(imu=imu, display=FakeDisplay(), touch=touch),
+                 parts=("imu", "display", "touch"), clock=clock, sleep_ms=clock.sleep,
+                 renderer=_renderer(), gc_collect=lambda: None)
+    rt.begin(0)
+    _run(rt, clock, 4000)
+    g = rt.game
+    assert rt._chip == CHIP_ON and g.screen_on
+    t_poll = rt._t_chip
+    imu.events = EV_WRIST_WEAR
+    touch.presses.append((t_poll + 60, t_poll + 160, 120, 120))   # TAP ~220 ms after the poll
+    _run(rt, clock, 1000)
+    assert imu.events == 0 and g.screen_on
+    assert g._input_t > t_poll + 160, (g._input_t, t_poll)
+
+
+def test_io_errors_never_stop_the_loop():
+    """OSErrors that reach the loop from a part are counted in io_errors; the
+    loop goes on (the real touch driver and motor never raise: belt and braces)."""
+    fakes.install()
+    from hal.radio import SimRadio
+    from hal.axp202 import EV_SHORT
+    from app.runtime import S_TOUCH, S_BUTTON, S_LOGIC, S_HAPTIC
+    clock = Clock(0)
+    rt = _watch(clock, SimRadio(MAC_A).begin(), buttons=((2000, EV_SHORT),))
+    b = rt.board
+    n = [0, 0]
+
+    def touch_read(_r=b.touch.read):
+        n[0] += 1
+        if n[0] % 3 == 0:
+            raise OSError(116)
+        return _r()
+
+    def pmu_poll(_p=b.pmu.poll):
+        n[1] += 1
+        if n[1] % 2 == 0:
+            raise OSError(5)
+        return _p()
+
+    def battery_percent():
+        raise OSError(5)
+
+    class BadMotor(RecMotor):
+        def set(self, lvl):
+            if lvl > 0:
+                raise OSError(5)
+            RecMotor.set(self, lvl)
+
+    b.touch.read = touch_read
+    b.pmu.poll = pmu_poll
+    b.pmu.battery_percent = battery_percent
+    b.haptics = BadMotor(clock)
+    rt.begin(0)
+    rt.player.play_named("LOST", 1000)
+    _run(rt, clock, 5000)
+    e = rt.io_errors
+    assert e[S_TOUCH] and e[S_BUTTON] and e[S_LOGIC] and e[S_HAPTIC], e
+    assert rt.running and rt.ticks >= 45 and rt.frames >= 90, (rt.ticks, rt.frames)
+
+
+def _tmpdir():
+    try:
+        import tempfile
+        return tempfile.mkdtemp()          # CPython
+    except ImportError:
+        return "."                         # MicroPython: in-memory filesystem
+
+
+def test_telemetry_flushes_to_file():
+    """Lines go to ``path`` every ``flush_ms``; records the ring overwrote
+    before a flush count as ``dropped``; an unwritable path falls back to RAM."""
+    import os
+    from app.telemetry import Telemetry
+    d = _tmpdir()
+    p = d + "/_tele_test.jsonl"
+    try:
+        tl = Telemetry(cap=4, path=p, flush_ms=1000)
+        for i in range(3):
+            tl.event(i, "e")
+        assert tl.flush(0) == 3
+        for i in range(10):
+            tl.event(10 + i, "e")
+        assert tl.dropped == 6
+        assert tl.flush(500) == 0          # not due yet
+        assert tl.flush(1000) == 4
+        with open(p) as f:
+            assert f.read().count("\n") == 7
+    finally:
+        os.remove(p)
+        if d != ".":
+            os.rmdir(d)
+    tl = Telemetry(cap=4, path="nodir/x.jsonl")
+    tl.event(0, "e")
+    assert tl.flush(0, force=True) == 0 and tl.path is None
+    assert isinstance(tl.err, OSError)
+
+
+def test_crash_is_logged_and_flushed():
+    """An exception in the loop is re-raised after a ``crash`` event, and the
+    records since the last flush reach the file (R-08: the moments before it)."""
+    import os
+    import json
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    d = _tmpdir()
+    p = d + "/_crash_test.jsonl"
+    clock = Clock(0)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None, telemetry=Telemetry(path=p))
+    rt.begin(0)
+    tick = rt.game.tick
+
+    def bad_tick(t):
+        if t >= 2500:
+            raise ValueError("boom")
+        return tick(t)
+    rt.game.tick = bad_tick
+    raised = False
+    try:
+        try:
+            rt.run(max_ms=5000)
+        except ValueError:
+            raised = True
+        with open(p) as f:
+            ls = [s for s in f]
+    finally:
+        os.remove(p)
+        if d != ".":
+            os.rmdir(d)
+    e = json.loads(ls[-1])
+    assert raised and e["ev"] == "crash" and e["t"] >= 2500 and "boom" in e["e"], ls[-1]
+    assert len(ls) == rt.tele.n            # nothing left only in RAM
+
+
+def test_telemetry_logs_only_haptics_that_play():
+    """ui-spec §7 guard: an event within 1 s of one of the same or higher rank
+    is dropped, so the log has no buzz the wrist never felt (a drawn frame's
+    event and one no frame drew)."""
+    fakes.install()
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    from finder.render_params import make_params
+    import json
+    clock = Clock(0)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None)
+    rt.begin(0)
+    rt.tele = Telemetry(cap=20, hz=0)
+    for t, name in ((1000, "CLOSER"), (1300, "FARTHER")):
+        rt.params = make_params(t_ms=t, haptic=name)
+        rt._fresh = True
+        rt._stage_render(t)
+    for t in (3000, 3300):                 # NOPE then NOPE, never drawn
+        rt.params = make_params(t_ms=t, haptic="NOPE")
+        rt._fresh = True
+        rt._stage_logic(t)
+    ev = [json.loads(s) for s in rt.tele.lines()]
+    assert [e["pattern"] for e in ev if e["ev"] == "haptic"] == ["CLOSER", "NOPE"], ev
+
+
+def test_telemetry_session_files():
+    """main.py's field-test telemetry: /log is created, each boot appends to
+    the next ``<n>_<dev>.jsonl``, also after an older log was deleted."""
+    import os
+    from app.telemetry import session
+    d = _tmpdir()
+    log = d + "/_log_test"
+    try:
+        tl = session("A", log)
+        assert (tl.sid, tl.dev, tl.path) == ("0", "A", log + "/0_A.jsonl")
+        tl.event(0, "e")
+        assert tl.flush(0) == 1 and tl.err is None
+        tl = session("A", log)
+        assert tl.sid == "1" and tl.path == log + "/1_A.jsonl"
+        tl.event(0, "e")
+        assert tl.flush(0) == 1
+        os.remove(log + "/0_A.jsonl")      # pulled and deleted to free flash
+        tl = session("A", log)
+        assert tl.sid == "2" and tl.path == log + "/2_A.jsonl"
+    finally:
+        for n in os.listdir(log):
+            os.remove(log + "/" + n)
+        os.rmdir(log)
+        if d != ".":
+            os.rmdir(d)
 
 
 def test_bma423_feature_engine_started_and_polled():
@@ -627,59 +1224,49 @@ def test_bma423_feature_engine_started_and_polled():
     g.on_wake = on_wake
     dev.regs[0x1E] = 10
     dev.regs[0x27] = 1                     # walking
-    rt.run(max_ms=1200)
-    assert rt.feed.tracker.chip_live and not woke
+    rt.run(max_ms=2500)                    # no FIFO samples: face down, dark after 2 s
+    assert rt.feed.tracker.chip_live and not woke and not g.screen_on
     dev.regs[0x1E] = 30
     dev.regs[0x1C] = 0x08                  # wrist-wear latched
-    rt.run(max_ms=1200)
-    assert len(woke) == 1 and rt.feed.tracker.steps >= 20
+    rt.run(max_ms=1000)
+    assert len(woke) == 1 and g.screen_on and rt.feed.tracker.steps >= 20
+    dev.regs[0x1C] = 0x08                  # again on the lit screen: read, no second wake
+    rt.run(max_ms=1000)
+    assert len(woke) == 1 and dev.regs[0x1C] == 0
     assert not any(rt.io_errors), rt.io_errors
+
+
+def test_bma423_feature_bus_error_is_retried():
+    """A bus error while the features are switched on is retried on the next
+    1 s poll: the chip ends ON with the step counter and wrist wear really
+    enabled, and the stale error is cleared."""
+    from tests.test_hal_bma423 import _imu
+    from app.runtime import Runtime, CHIP_ON, CHIP_PENDING
+    m, dev, bmod, imu = _imu()
+    dev.regs[0x2A] = 1                     # engine running (init_ok)
+    real = dev.write
+    fail = [True]
+
+    def write(reg, data):
+        if reg == 0x5E and fail[0]:        # the first feature-config write NACKs
+            fail[0] = False
+            raise OSError(5)
+        return real(reg, data)
+    dev.write = write
+    clock = Clock(0)
+    rt = Runtime(Board(imu=imu, display=FakeDisplay()), parts=("imu", "display"),
+                 clock=clock, sleep_ms=clock.sleep, renderer=_renderer(),
+                 gc_collect=lambda: None)
+    rt.begin(0)
+    assert rt._chip == CHIP_PENDING and "imu_features" in rt.errors
+    rt.run(max_ms=3000)
+    assert rt._chip == CHIP_ON and "imu_features" not in rt.errors, rt.errors
+    assert dev.feat[0x3B] & 0x30 == 0x30   # STEP_COUNTER_EN | STEP_ACTIVITY_EN
+    assert dev.feat[0x40] & 0x01           # FEAT_WRIST_WEAR enabled
 
 
 def test_bma423_feature_engine_pending_then_missing():
     from app.runtime import Runtime, CHIP_OFF, CHIP_ON, CHIP_PENDING
-
-    class ChipIMU(FakeIMU):
-        def __init__(self, clock, ok):
-            FakeIMU.__init__(self, clock)
-            self.ok = ok
-            self.feat_state = 0
-            self.polls = 0
-            self.calls = []
-
-        def load_config(self, wait=True):
-            self.calls.append(("load", wait))
-            if self.ok is None:
-                return False               # bma423conf.bin missing
-            self.feat_state = 1
-            return True
-
-        def features_ready(self):
-            self.polls += 1
-            if self.polls >= 3:
-                self.feat_state = 2 if self.ok else -1
-            return self.feat_state == 2
-
-        def features_ok(self):
-            return self.feat_state == 2
-
-        def enable_step_counter(self):
-            self.calls.append("steps")
-
-        def enable_feature(self, off):
-            self.calls.append(("feat", off))
-
-        def map_interrupts(self, int1=0, latched=False):
-            self.calls.append(("map", int1, latched))
-
-        def steps(self):
-            return 0
-
-        def activity(self):
-            return 0
-
-        def poll_events(self):
-            return 0
 
     for ok, state in ((True, CHIP_ON), (False, CHIP_OFF), (None, CHIP_OFF)):
         clock = Clock(0)
@@ -687,14 +1274,11 @@ def test_bma423_feature_engine_pending_then_missing():
         rt = Runtime(Board(imu=imu), clock=clock, sleep_ms=clock.sleep,
                      renderer=_renderer(), gc_collect=lambda: None)
         rt.begin(0)
-        assert imu.calls[0] == ("load", False)             # never blocks the boot
+        assert imu.calls[0] == "start"                     # never blocks the boot
         assert rt._chip == (CHIP_OFF if ok is None else CHIP_PENDING)
         rt.run(max_ms=3500)
         assert rt._chip == state, (ok, rt._chip)
-        if ok:
-            assert imu.calls[1:] == ["steps", ("feat", 0x40), ("map", 0x08, True)]
-        else:
-            assert imu.calls[1:] == []
+        assert imu.calls[1:] == (["on"] if ok else [])
 
 
 def test_stage_sums_stay_small_ints():
@@ -708,17 +1292,3 @@ def test_stage_sums_stay_small_ints():
     assert rt.st_us[S_RENDER] <= ACC_LIMIT_US < 2 ** 30
     s = rt.stats(reset=False)
     assert s["render"][0] == 40.0 and s["render"][1] == 40.0
-
-
-def test_deploy_copies_app_and_boot():
-    try:
-        import tools.deploy as d           # CPython host tool only
-    except ImportError:
-        return
-    assert "boot.py" in d.FILES and "main.py" in d.FILES
-    assert "app" in d.DIRS
-    _, files, notes = d.collect()
-    remote = [r for _, r in files]
-    for f in ("boot.py", "main.py", "app/__init__.py", "app/runtime.py", "app/imu_feed.py"):
-        assert f in remote, f
-    assert not any(n.startswith("missing") for n in notes), notes

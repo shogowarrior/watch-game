@@ -4,7 +4,8 @@
 
 Times ``step(50)`` (both watches rendering at 20 fps), ``step(16)`` (a 60 Hz
 page), ``telemetry_json()`` and the heap allocated per step, in the HUNT
-screens after the auto pairing. Also runs on CPython (logic only, no frames).
+screens after the auto pairing, while A walks, and during A's active scan
+sweep. Also runs on CPython (logic only, no frames).
 """
 
 import gc
@@ -23,19 +24,9 @@ _R = _root()
 if _R not in sys.path:
     sys.path.insert(0, _R)
 
-from finder.compat import argv  # noqa: E402
+from finder.compat import ticks_diff, ticks_us  # noqa: E402
+from finder.estimators.base import ACT_STILL  # noqa: E402
 from sim.webhost import TwoWatchSim  # noqa: E402
-
-try:
-    from time import ticks_us, ticks_diff
-except ImportError:
-    import time
-
-    def ticks_us():
-        return int(time.perf_counter() * 1000000)
-
-    def ticks_diff(a, b):
-        return a - b
 
 
 def _alloc():
@@ -59,8 +50,21 @@ def bench(label, s, fn, n):
     return us / 1000.0 / n
 
 
+def _step_until(s, cond, max_ms=20000):
+    end = s.t_ms + max_ms
+    while not cond(s):
+        if s.t_ms >= end:
+            raise SystemExit("bench: condition not reached by %d ms" % s.t_ms)
+        s.step(50)
+
+
+def _sweeping(s):
+    g = s.games[0]
+    return g.mode == "SCANNING" and g.scan.sub == "sweep" and not g.scan.paused
+
+
 def main():
-    args = [a for a in argv(globals())[1:] if a.isdigit()]
+    args = [a for a in sys.argv[1:] if a.isdigit()]
     n = int(args[0]) if args else 200
     s = TwoWatchSim(seed=1)
     while s.t_ms < 15000:
@@ -72,8 +76,12 @@ def main():
     bench("telemetry_json()", s, lambda s: s.telemetry_json(), n)
     s.walk_to(0, 30.0, 8.0)
     bench("step(50) walking", s, lambda s: s.step(50), n)
-    s.tap(0)
-    bench("step(50) scanning", s, lambda s: s.step(50), n)
+    a = s.world.a
+    s.set_pose(0, a.x, a.y)                   # stop where A is (a drag ends the walk)
+    _step_until(s, lambda s: s.games[0].me.activity == ACT_STILL)
+    s.tap(0)                                  # scan, then wait for the sweep itself
+    _step_until(s, _sweeping)
+    bench("step(50) scanning", s, lambda s: s.step(50), min(n, 200))    # the sweep lasts 12 s
     print("frames", s.frames, "sim t %.1f s" % (s.t_ms / 1000.0))
     print("step(50) = %.1f %% of a 50 ms real-time budget" % (100.0 * ms50 / 50.0))
 

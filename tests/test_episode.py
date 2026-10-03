@@ -3,33 +3,35 @@
 Watch A (the seeker) and watch B (standing still) each run a ``Game``. The
 director below plays the humans: pair by bumping, split up (A runs behind a
 building so the split ends in SEARCHING), come back into view (FAR), walk
-closer (NEAR, WARM), stop and scan by turning in place at the pacer's 30 deg/s
+closer (NEAR, WARM), stop and scan by turning in place at the sweep rate
 (body shadow makes the cosine pattern), follow the arrow's turn pacer, walk
 on towards B (HOT) and bump -> FOUND on both watches.
 
 A emerges from the building's shadow ~96 m out so the first fix is FAR: the
-default estimator (kalman2, N_EFF 3) reads distances short, so FAR (estimate
+default estimator (kalman2, n 2.6 outdoors) reads distances short, so FAR (estimate
 >= 28 m) needs roughly 75 m or more of true distance in the ``typical`` channel.
 
 Every tick's RenderParams must pass ``validate`` and the §12 rules (no arrow
-without a scan, no zone words, no metres). Run this file directly for the
-timeline:  python3 tests/test_episode.py [seed ...]
+without a scan, no zone words, no metres). Run it for the timeline:
+python3 -m tests.test_episode [seed ...]  (or node tools/mpy/run.mjs tests/test_episode.py [seed ...])
 """
 
 import math
 import sys
 
 from sim import Sim
+from sim.link import GameLink
 from sim.world import World, Walker, PI, wrap
-from finder import proto
+from finder import arrow as A
+from finder import scan as S
+from finder.arrow import wrap180
 from finder.game import Game
 from finder.render_params import validate
-from finder.estimators.base import ACT_STILL
+from finder.tuning import LOGIC_MS as TICK_MS   # logic rate (10 Hz)
 
 MAC_A = b"\x24\x0a\xc4\x10\x00\x0a"
 MAC_B = b"\x24\x0a\xc4\x10\x00\x0b"
 DT = 0.05                  # sim step (s)
-TICK_MS = 100              # logic rate
 TILT_FLAT = 5.0            # watch held flat at the chest during the scan
 BUILDING = (20.0, -10.0, 30.0, 10.0, 40.0)   # x0 y0 x1 y1 dB, a block east of B
 HIDE = ((15.0, -15.0), (35.0, -12.0))    # into the building's radio shadow
@@ -43,11 +45,6 @@ MPY = sys.implementation.name == "micropython"
 
 def _deg(r):
     return r * 180.0 / PI
-
-
-def _cdiff(a, b):
-    d = (a - b) % 360.0
-    return d - 360.0 if d > 180.0 else d
 
 
 def _text_ok(s):
@@ -81,17 +78,13 @@ class Episode:
         self.world = w
         self.sim = Sim(w, prof, seed, imu)
         self.games = (Game(MAC_A), Game(MAC_B))
-        self.macs = (MAC_A, MAC_B)
-        self.tx = (proto.Beacon(1), proto.Beacon(1))
-        self.rxb = proto.Beacon(1)
-        self.buf = bytearray(proto.SIZE)
+        self.link = GameLink(self.games, (MAC_A, MAC_B))
         self.t_ms = 0
         self.phase = "pair"
         self.phase_t = 0
         self.timeline = ([], [])     # (t_ms, screen, sub) on change, per watch
         self.haptics = ([], [])
         self.violations = []
-        self.arrow_seen_before_scan = False
         self.scan_errors = []        # |theta_est - theta_true| per fix
         self.scan_attempts = 0
         self.theta_true = None
@@ -106,23 +99,9 @@ class Episode:
         self._rng_heading = (seed * 2654435761) % 360
 
     # ---- sim plumbing ----------------------------------------------------------
-    def _deliver(self, rx, pk):
-        tx = 1 - rx
-        b = self.tx[tx]
-        b.next_seq()
-        self.games[tx].fill_beacon(b, pk.t_ms)
-        b.pack_into(self.buf)
-        self.rxb.unpack_from(self.buf)
-        self.games[rx].on_packet(pk.t_ms, self.macs[tx], pk.rssi, self.rxb)
-
     def _step_sim(self):
-        s = self.sim
-        s.radio.period_ms = 1000 // max(self.games[0].beacon_hz, self.games[1].beacon_hz)
-        pa, pb = s.step(DT)
-        for pk in pa:
-            self._deliver(0, pk)
-        for pk in pb:
-            self._deliver(1, pk)
+        self.link.set_rates(self.sim.radio)
+        self.link.deliver(self.sim.step(DT))
 
     def _tick(self):
         t = self.t_ms
@@ -143,7 +122,6 @@ class Episode:
             if not _text_ok(s):
                 self.violations.append((i, t, "text", s))
         if p.arrow_deg is not None and self.games[i].scans == 0:
-            self.arrow_seen_before_scan = True
             self.violations.append((i, t, "arrow without scan", p.arrow_deg))
         key = (p.screen, p.sub)
         if key != self._last[i]:
@@ -190,11 +168,12 @@ class Episode:
         elif ph == "sweep":
             sc = ga.scan
             if ga.mode == "SCANNING" and sc.sub == "sweep" and not sc.paused:
-                w.heading = wrap(w.heading - 30.0 * PI / 180.0 * dt)     # clockwise
+                w.heading = wrap(w.heading - S.DEG_PER_S * PI / 180.0 * dt)     # clockwise
         elif ph == "turn":
             a = ga.arrow
             if a is not None and a.phase == "turn":
-                w.heading = wrap(w.heading - (1.0 if a.theta >= 0 else -1.0) * 30.0 * PI / 180.0 * dt)
+                rate = A.PACER_DEG_S * PI / 180.0
+                w.heading = wrap(w.heading - (rate if a.theta >= 0 else -rate) * dt)
         elif ph == "walk_on":
             h = w.heading
             s = 1.3 * dt
@@ -259,7 +238,7 @@ class Episode:
             if ga.mode == "HUNT":
                 if ga.arrow is not None:
                     th = ga.arrow.theta % 360.0
-                    self.scan_errors.append(abs(_cdiff(th, self.theta_true)))
+                    self.scan_errors.append(abs(wrap180(th - self.theta_true)))
                     self._set("turn")
                 elif self.scan_attempts < 3:
                     self._set("scan_tap")
@@ -268,7 +247,7 @@ class Episode:
                     self._set("close_in")
         elif ph == "turn":
             a = ga.arrow
-            if a is None or a.phase in ("lock", "walk", "expire", "done"):
+            if a is None or a.phase in ("lock", "walk", "done"):
                 self._walk_left = 4.0
                 self._set("walk_on")
         elif ph == "bump":
@@ -277,15 +256,10 @@ class Episode:
             if ga.mode == "FOUND" and gb.mode == "FOUND":
                 self._set("found")
             elif both_hot and (self._bump_next is None or t >= self._bump_next):
-                if self._bump_next is not None or ga.bump_ready or t - self.phase_t > 3000:
-                    self.bumps += 1
-                    ga.on_accel_tap(t)
-                    gb.on_accel_tap(t + 120)
-                    self._bump_next = t + 2000
-                elif self._bump_next is None:
-                    self._bump_next = t
-        elif ph == "found":
-            pass
+                self.bumps += 1                     # knock the watches together, every 2 s while both HOT
+                ga.on_accel_tap(t)
+                gb.on_accel_tap(t + 120)
+                self._bump_next = t + 2000
 
     def run(self, max_t=MAX_T):
         while self.world.t < max_t:
@@ -366,7 +340,6 @@ def test_episode_state_progression():
 def test_episode_render_params_always_valid():
     for e in _episodes():
         assert not e.violations, (e.seed, e.violations[:5])
-        assert not e.arrow_seen_before_scan
 
 
 def test_episode_scan_bearing_mostly_right():
@@ -403,8 +376,7 @@ def test_episode_harsh_channel_relinks_without_searching():
 
 
 if __name__ == "__main__":
-    from finder.compat import argv
-    args = [int(a) for a in argv(globals())[1:] if a.isdigit()] or [1]
+    args = [int(a) for a in sys.argv[1:] if a.isdigit()] or [1]
     for s in args:
         print("=== seed %d" % s)
         Episode(s, verbose=True).run().report()

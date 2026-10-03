@@ -3,25 +3,35 @@
 Patterns, priorities and timing rules come from ``haptics`` in
 docs/design/tokens.json v0.2 via finder/tuning.py (ui-spec §7): the nine
 names TICK, DOUBLE, CLOSER, FARTHER, NOPE, LOST, HOLD, FOUND, BATT. A token
-array ``[on, off, on, ...]`` becomes steps ``(on_ms, off_ms, strength)``.
+array ``[on, off, on, ...]`` becomes steps ``(on_ms, off_ms)``. Everything is
+played by name, at full strength.
 
 Two tracks feed one motor:
 
-* **events** (``play_named`` / ``play``): ranked by ``tuning.HAPTIC_RANK``.
+* **events** (``play_named``): ranked by ``tuning.HAPTIC_RANK``.
   An event is dropped only if one of the same or higher rank started less
-  than ``EVENT_GUARD_MS`` earlier. A higher rank pre-empts a playing event;
-  a lower rank arriving while a higher one still plays waits in a one-slot
-  queue and starts when it ends (so a pattern is never truncated by a
-  lesser one).
+  than ``EVENT_GUARD_MS`` earlier; a TICK (rank 0) only by a higher rank,
+  because countdown TICKs come at 1 Hz. A higher rank pre-empts a playing
+  event. While a higher event plays, at most one lower event waits and
+  starts ``MIN_GAP_MS`` after it ends (so a pattern is never truncated by a
+  lesser one); a newer waiting event of the same or higher rank replaces it
+  (latest wins), a lower one is dropped.
 * **heartbeats** (``heartbeat``; or the internal ``set_metronome`` grid when
   no renderer drives them): TICK/DOUBLE pulses, in FULL mode only. An event
   cuts a running heartbeat and heartbeats resume ``HB_RESUME_MS`` after the
   event ends (tokens: "an event replaces the next heartbeat pulse").
 
-The renderer returns ``[event, heartbeat]``, ``[event]`` or ``[heartbeat]``
-per frame; pass it to ``play_frame``. ``tick(t_ms)`` is called once per
-main-loop frame and returns the motor strength (0..1) to apply; the hal
-Motor applies it only on change. Nothing blocks or sleeps.
+An accepted event lets a pulse that is on finish and starts ``MIN_GAP_MS``
+after the motor last went off (§7: every gap >= 60 ms); the rest of the
+heartbeat or pre-empted event is dropped.
+
+The frame's ``params.haptic`` goes to ``play_named`` the first time it is
+drawn (its result says whether it was accepted), then the renderer's heartbeats
+(``()`` or ``[name]``) go to ``heartbeat`` (an event replaces one that starts
+with it). ``tick(t_ms)`` returns the motor strength (0..1) to apply; call it
+every loop step (the runtime also calls it after each display strip and every
+1 ms in ``idle`` while a pattern plays). The hal Motor applies it only on
+change. Nothing blocks or sleeps.
 """
 
 from finder import tuning as _T
@@ -36,12 +46,12 @@ BLANKING_MS = _T.HAPTIC_BLANKING_MS            # 150: accel ignores pulse .. end
 NAMES = _T.HAPTIC_NAMES                        # priority order, highest first
 
 
-def steps(arr, strength=1.0):
-    """Token on/off array -> ((on_ms, off_ms, strength), ...)."""
+def steps(arr):
+    """Token on/off array -> ((on_ms, off_ms), ...)."""
     out = []
     n = len(arr)
     for i in range(0, n, 2):
-        out.append((arr[i], arr[i + 1] if i + 1 < n else 0, strength))
+        out.append((arr[i], arr[i + 1] if i + 1 < n else 0))
     return tuple(out)
 
 
@@ -49,6 +59,7 @@ PATTERNS = {}
 for _n in NAMES:
     PATTERNS[_n] = steps(_T.HAPTIC_PATTERNS[_n])
 RANK = _T.HAPTIC_RANK
+TOTAL_MS = {n: sum(p) for n, p in _T.HAPTIC_PATTERNS.items()}   # on + off, per name
 
 TICK = PATTERNS["TICK"]
 DOUBLE = PATTERNS["DOUBLE"]
@@ -60,19 +71,55 @@ HOLD = PATTERNS["HOLD"]
 FOUND = PATTERNS["FOUND"]
 BATT = PATTERNS["BATT"]
 
-_PRIO = tuple((PATTERNS[_n], RANK[_n]) for _n in NAMES)
 _NRANK = max(RANK.values()) + 1
 
-# ---- proximity tempo (zone heartbeat periods, ui-spec §5.3) ---------------
-TEMPO_COLD_MS = _T.ZONE_PERIOD_MS[0]           # FAR 2400
-TEMPO_HOT_MS = _T.ZONE_PERIOD_MS[-1]           # HOT 500
-
-MODE_OFF = 0
+# buzz modes, in MENU order (finder.game BUZZ_* and its BUZZ row cycle use these)
+MODE_FULL = 0           # default
 MODE_EVENTS = 1         # events only, no heartbeats
-MODE_FULL = 2           # default
-MODE_NAMES = ("OFF", "EVENTS", "FULL")         # index == MODE_*
+MODE_OFF = 2
 
 _ZERO = 0.0
+_ONE = 1.0
+
+
+def stronger(cur, name):
+    """The haptic to keep when ``name`` is raised in a frame that already has
+    ``cur`` (None = none yet): the higher rank, the later one on a tie."""
+    return name if cur is None or RANK[name] >= RANK[cur] else cur
+
+
+class BlankWindow:
+    """Accelerometer blanking window around haptic pulses: ``extend(t, ms)``
+    when a pattern starts at ``t`` (``ms`` = its length + ``BLANKING_MS``),
+    ``active(t)`` while inside, ``expire(now)`` once per tick so a passed
+    window is never compared again. Overlapping windows merge; no allocation."""
+
+    __slots__ = ("t0", "until")
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.t0 = 0
+        self.until = None
+
+    def extend(self, t, ms):
+        end = ticks_add(t, ms)
+        u = self.until
+        if u is None or ticks_diff(t, u) >= 0:
+            self.t0 = t
+            self.until = end
+        elif ticks_diff(end, u) > 0:
+            self.until = end
+
+    def active(self, t):
+        u = self.until
+        return u is not None and ticks_diff(t, self.t0) >= 0 and ticks_diff(u, t) > 0
+
+    def expire(self, now):
+        u = self.until
+        if u is not None and ticks_diff(u, now) <= 0:
+            self.until = None
 
 
 def on_ms(pattern):
@@ -88,43 +135,6 @@ def min_period(pattern):
     return -(-on_ms(pattern) * 100 // MAX_DUTY_PCT)
 
 
-def priority_of(pattern):
-    """Rank of a named pattern (by identity); unnamed patterns rank lowest."""
-    for p, n in _PRIO:
-        if p is pattern:
-            return n
-    return 0
-
-
-TEMPO_STEPS = 32        # closeness buckets
-# Geometric COLD..HOT, built once at import so per-frame lookups skip float pow.
-_TEMPO = tuple(int(TEMPO_COLD_MS * (TEMPO_HOT_MS / TEMPO_COLD_MS) ** (i / TEMPO_STEPS) + 0.5)
-               for i in range(TEMPO_STEPS + 1))
-
-
-def tempo_bucket(closeness):
-    """Nearest tempo bucket 0..TEMPO_STEPS for closeness 0..1 (clamped)."""
-    if closeness <= 0:
-        return 0
-    if closeness >= 1:
-        return TEMPO_STEPS
-    return (int(closeness * (2 * TEMPO_STEPS)) + 1) >> 1
-
-
-def tempo_for_bucket(b):
-    """Metronome period for bucket ``b`` (int, clamped); allocation-free."""
-    return _TEMPO[0 if b < 0 else TEMPO_STEPS if b > TEMPO_STEPS else b]
-
-
-def tempo_ms(closeness):
-    """Metronome period for closeness 0 (cold) .. 1 (hot), geometric COLD..HOT.
-
-    Table lookup quantised to TEMPO_STEPS buckets; costs one float multiply
-    (none for int 0/1). Cache ``tempo_bucket`` to skip even that per frame.
-    """
-    return _TEMPO[tempo_bucket(closeness)]
-
-
 class _Track:
     """Plays one pattern; exact edges when ticked every ms, never skips a pulse."""
 
@@ -133,6 +143,7 @@ class _Track:
         self.i = 0
         self.on = False
         self.shown = False
+        self.stop = False        # end after the pulse that is on
         self.ph = None           # current phase start (None: at next tick)
         self.end = None          # when the last pattern ended
 
@@ -141,26 +152,37 @@ class _Track:
         self.i = 0
         self.on = True
         self.shown = False
+        self.stop = False
         self.ph = t
+
+    def pulse_end(self):
+        """End of the pulse being output now (None if no pulse is on)."""
+        if self.pat is None or not self.on or not self.shown:
+            return None
+        return ticks_add(self.ph, self.pat[self.i][0])
 
     def advance(self, t):
         pat = self.pat
         if self.ph is None:
             self.ph = t
         while True:
-            on_ms_, off_ms, st = pat[self.i]
+            on_ms_, off_ms = pat[self.i]
             if self.on:
                 if ticks_diff(t, self.ph) < 0:
                     return _ZERO                 # scheduled in the future
-                if ticks_diff(t, ticks_add(self.ph, on_ms_)) < 0:
-                    self.shown = True
-                    return st
-                if not self.shown:               # late tick: never skip a pulse
+                if not self.shown:               # first output tick; late -> full pulse from t
                     self.ph = t
                     self.shown = True
-                    return st
+                    return _ONE
+                if ticks_diff(t, ticks_add(self.ph, on_ms_)) < 0:
+                    return _ONE
                 self.on = False
-                self.ph = ticks_add(self.ph, on_ms_)
+                self.ph = t                      # off phase from the real off edge (§7 gap)
+                if self.stop:
+                    self.stop = False
+                    self.pat = None
+                    self.end = self.ph
+                    return _ZERO
             else:
                 end = ticks_add(self.ph, off_ms)
                 if ticks_diff(t, end) < 0:
@@ -180,18 +202,15 @@ class HapticPlayer:
 
     Timing contract (exact when ticked every ms): a step's pulse is on for
     ``[start, start + on_ms)`` and off for the following ``off_ms``. A pulse
-    is never skipped: if a late tick finds one that was never output, it
-    starts at that tick instead. Metronome beats that are blocked (event
-    playing or within ``resume_ms`` after one, or not FULL) are dropped, but
+    is never skipped or cut short: a pulse first output by a late tick starts
+    at that tick and still plays its full ``on_ms``, and a pulse ended by a
+    late tick still gets its full off time (gaps are timed from the real off
+    edge). Metronome beats that are blocked (event
+    playing or within ``HB_RESUME_MS`` after one, or not FULL) are dropped, but
     the beat grid is kept.
     """
 
-    def __init__(self, intensity=1.0, mode=MODE_FULL, guard_ms=EVENT_GUARD_MS,
-                 resume_ms=HB_RESUME_MS):
-        self.intensity = 1.0
-        self.mode = MODE_FULL
-        self.guard_ms = guard_ms
-        self.resume_ms = resume_ms
+    def __init__(self, mode=MODE_FULL):
         self._ev = _Track()
         self._hb = _Track()
         self._rank = -1          # rank of the playing event
@@ -200,32 +219,17 @@ class HapticPlayer:
         self._ev_t = [None] * _NRANK   # last start per rank (drop rule)
         self._ev_end = None      # last event end (heartbeat resume)
         self._now = None         # last tick time
+        self._on = False         # motor output at the last tick
+        self._off_t = None       # when the output last fell to 0 (< MIN_GAP_MS ago)
         # metronome
         self._period = 0
         self._next = None
         self._beat_pat = TICK
-        # output cache (avoid float allocation unless the level changes)
-        self._lvl = _ZERO
-        self._out = _ZERO
-        self._off_t = None       # when output last went to zero (blanking)
-        self.set_intensity(intensity)
         self.set_mode(mode)
 
     # ---- settings ----
-    @property
-    def enabled(self):
-        return self.mode != MODE_OFF
-
-    def set_enabled(self, on):
-        self.set_mode(MODE_FULL if on else MODE_OFF)
-
     def set_mode(self, mode):
-        """MODE_* or a token name 'FULL'/'EVENTS'/'OFF'.
-
-        OFF silences and cancels; EVENTS mutes heartbeats only.
-        """
-        if isinstance(mode, str):
-            mode = MODE_NAMES.index(mode)
+        """MODE_*: OFF silences and cancels; EVENTS mutes heartbeats only."""
         self.mode = mode
         if mode != MODE_FULL:
             self._hb.pat = None
@@ -234,28 +238,35 @@ class HapticPlayer:
             self._pend = None
             self._rank = -1
 
-    def set_intensity(self, x):
-        self.intensity = 0.0 if x < 0 else 1.0 if x > 1 else float(x)
-        self._lvl = -1.0         # force output recompute on next tick
-
     # ---- events ----
     @property
     def busy(self):
         """True while an event (or its queued successor) plays."""
         return self._ev.pat is not None or self._pend is not None
 
-    def play(self, pattern, t_ms=None, priority=None):
-        """Start an event at ``t_ms`` (or the next tick); returns accepted."""
-        if self.mode == MODE_OFF or not pattern:
+    @property
+    def active(self):
+        """True while any pattern (event, queued event or heartbeat) plays."""
+        return self.busy or self._hb.pat is not None
+
+    def play_named(self, name, t_ms=None):
+        """Start event ``name`` (e.g. 'FOUND') at ``t_ms`` (or the next tick);
+        returns accepted. Unknown names return False.
+
+        Dropped if the same or a higher rank started < ``EVENT_GUARD_MS`` ago
+        (TICK: only a higher rank). While a higher event plays it waits in the
+        one-slot queue; a newer waiting event of the same or higher rank
+        replaces it (latest wins), a lower one is dropped.
+        """
+        pattern = PATTERNS.get(name)
+        if pattern is None or self.mode == MODE_OFF:
             return False
-        p = priority_of(pattern) if priority is None else priority
-        if p >= _NRANK:
-            p = _NRANK - 1
+        p = RANK[name]
         t = self._now if t_ms is None else t_ms
         if t is not None:
-            g = self.guard_ms
+            g = EVENT_GUARD_MS
             evt = self._ev_t
-            for r in range(p if p > 0 else 0, _NRANK):
+            for r in range(p if p > 0 else 1, _NRANK):
                 s = evt[r]
                 if s is not None:
                     d = ticks_diff(t, s)
@@ -270,30 +281,30 @@ class HapticPlayer:
         self._start_event(pattern, p, t_ms, t)
         return True
 
-    def play_named(self, name, t_ms=None):
-        """Event by token name (e.g. 'FOUND'); unknown names return False."""
-        return self.play(PATTERNS.get(name), t_ms)
-
-    def play_frame(self, events, t_ms=None, has_event=False):
-        """Start a renderer frame's list: ``events[0]`` is an event when
-        ``has_event`` (params.haptic started this frame), the rest heartbeats."""
-        for i in range(len(events)):
-            if i == 0 and has_event:
-                self.play_named(events[0], t_ms)
-            else:
-                self.heartbeat(events[i], t_ms)
-
-    def stop(self):
-        """Cancel the current event and the queue."""
-        self._ev.pat = None
-        self._pend = None
-        self._rank = -1
-
     def _start_event(self, pattern, p, t_ms, t):
-        self._hb.pat = None                      # an event replaces the heartbeat
-        self._ev.start(pattern, t_ms)
+        hb = self._hb
+        ev = self._ev
+        e = ev.pulse_end()
+        if e is not None:                        # pre-empted mid-pulse: ends on the other track
+            self._hb = ev
+            self._ev = hb
+            hb, ev = ev, hb
+            hb.stop = True
+        else:
+            e = hb.pulse_end()
+            if e is not None:
+                hb.stop = True                   # the heartbeat pulse plays out, then stops
+            else:
+                hb.pat = None                    # an event replaces the heartbeat
+                e = self._off_t
+        s = t_ms
+        if e is not None:                        # §7: >= MIN_GAP_MS after the motor went off
+            g = ticks_add(e, MIN_GAP_MS)
+            if s is None or ticks_diff(g, s) > 0:
+                s = g
+        ev.start(pattern, s)
         self._rank = p
-        self._ev_t[p if p > 0 else 0] = t
+        self._ev_t[p] = t
 
     # ---- heartbeats ----
     def hb_allowed(self, t):
@@ -301,24 +312,21 @@ class HapticPlayer:
         if self.mode != MODE_FULL or self._ev.pat is not None or self._pend is not None:
             return False
         e = self._ev_end
-        return e is None or t is None or ticks_diff(t, e) >= self.resume_ms
+        return e is None or t is None or ticks_diff(t, e) >= HB_RESUME_MS
 
-    def heartbeat(self, pattern, t_ms=None):
-        """Start a heartbeat (name or pattern) if allowed; returns started."""
-        if isinstance(pattern, str):
-            pattern = PATTERNS.get(pattern)
-        if not pattern:
-            return False
-        if not self.hb_allowed(self._now if t_ms is None else t_ms):
+    def heartbeat(self, name, t_ms=None):
+        """Start heartbeat ``name`` if allowed; returns started."""
+        pattern = PATTERNS.get(name)
+        if pattern is None or not self.hb_allowed(self._now if t_ms is None else t_ms):
             return False
         self._hb.start(pattern, t_ms)
         return True
 
     # ---- metronome (heartbeat source when no renderer drives them) ----
-    def set_metronome(self, period_ms, t_ms=None, pattern=None):
-        """Beat ``pattern`` (default TICK; name or steps) every ``period_ms``.
+    def set_metronome(self, period_ms, t_ms=None, name=None):
+        """Beat pattern ``name`` (default TICK) every ``period_ms``.
 
-        0/None stops it. The period is raised to ``min_period(pattern)`` so
+        0/None stops it. The period is raised to ``min_period`` of it so
         duty stays <= MAX_DUTY_PCT. Starting from stopped beats at ``t_ms``
         (or the next tick). A tempo change keeps phase: the next beat is the
         last beat + the new period (fired at once if that is already past).
@@ -326,11 +334,8 @@ class HapticPlayer:
         if not period_ms or period_ms <= 0:
             self._period = 0
             return
-        if pattern is not None:
-            if isinstance(pattern, str):
-                pattern = PATTERNS[pattern]
-            if pattern is not self._beat_pat:
-                self._beat_pat = pattern
+        if name is not None:
+            self._beat_pat = PATTERNS[name]
         period_ms = int(period_ms)
         lo = min_period(self._beat_pat)
         if period_ms < lo:
@@ -343,13 +348,6 @@ class HapticPlayer:
         else:
             self._next = t_ms
         self._period = period_ms
-
-    def stop_metronome(self):
-        self.set_metronome(0)
-
-    def sync(self, t_ms):
-        """Re-phase so the next beat is at ``t_ms`` (e.g. a ripple spawn)."""
-        self._next = t_ms
 
     @property
     def period_ms(self):
@@ -372,7 +370,7 @@ class HapticPlayer:
                     t0 = ticks_add(ev.end, MIN_GAP_MS)   # keep pulses distinct
                     self._start_event(pat, p, t0, t0)
                     lvl = ev.advance(t)
-        elif self._ev_end is not None and ticks_diff(t, self._ev_end) >= self.resume_ms:
+        elif self._ev_end is not None and ticks_diff(t, self._ev_end) >= HB_RESUME_MS:
             self._ev_end = None                  # resume window over (wrap-safe)
         if self._period:
             self._beat(t)
@@ -382,19 +380,18 @@ class HapticPlayer:
                 lvl = h
         if self.mode == MODE_OFF:
             lvl = _ZERO
-        if lvl != self._lvl:
-            if not lvl and self._lvl > 0:
-                self._off_t = t
-            self._lvl = lvl
-            self._out = lvl * self.intensity if lvl else _ZERO
-        return self._out
-
-    def blanked(self, t):
-        """True from a pulse start until BLANKING_MS after it ends (accel guard)."""
-        if self._lvl > 0:
-            return True
-        o = self._off_t
-        return o is not None and 0 <= ticks_diff(t, o) < BLANKING_MS
+        if lvl:
+            self._on = True
+        elif self._on:
+            self._on = False
+            self._off_t = t
+            if ev.pat is not None and ev.on and not ev.shown:   # §7: gap from the real off edge
+                g = ticks_add(t, MIN_GAP_MS)
+                if ticks_diff(g, ev.ph) > 0:     # (advance above has set ev.ph)
+                    ev.ph = g
+        elif self._off_t is not None and ticks_diff(t, self._off_t) >= MIN_GAP_MS:
+            self._off_t = None                   # gap over (wrap-safe)
+        return lvl
 
     def _beat(self, t):
         """Advance the beat grid; start a heartbeat on each allowed beat."""

@@ -138,7 +138,6 @@ class Walker:
         self.plan = []
         self.v = 0.0        # actual speed over the last step, m/s
         self.moved = 0.0    # distance moved over the last step, m
-        self.odo = 0.0      # total distance moved, m
         self.turn = 0.0     # heading change over the last step, rad
         self._px = self.x
         self._py = self.y
@@ -180,10 +179,10 @@ class Walker:
                 self.add(Still(p[2]))
         return self
 
-    def set_pose(self, x=None, y=None, heading=None, clear=True):
-        """External placement (e.g. dragged in a UI). Motion shows up on the next step."""
-        if clear:
-            self.plan = []
+    def set_pose(self, x=None, y=None, heading=None):
+        """External placement (e.g. dragged in a UI); ends the plan. Motion shows up on
+        the next step."""
+        self.plan = []
         if x is not None:
             self.x = float(x)
         if y is not None:
@@ -199,15 +198,10 @@ class Walker:
         dy = self.y - self._py
         self.moved = math.sqrt(dx * dx + dy * dy)
         self.v = self.moved / dt if dt > 0 else 0.0
-        self.odo += self.moved
         self.turn = wrap(self.heading - self._ph)
         self._px = self.x
         self._py = self.y
         self._ph = self.heading
-
-    @property
-    def idle(self):
-        return not self.plan
 
 
 class Obstacle:
@@ -248,18 +242,14 @@ class Obstacle:
 class World:
     """Two walkers A and B plus obstacles; advance with ``step(dt)``."""
 
-    def __init__(self, a=None, b=None, obstacles=None):
-        self.a = a or Walker(name="A")
-        self.b = b or Walker(10.0, 0.0, PI, name="B")
+    def __init__(self, a, b, obstacles=None):
+        self.a = a
+        self.b = b
         self.obstacles = list(obstacles or ())
         self.t = 0.0
         self.meta = {}
         self.radial_speed = 0.0
         self._d = self.distance()
-
-    @property
-    def walkers(self):
-        return (self.a, self.b)
 
     def add_obstacle(self, x0, y0, x1, y1, db):
         self.obstacles.append(Obstacle(x0, y0, x1, y1, db))
@@ -274,12 +264,6 @@ class World:
         w, o = (self.a, self.b) if i == 0 else (self.b, self.a)
         return wrap(math.atan2(o.y - w.y, o.x - w.x) - w.heading)
 
-    def bearing_ab(self):
-        return self.rel_bearing(0)
-
-    def bearing_ba(self):
-        return self.rel_bearing(1)
-
     def los_db(self):
         """Total obstacle attenuation on the A-B line of sight, dB."""
         if not self.obstacles:
@@ -291,9 +275,6 @@ class World:
             if o.crosses(a.x, a.y, b.x, b.y):
                 s += o.db
         return s
-
-    def set_pose(self, i, x=None, y=None, heading=None):
-        (self.a if i == 0 else self.b).set_pose(x, y, heading)
 
     def step(self, dt):
         self.a.step(dt)

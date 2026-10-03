@@ -58,9 +58,9 @@ def test_single_5_byte_read_from_td_status():
     bus = _CountingI2C(m.I2C(1))
     tp = FT6336(i2c=bus, rotation=0)
     _touch(dev, 0x0C8, 0x0AB)
-    t, x, y = tp.read()
+    t, x, y, n = tp.read()
     assert bus.reads == [(0x38, 0x02, 5)]
-    assert (t, x, y) == (True, 200, 171)
+    assert (t, x, y, n) == (True, 200, 171, 1)
 
 
 def test_rotations_and_mirrors():
@@ -109,9 +109,12 @@ def test_not_touching_cases_keep_last_xy():
     assert tp.read()[0] is False
     _touch(dev, 99, 99, n=1, ev=1)       # lift-up event
     assert tp.read()[0] is False
-    _touch(dev, 40, 41, n=2, ev=0)       # two fingers: report point 1
+    _touch(dev, 40, 41, n=2, ev=0)       # two fingers: point 1 + the count
     r = tp.read()
-    assert r[0] is True and (r[1], r[2]) == (40, 41)
+    assert r[0] is True and (r[1], r[2]) == (40, 41) and r[3] == 2
+    _touch(dev, 40, 41, n=0)
+    r = tp.read()
+    assert r[0] is False and r[3] == 0
 
 
 def test_bus_error_reads_as_release():
@@ -120,7 +123,7 @@ def test_bus_error_reads_as_release():
     assert tp.read()[0]
     del m.i2c_devices[(1, 0x38)]
     r = tp.read()
-    assert r[0] is False and tp.errors == 1
+    assert r[0] is False and r[3] == 0 and tp.errors == 1
 
 
 def test_int_pin_without_gate_still_polls():

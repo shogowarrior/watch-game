@@ -3,7 +3,8 @@
     python3 tools/build_sim.py            # then serve dist/sim/ or publish it
 
 Outputs
-  dist/sim/index.html      page body (artifact format: no <html>/<head> wrapper)
+  dist/sim/index.html      page body (artifact format: no <html>/<head> wrapper), plus a
+                           leading meta charset: browsers read it as UTF-8 from a plain server
   dist/sim/local.html      same page wrapped in a full document for local preview
   dist/sim/py/bundle.json  {"mpy": version, "files": {path: source}} of finder/, ui/, sim/
   dist/sim/mpy/            micropython.mjs + micropython.wasm from tools/mpy/node_modules
@@ -48,7 +49,7 @@ def main():
     with open(os.path.join(ROOT, "web", "sim", "index.html"), encoding="utf-8") as f:
         page = f.read()
     with open(os.path.join(OUT, "index.html"), "w", encoding="utf-8") as f:
-        f.write(page)
+        f.write('<meta charset="utf-8">\n' + page)
     with open(os.path.join(OUT, "local.html"), "w", encoding="utf-8") as f:
         f.write('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
                 '<meta name="viewport" content="width=device-width, initial-scale=1">'

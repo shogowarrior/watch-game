@@ -23,7 +23,6 @@ class Watchdog:
         self._last = clock()
         self._wdt = None
         self._tim = None
-        self.fired = False
         if self.mode == MODE_HW:
             self._wdt = machine_mod.WDT(timeout=timeout_ms)
         else:
@@ -39,7 +38,6 @@ class Watchdog:
 
     def _check(self, _timer=None):
         if ticks_diff(self._clock(), self._last) > self.timeout_ms:
-            self.fired = True
             self._reset()
 
     def stop(self):

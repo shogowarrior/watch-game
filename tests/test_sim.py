@@ -7,6 +7,7 @@ from sim.radio import Radio, profile, body_loss
 from sim.imu import Imu
 from sim.scenarios import make, NAMES
 from finder.estimators.base import ACT_STILL, ACT_WALK
+from finder import scan as S
 
 
 def test_rng_known_sequence():
@@ -37,18 +38,18 @@ def test_rng_distributions():
     assert min(us) >= -1.0 and max(us) < 1.0 and abs(sum(us) / n) < 0.05
     ks = [r.randint(1, 3) for _ in range(300)]
     assert min(ks) == 1 and max(ks) == 3
-    assert r.choice((5, 6)) in (5, 6)
+    assert set(r.choice((5, 6)) for _ in range(200)) == {5, 6}
 
 
 def test_bearing_signs():
     a = Walker(0.0, 0.0, 0.0)
     b = Walker(10.0, 0.0, PI)
     w = World(a, b)
-    assert abs(w.bearing_ab()) < 1e-9 and abs(w.bearing_ba()) < 1e-9
+    assert abs(w.rel_bearing(0)) < 1e-9 and abs(w.rel_bearing(1)) < 1e-9
     b.set_pose(0.0, 10.0)
-    assert abs(w.bearing_ab() - PI / 2) < 1e-9
+    assert abs(w.rel_bearing(0) - PI / 2) < 1e-9
     b.set_pose(-10.0, 0.0)
-    assert abs(abs(w.bearing_ab()) - PI) < 1e-9
+    assert abs(abs(w.rel_bearing(0)) - PI) < 1e-9
 
 
 def test_radial_speed_signs():
@@ -138,6 +139,60 @@ def test_radio_rate_floor_and_peer():
         assert not r.step(0.05)[0]
 
 
+def test_radio_rate_per_transmitter():
+    w = World(Walker(0.0, 0.0, 0.0), Walker(10.0, 0.0, PI))
+    r = Radio(w, "clean", Rng(1))
+    r.period_ms[0] = 50              # A in HOT (20 Hz), B in saver (5 Hz)
+    r.period_ms[1] = 200
+    for _ in range(200):
+        w.step(0.05)
+        r.step(0.05)
+    assert 190 <= r.sent[0] <= 210 and 45 <= r.sent[1] <= 55, r.sent
+
+
+def test_radio_on_a_running_world_starts_its_schedule_now():
+    w = World(Walker(0.0, 0.0, 0.0), Walker(10.0, 0.0, PI))
+    for _ in range(60):
+        w.step(0.05)                 # t = 3 s
+    r = Radio(w, "clean", Rng(1))
+    assert min(r.next_tx) >= 3000, r.next_tx
+    w.step(0.05)
+    pa, pb = r.step(0.05)
+    assert len(pa) <= 1 and len(pb) <= 1 and r.sent[0] + r.sent[1] <= 2, r.sent
+
+
+def test_radio_set_profile_keeps_the_devices():
+    w = World(Walker(0.0, 0.0, 0.0), Walker(10.0, 0.0, PI))
+    r = Radio(w, "typical", Rng(4))
+    for _ in range(20):
+        w.step(0.05)
+        r.step(0.05)
+    dev = (list(r.p0_link), list(r.cal), list(r.next_tx), list(r.period_ms))
+    r.set_profile("harsh", Rng(9))
+    assert r.p["n"] == profile("harsh")["n"]
+    assert (r.p0_link, r.cal, r.next_tx, r.period_ms) == tuple(dev)
+    # same environment draws as a fresh radio with that rng
+    fresh = Radio(w, "harsh", Rng(9))
+    assert (r.sh, r.tv) == (fresh.sh, fresh.tv)
+
+
+def test_radio_step_with_leaves_the_channel_alone():
+    w = World(Walker(0.0, 0.0, 0.0), Walker(30.0, 0.0, PI))
+    near = World(Walker(0.0, 0.0, 0.0), Walker(1.0, 0.0, PI))
+    calm = dict(profile("clean"), sigma_ff=0.0, sigma_t=0.0, loss=0.0)
+    r = Radio(w, "typical", Rng(2))
+    before = (r.world, r.p, r.sh, r.tv)
+    got = []
+    for _ in range(40):
+        w.step(0.05)
+        near.t = w.t
+        pa, _pb = r.step_with(0.05, near, calm)
+        got.extend(p.rssi for p in pa)
+    assert (r.world, r.p, r.sh, r.tv) == before
+    assert len(got) > 10 and max(got) - min(got) <= 1          # 1 m, no fading
+    assert abs(sum(got) / len(got) - r.p0_link[0]) <= 1.0, (got[:5], r.p0_link)
+
+
 def test_imu_steps_and_activity():
     a = Walker(0.0, 0.0, 0.0, 1.4)
     a.walk_to((28.0, 0.0)).still()
@@ -150,6 +205,18 @@ def test_imu_steps_and_activity():
     assert 28.0 / 0.7 * 0.75 < imu.steps < 28.0 / 0.7 * 1.25
     assert acts[10] == ACT_STILL and acts[100] == ACT_WALK and acts[-1] == ACT_STILL
     assert imu.info.step_rate_hz == 0.0
+
+
+def test_guided_scan_turn_stays_under_the_step_abort():
+    """A correct 360 deg sweep (scan rate, on the spot) must not use up scan.ABORT_STEPS."""
+    rate = S.DEG_PER_S * PI / 180.0
+    for seed in range(30):
+        a = Walker(0.0, 0.0, 0.0, name="A")
+        a.rotate_in_place(-rate, S.DURATION_MS / 1000.0)
+        s = Sim(World(a, Walker(10.0, 0.0, PI, name="B")), "typical", seed, "typical")
+        for _ in range(S.DURATION_MS // 50):
+            s.step(0.05)
+        assert s.imus[0].steps <= S.ABORT_STEPS - 2, (seed, s.imus[0].steps)
 
 
 def test_scenarios_build_and_run():
@@ -179,7 +246,7 @@ def test_bakeoff_end_to_end():
     assert tr.meta.get("turn_t") and tr.ticks
     m = bakeoff.evaluate(bakeoff.load("ema"), tr)
     assert 0.0 <= m["trend_acc"] <= 1.0 and m["dist_log_rmse"] >= 0.0
-    assert m["reversal_lag_s"] is not None and m["us_per_update"] > 0.0
+    assert m["reversal_lag_s"] is not None and m["us_per_update"] >= 0.0   # 1 ms clock in wasm
     assert m["us_per_packet"] is not None and m["us_per_packet"] >= 0.0
     o = bakeoff.parse_args(["--est", "ema", "--seeds=0", "--wrap", "--duration", "10"])
     assert o["est"] == "ema" and o["wrap"] and o["seeds"] == "0" and not o["quick"]
@@ -188,6 +255,43 @@ def test_bakeoff_end_to_end():
     md = bakeoff.report(rows)
     assert "| ema |" in md and "us/pkt" in md
     assert bakeoff.parse_seeds("100-102,7") == [100, 101, 102, 7]
+
+
+def test_bakeoff_short_run_scores_nothing():
+    # a run inside the warm-up has no scored ticks: no metrics, composite 0 (not 1)
+    from tools import bakeoff
+    m = bakeoff.evaluate(bakeoff.load("ema"), bakeoff.record("approach", "clean", 0, duration=2.0))
+    assert m["zone_flips"] is None and bakeoff.composite(m) == 0.0
+    try:
+        bakeoff.main(["--est", "ema", "--quick", "--duration", "3"])
+    except ValueError:
+        return
+    raise AssertionError("--duration inside the warm-up accepted")
+
+
+def test_bakeoff_matches_the_game_setup():
+    from tools import bakeoff
+    from finder import tuning as T
+    seen = []
+    base = bakeoff.load("kalman2")
+
+    class Spy(base):
+        def set_exponent(self, n):
+            seen.append(n)
+            base.set_exponent(self, n)
+    m = bakeoff.evaluate(Spy, bakeoff.record("approach", "indoor", 0, duration=8.0))
+    assert seen == [T.PATH_LOSS_N_INDOOR]            # indoor profile: the indoor exponent
+    assert m["reversal_miss"] is None and m["reversal_lag_s"] is None
+    assert m["false_verdict"] is None or 0.0 <= m["false_verdict"] <= 1.0
+    for bad in (["--bogus", "1"], ["quick"], ["--est"]):
+        try:
+            bakeoff.parse_args(bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+    from tools.cli import parse_args                 # the parser the host tools share
+    assert parse_args(["--seeds=3", "--bench"], {"seeds": "5", "bench": False},
+                      ("bench",)) == {"seeds": "3", "bench": True}
 
 
 def test_bench_est_runs():

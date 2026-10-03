@@ -24,11 +24,11 @@ and resampling when ESS < n/2. Gaussian noise comes from a +/- paired table.
 import math
 
 from finder.compat import ticks_diff, clamp
-from finder.estimators.base import RangeEstimator, PathLoss, ACT_RUN
+from finder.estimators.base import RangeEstimator, PathLoss, KDB, ACT_RUN
 
 N_PART = 24         # ~1.5 ms/packet estimated on ESP32 MicroPython; 64 scores ~0.01 higher
 N_PL = 2.5          # path-loss exponent assumed (sim profiles span 2.0-3.0)
-P0_ADJ = -4.0       # mean loss (other wearer's body, fades) vs. the bump calibration, dB
+P0_ADJ = -4.0       # mean loss (other wearer's body, fades) vs. the 1 m calibration, dB
 BODY_DB = 7.0       # walker's own body blocks when walking away: loss = BODY_DB*((1+c)/2)^2
 SIGMA = 7.0         # fast fading, t-likelihood scale, dB
 SIGMA_PEER = 8.0    # partner's echo: independent fading, possibly stale
@@ -56,8 +56,7 @@ N_RESET = 2         # particles re-seeded from the measurement on each resample
 ENV_K = 0.18        # path-loss exponent per dB of mean |RSSI step| (fading depth ~ clutter)
 FAD0 = 5.5          # prior mean |RSSI step| between packets, dB
 FAD_A = 0.02        # its smoothing per packet
-N_LO = 2.0
-N_HI = 3.0
+N_SPAN = 0.5        # adapted exponent stays within pl.n +/- this
 OUT_H = 1.1         # reported distance holds unless the median moves by this factor
 OUT_TAU = 0.3       # ... then follows it (log domain) with this time constant, s
 FLOOR = -96.0       # receiver sensitivity, dBm
@@ -103,7 +102,11 @@ class Estimator(RangeEstimator):
     def __init__(self, path_loss=None, n=None):
         self.n = n or N_PART
         self.adapt = path_loss is None
-        RangeEstimator.__init__(self, path_loss or PathLoss(-45.0, N_PL))
+        RangeEstimator.__init__(self, path_loss or PathLoss(n=N_PL))
+
+    def set_exponent(self, n):
+        RangeEstimator.set_exponent(self, n)
+        self.n_env = n
 
     def reset(self):
         RangeEstimator.reset(self)
@@ -144,7 +147,7 @@ class Estimator(RangeEstimator):
         return s / 65537.0
 
     def _k(self):
-        return 10.0 * self.pl.n / 2.302585092994046
+        return KDB * self.pl.n
 
     def _dist(self, z):
         d = math.exp((self.pl.p0 + P0_ADJ - z) / self._k())
@@ -181,6 +184,7 @@ class Estimator(RangeEstimator):
                 self.trend = 0
                 self.trend_conf = 0.0
             return
+        self._note_noise(t_ms, rssi)
         if self.last_t is None:
             self._init(float(rssi), s)
             self._z = rssi
@@ -192,7 +196,8 @@ class Estimator(RangeEstimator):
         if dt < 0.3:
             self.fad += FAD_A * (abs(rssi - self._z) - self.fad)
             if self.adapt:
-                self.n_env = clamp(N_PL + ENV_K * (self.fad - FAD0), N_LO, N_HI)
+                n0 = self.pl.n
+                self.n_env = clamp(n0 + ENV_K * (self.fad - FAD0), n0 - N_SPAN, n0 + N_SPAN)
         self._z = rssi
         if dt <= 0.0:
             dt = 0.001
@@ -434,11 +439,15 @@ class Estimator(RangeEstimator):
             med = math.pow(med, x)
         o = self.dist_m
         if o is not None:
+            raw = med
             q = med / o
-            if OUT_H > 0.0 and 1.0 / OUT_H < q < OUT_H:
+            if 1.0 / OUT_H < q < OUT_H:
                 med = o
             else:
                 med = o * math.pow(q, 1.0 - math.exp(-dt / OUT_TAU))
+            k = med / raw       # move the 1-sigma bounds with the held median
+            lo *= k
+            hi *= k
         self.dist_m = med
         self.dist_lo_m = lo
         self.dist_hi_m = hi

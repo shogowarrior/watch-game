@@ -23,13 +23,13 @@ watches.** Every threshold is a starting value to calibrate.
 | Path | What |
 |---|---|
 | `boot.py` | Minimal: silences IDF logs. No Wi-Fi, no webrepl, no app code. |
-| `main.py` | Safe-boot check (`/noapp` or side-key double press / hold), `Board().init()`, then `app.run(board)`. |
-| `app/runtime.py` | The watch main loop `Runtime.step(now)`: radio, imu, touch, button, logic (10 Hz), render, tx, haptic, gc. |
+| `main.py` | Safe-boot check (`/noapp` or side-key double press / hold), `Board().init()`, then `app.run(board, watchdog_ms=8000)`. |
+| `app/runtime.py` | The watch main loop `Runtime.step(now)`: radio, touch, imu, button, logic (10 Hz), render, tx, haptic, gc. |
 | `app/imu_feed.py` | BMA423 FIFO (100 Hz mg) -> `MotionTracker` at 25 Hz in g, plus the bump spike detector. |
-| `app/telemetry.py` | Optional JSONL ring buffer for field tests. |
+| `app/telemetry.py` | JSONL telemetry for field tests (`session()`; main.py turns it on when `/tele` exists). |
 | `hal/` | The only code that touches hardware. See `hal/README.md` (drivers, gotchas, bench tools). |
 | `hal/pins.py` | GPIO map, bus ids, addresses, clock limits. V1 only. |
-| `hal/st7789.py` `axp202.py` `bma423.py` `ft6336.py` `haptics.py` `radio.py` | Display, PMU + side key, accelerometer, touch, motor, ESP-NOW (`EspNowRadio` / `SimRadio`). |
+| `hal/st7789.py` `axp202.py` `bma423.py` `ft6336.py` `haptics.py` `radio.py` `watchdog.py` | Display, PMU + side key, accelerometer, touch, motor, ESP-NOW (`EspNowRadio` / `SimRadio`), loop watchdog. |
 | `hal/board.py` | `Board` (lazy parts, one shared I2C0), `safe_boot`. |
 | `finder/` | Pure game logic. No hardware imports. |
 | `finder/compat.py` | Tick helpers and MicroPython portability rules. |
@@ -45,17 +45,18 @@ watches.** Every threshold is a starting value to calibrate.
 | `finder/session.py` | Beacon state byte, partner view, bump timing. |
 | `finder/gestures.py` `haptic_patterns.py` | Touch gesture recognizer; the 9 haptic patterns and their player. |
 | `finder/game.py` | `Game`: the state machine. Inputs in, `RenderParams` out (read its docstring). |
+| `finder/menu.py` | `Menu`: the MENU list (rows, scroll, END ROUND confirm, auto-close). |
 | `finder/render_params.py` | `RenderParams`, the only thing the renderer reads (ui-spec §3). |
 | `ui/` | Strip renderer: `renderer.py` (10 strips of 240x24), `field.py` (ripple palette), `glyphs.py`, `text.py`, `font.py`. Colours in `ui/__init__.py` are byte-swapped RGB565. |
-| `sim/` | Two-watch simulator: `world.py`, `radio.py` (RSSI profiles clean/typical/harsh/indoor), `imu.py`, `accel_synth.py`, `scenarios.py`, `rng.py`, `Sim`; `webhost.py` drives the browser sim. |
+| `sim/` | Two-watch simulator: `world.py`, `radio.py` (RSSI profiles clean/typical/harsh/indoor, per-watch beacon period), `imu.py`, `accel_synth.py`, `scenarios.py`, `rng.py`, `link.py` (`GameLink`: beacon hand-off between two Games), `Sim`; `webhost.py` drives the browser sim. |
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). |
-| `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`). |
-| `tools/` | Host and on-watch scripts (see Commands). `tools/mpy/run.mjs` runs Python under MicroPython WebAssembly. |
+| `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`), `est_helpers.py` (shared estimator fixtures), `test_deploy.py` (`tools/deploy.py`, CPython only). |
+| `tools/` | Host and on-watch scripts (see Commands). `tools/mpy/run.mjs` runs Python under MicroPython WebAssembly; `tools/cli.py` is the shared `--key value` parser. |
 | `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`. |
 | `docs/estimation/` | `bakeoff.md` (why kalman2), `imu-drift.md` (why no dead reckoning). |
 | `docs/research/user-research.md` | Personas, field-test plan, requirements R-01..R-15. |
 | `docs/architecture.md` `docs/hardware-setup.md` | Layers and data flow; bring-up on real watches. |
-| `notebooks/` | Jupyter "MicroPython - USB" notebooks. `finder_dev.ipynb` is the current one. |
+| `notebooks/` | Jupyter "MicroPython - USB" notebooks. `finder_dev.ipynb` is the current one. `watch.ipynb` and `tools.ipynb` are legacy (old custom firmware) and do not run on stock v1.29. |
 | `firmware/` | Old firmware images. **Do not touch.** |
 | `typings/` | MicroPython stubs for the IDE (v1.23; the watch runs v1.29, so a few newer APIs are missing from them). |
 
@@ -65,25 +66,26 @@ watches.** Every threshold is a starting value to calibrate.
 python3 tests/runner.py                    # CPython
 cd tools/mpy && npm install && cd -        # once: MicroPython WebAssembly port
 node tools/mpy/run.mjs tests/runner.py     # real MicroPython 1.29 (WebAssembly)
-python3 tests/runner.py test_game          # one module (either runner)
+python3 tests/runner.py test_game          # one module (either runner; tests/test_game.py works too)
 ```
 
-Both must pass before you call anything done. CPython catches logic errors
-fast. The MicroPython run catches what CPython hides: missing stdlib
-(`dataclasses`, `typing`, `collections` extras), `namedtuple` without
-`_fields`/`_replace`, integer and float differences, `framebuf` (renderer frame
-tests only run under MicroPython), and allocation behaviour. A few tests skip on
-one side (the renderer frame tests on CPython, the `tuning.py` staleness check on
-MicroPython). That is expected.
+Both must pass before you call anything done: read the result line,
+`[impl] N passed, S skipped, K failed`. An unknown module, or a run in which
+nothing passed or failed, exits 1. CPython catches logic errors fast. The
+MicroPython run catches what CPython hides: missing stdlib (`dataclasses`,
+`typing`, `collections` extras), `namedtuple` without `_fields`/`_replace`,
+integer and float differences, `framebuf` (renderer frame tests only run under
+MicroPython), and allocation behaviour. A test that cannot run on one runtime
+raises `tests.Skip("reason")` (the renderer frame tests on CPython, the
+`tuning.py` staleness check on MicroPython). That is expected.
 
 Conventions: plain modules `tests/test_*.py` with `test_*` functions that use
 `assert`. No pytest, no unittest. Hardware tests call `tests.fakes.install()`
 **before** importing anything from `hal`, and the fakes record I2C writes, SPI
 traffic and ESP-NOW frames for assertions. `tests/test_episode.py` is a headless
 two-watch episode (Game + sim) that must reach FOUND on both watches, and it
-shows how to wire everything. Scripts that take arguments read them with
-`finder.compat.argv(globals())` because the WebAssembly runner cannot set
-`sys.argv`.
+shows how to wire everything. Scripts read `sys.argv`; `tools/mpy/run.mjs`
+sets it as CPython would.
 
 ## Commands
 
@@ -91,7 +93,7 @@ shows how to wire everything. Scripts that take arguments read them with
 |---|---|
 | `python3 tools/gen_tuning.py` / `--check` | Regenerate `finder/tuning.py` from `tokens.json` / exit 1 if stale. |
 | `python3 tools/bakeoff.py --quick` | Estimator bake-off on the simulator. Full options in its docstring (`--est`, `--seeds`, `--profiles`, `--scenarios`, `--imu`, `--out`). |
-| `python3 tools/render_snapshots.py [name ...]` | Render `RenderParams` fixtures through the real renderer (via the WebAssembly port) into `docs/design/snapshots/*.png`. |
+| `python3 tools/render_snapshots.py [name ...]` | Render `RenderParams` fixtures through the real renderer (via the WebAssembly port) into `docs/design/snapshots/*.png`, and their frame CRCs into `tests/snapshot_crc.json` (checked by `test_renderer`). |
 | `node tools/mpy/run.mjs tools/bench_est.py` | Per-packet cost and heap per estimator. |
 | `node tools/mpy/run.mjs tools/bench_webhost.py` | Cost of one browser-sim step. |
 | `python3 tools/drift_demo.py` | Why accelerometer double integration fails. |
@@ -100,7 +102,7 @@ shows how to wire everything. Scripts that take arguments read them with
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |
-| `python3 tools/deploy.py [--port P] [-n] [--noapp\|--app]` | Copy `boot.py`, `main.py`, `app/`, `finder/`, `hal/`, `ui/` (+ `bma423conf.bin`) with mpremote. |
+| `python3 tools/deploy.py [--port P] [-n] [--noapp\|--app] [--tele DEV\|--no-tele]` | Hard-reset the watch, copy `app/`, `finder/`, `hal/`, `ui/` (+ `bma423conf.bin`) and last `boot.py`, `main.py` with mpremote, then hard-reset again so `main.py` starts the game. `--tele DEV` makes the game log to `/log/<n>_DEV.jsonl`. |
 
 Agents: do not flash, erase or deploy to a watch, and do not download
 firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
@@ -123,8 +125,8 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
    tests measure it.
 3. **Byte-swapped RGB565.** `framebuf` stores RGB565 little-endian, the ST7789
    wants MSB-first. Every colour given to a framebuf, palette or `fill` goes
-   through `rgb565()`/`swap16()`; `ui/__init__.py` holds pre-swapped values
-   (checked against `tokens.json` by `tests/test_renderer.py`).
+   through `rgb565()`/`swap16()`; `ui/__init__.py` takes the pre-swapped values
+   from `finder/tuning.py` (generated from `tokens.json`).
 4. **SPI <= 26.67 MHz and `miso=None`.** Stock firmware crashes above 80/3 MHz on
    GPIO-matrix pins (`ST7789` raises unless `fast=True`, which needs a custom
    build). A MISO pin would claim GPIO12, which is the backlight.
@@ -139,7 +141,10 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
 7. **`tokens.json` -> `tools/gen_tuning.py` -> `finder/tuning.py`.** Change a
    value in `docs/design/tokens.json` (or in `SPEC` in `gen_tuning.py` for
    ui-spec-only values), regenerate, and keep `--check` green. Never hand-edit
-   `tuning.py`.
+   `tuning.py`. The generator fails on any token string it parses (listed in
+   the `tools/gen_tuning.py` docstring) that no longer matches its full
+   template, and on tokens that repeat a value but disagree, so a changed rule
+   text needs a generator change too.
 8. **`docs/design/ui-spec.md` is the behaviour source of truth** (if it and
    `tokens.json` disagree on a value, `tokens.json` wins). Change the spec first,
    then code and tests. Where the spec is silent, the choice is documented in the
@@ -148,9 +153,9 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
    in seconds and there is no gyro or compass, so yaw is unobservable. Use steps
    x stride, activity and stillness only (`docs/estimation/imu-drift.md`).
 10. **RSSI alone never declares FOUND.** FOUND needs a matched physical bump (both
-    accelerometer spikes within 400 ms while both watches are in HOT) or the
-    fallback (both short presses within 3 s in HOT). RSSI at close range is
-    dominated by multipath and body shadowing.
+    accelerometer spikes within 400 ms, each made in HOT, while both watches are
+    in HOT) or the fallback (both short presses within 3 s in HOT). RSSI at close
+    range is dominated by multipath and body shadowing.
 11. **No metres, dBm, degrees or zone words on screen.** Distance shows only as
     bands (`<3`, `~5`, `~10`, `~20`, `~40`, `60+`); zones are felt through tempo
     and haptics, thermal words are for the trend only (ui-spec §12). RSSI cannot
@@ -167,10 +172,13 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
     plugin's `validate_pinmap.py`; its GPIO37/38 "not exposed" errors are false for
     this bare-chip board, where both are input-only interrupt lines.)
 15. **The game runs under a watchdog.** `main.py` starts `app.run(board,
-    watchdog_ms=8000)` (`hal/watchdog.py`): on battery it is the ESP32 hardware WDT
-    (cannot be stopped; a hung loop reboots), on USB power a timer watchdog that is
-    switched off when the loop exits, so Ctrl-C leaves a usable REPL. Notebooks call
-    `app.run()` without it. Feed nothing else: the loop feeds it once per step.
+    watchdog_ms=8000)` (`hal/watchdog.py`). It starts as a timer watchdog on USB
+    power (switched off when the loop exits, so Ctrl-C leaves a usable REPL) and
+    switches once, for good, to the ESP32 hardware WDT (cannot be stopped; a hung
+    loop reboots) at the first 10 s battery reading without VBUS. A game started
+    on battery uses the hardware WDT from the start, so `tools/deploy.py`
+    hard-resets the watch before copying. Notebooks call `app.run()` without it.
+    Feed nothing else: the loop feeds it once per pass.
 16. **Distance needs the right environment.** RSSI to metres uses the path-loss
     exponent from `tokens.json` (`calibrate.n` 2.6 outdoors, `n_indoor` 3.0 indoors
     or in crowds) via `Game.set_place(indoor)`. One exponent cannot fit both
@@ -191,11 +199,17 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
 
 1. Add `finder/estimators/<name>.py` with a class `Estimator(RangeEstimator)`
    from `base.py`: implement `update(t_ms, rssi, peer_rssi, my_motion,
-   peer_motion)` (`rssi=None` on a tick without a packet) and keep the public
-   fields finite (`rssi_f`, `rssi_var`, `rate_db_s`, `dist_m`, `dist_lo_m`,
-   `dist_hi_m`, `trend`, `trend_conf`). Add the name to `NAMES` in
+   peer_motion)` (`rssi=None` on an idle tick: the bake-off sends them, the game
+   does not) and keep the public fields finite (`rssi_f`, `rssi_var`,
+   `rate_db_s`, `dist_m`, `dist_lo_m`, `dist_hi_m`, `trend`, `trend_conf`), and
+   call `self._note_noise(t_ms, rssi)` (`base.py`) once per own packet: it sets
+   `noise_db`, the packet-to-packet RSSI noise sd that feeds the ui-spec §5.5
+   unreliable gate, the same way in every estimator. Add the name to `NAMES` in
    `finder/estimators/__init__.py`.
-2. Add `tests/test_est_<name>.py` (follow `test_est_kalman2.py`).
+2. The shared contract in `tests/test_est_default.py` (`test_make_every_name`,
+   `test_contract_*`, `test_noise_db_*`) runs for every name in `NAMES`; add
+   `tests/test_est_<name>.py` with estimator-specific tests only (fixtures in
+   `tests/est_helpers.py`).
 3. Tune only on seeds 0-9 (`python3 tools/bakeoff.py --est kalman2,<name>`).
 4. Judge on the **held-out seeds 100-129**, never used for tuning:
    `python3 tools/bakeoff.py --est kalman2,<name> --seeds 100-129 --out results.md`
@@ -217,9 +231,11 @@ python3 tools/build_sim.py          # -> dist/sim/ (index.html, local.html, py/b
 python3 -m http.server 8765 --directory dist/sim   # open http://localhost:8765/local.html
 ```
 
-`.claude/launch.json` has the same server as `web-sim`. Rebuild after any change
-to `finder/`, `ui/` or `sim/`. `index.html` is a page body (artifact format);
-`local.html` wraps it in a full document.
+`.claude/launch.json` has the same server as `web-sim`; its preview opens `/`
+(`index.html`, quirks mode), so navigate to `/local.html` to see the page as a
+full document. Rebuild after any change to `finder/`, `ui/` or `sim/`.
+`dist/sim/index.html` is the page body (artifact format) after a leading
+`<meta charset="utf-8">`; `local.html` wraps it in a full document.
 
 ## Security
 

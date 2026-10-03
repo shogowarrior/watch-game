@@ -68,9 +68,8 @@ def _osc(a, w, ph, t, e, e1, e2):
 class WristSim:
     """Steps a scenario at ODR; read ``t_ms, ax, ay, az`` (g) and truth fields."""
 
-    def __init__(self, scenario="walk", seed=1, range_g=4, odr_hz=ODR_HZ,
-                 speed=SPEED, cadence_hz=CADENCE_HZ, pose=None):
-        self.phases = schedule(scenario) if isinstance(scenario, str) else scenario
+    def __init__(self, scenario="walk", seed=1, range_g=4):
+        self.phases = schedule(scenario)
         self.duration = sum(p[0] for p in self.phases)
         rng = Rng(seed)
         self.rng = rng.fork(1)
@@ -83,11 +82,9 @@ class WristSim:
         self.ph = [r.uniform(0.0, 6.2832) for _ in range(8)]
         self.range_g = range_g
         self.lsb = range_g / 2047.0
-        self.dt = 1.0 / odr_hz
-        self.speed = speed
-        self.w = 2.0 * math.pi * cadence_hz
-        if pose is None:
-            pose = (8.0, -12.0) if scenario == "still" else (75.0, 0.0)
+        self.dt = 1.0 / ODR_HZ
+        self.w = 2.0 * math.pi * CADENCE_HZ
+        pose = (8.0, -12.0) if scenario == "still" else (75.0, 0.0)
         self.roll0 = pose[0] * _D2R
         self.pitch0 = pose[1] * _D2R
         starts = []
@@ -97,7 +94,7 @@ class WristSim:
         for dur, walk in self.phases:
             tgt = 1.0 if walk else 0.0
             starts.append((t, x, prev, tgt))
-            x += speed * self._int_e(dur, prev, tgt)
+            x += SPEED * self._int_e(dur, prev, tgt)
             t += dur
             prev = tgt
         self._starts = starts
@@ -105,9 +102,8 @@ class WristSim:
         self.t = 0.0
         self.t_ms = 0
         self.ax = self.ay = self.az = 0.0
-        self.true_x = self.true_y = self.true_v = 0.0
+        self.true_x = self.true_y = 0.0
         self.true_steps = 0.0
-        self.walking = False
 
     @staticmethod
     def _int_e(tau, prev, tgt):
@@ -130,7 +126,7 @@ class WristSim:
             e, e1, e2 = prev + d * s, d * s1 / RAMP_S, d * s2 / (RAMP_S * RAMP_S)
         else:
             e, e1, e2 = tgt, 0.0, 0.0
-        return e, e1, e2, x0 + self.speed * self._int_e(tau, prev, tgt), tgt > 0.5
+        return e, e1, e2, x0 + SPEED * self._int_e(tau, prev, tgt)
 
     def step(self):
         """Advance one sample; returns False past the end of the scenario."""
@@ -140,11 +136,11 @@ class WristSim:
         self.t = t
         self.t_ms = int(t * 1000.0 + 0.5)
         ph = self.ph
-        e, e1, e2, x, walking = self._envelope(t)
+        e, e1, e2, x = self._envelope(t)
         w = self.w
         wa = 0.5 * w
         # body
-        ax = self.speed * e1
+        ax = SPEED * e1
         _, _, sx = _osc(SURGE, w, ph[0], t, e, e1, e2)
         _, _, sy = _osc(SWAY, wa, ph[1], t, e, e1, e2)
         _, _, sz = _osc(BOUNCE, w, ph[0] + 1.3, t, e, e1, e2)
@@ -176,9 +172,7 @@ class WristSim:
         self.ax, self.ay, self.az = self._sense(x2 / G, y3 / G, z3 / G, t)
         self.true_x = x
         self.true_y = 0.0
-        self.true_v = self.speed * e
         self.true_steps += e * w / (2.0 * math.pi) * self.dt if self.n else 0.0
-        self.walking = walking
         self.n += 1
         return True
 

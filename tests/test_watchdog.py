@@ -29,15 +29,18 @@ def test_usb_soft_watchdog_resets_only_when_starved_and_can_stop():
     clk.t = 7000; wd._check()
     assert hits == []
     wd.feed(); clk.t = 15000; wd._check()
-    assert hits == [] and not wd.fired
-    clk.t = 15001 + 8000 - 7000 + 7000; wd._check()
-    assert hits and wd.fired
+    assert hits == []                               # exactly the timeout since the feed at 7000
+    clk.t = 15001; wd._check()
+    assert hits == [15001]                          # one ms past it
     assert wd.stop() is True and wd._tim is None
 
 
-def test_runtime_run_feeds_and_picks_mode_from_usb_power():
+def test_runtime_run_without_pmu_arms_hardware_wdt():
+    # The USB case (soft watchdog, off on exit) is test_app_runtime's
+    # test_watchdog_turns_hardware_once_unplugged.
     m = fakes.install()
     from app.runtime import Runtime
+    from hal.watchdog import MODE_HW
 
     class Board:
         pmu = None
@@ -55,25 +58,4 @@ def test_runtime_run_feeds_and_picks_mode_from_usb_power():
     rt = Runtime(Board(), clock=clk, sleep_ms=sleep, watchdog_ms=8000)
     rt.run(max_ms=500)
     assert m.wdts and m.wdts[-1].feeds > 5          # no PMU -> assume battery -> hardware WDT
-    assert rt.wd is not None                        # hardware WDT stays armed after the loop
-
-    class UsbPmu:
-        def vbus_present(self):
-            return True
-
-        def poll(self):
-            return 0
-
-        def battery_percent(self):
-            return 90
-
-        def __getattr__(self, name):
-            return lambda *a, **k: 0
-
-    class UsbBoard(Board):
-        pmu = UsbPmu()
-
-    fakes.install()
-    rt2 = Runtime(UsbBoard(), clock=clk, sleep_ms=sleep, watchdog_ms=8000)
-    rt2.run(max_ms=300)
-    assert not m.wdts and rt2.wd is None            # soft watchdog on USB, switched off on exit
+    assert rt.wd is not None and rt.wd.mode == MODE_HW   # stays armed after the loop

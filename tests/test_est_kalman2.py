@@ -1,69 +1,75 @@
-from finder.compat import ticks_add
-from finder.estimators.base import MotionInfo, RangeEstimator, ACT_STILL, ACT_WALK
+from finder.estimators.base import MotionInfo, ACT_STILL, ACT_WALK, ACT_UNKNOWN
+from finder.estimators import kalman2
 from finder.estimators.kalman2 import Estimator
+from finder.tuning import TREND_CONF_MIN
 
-STILL = MotionInfo(ACT_STILL, 0.0, 0)
-
-
-def _walk(t_ms, hz=1.8):
-    """Walking hint whose step count advances with time."""
-    return MotionInfo(ACT_WALK, hz, int(t_ms * hz / 1000.0))
-
-
-def _feed(e, t0, n, rssi_fn, walking=True, peer=None):
-    for i in range(n):
-        t = t0 + 100 * i
-        m = _walk(t) if walking else STILL
-        e.update(t, rssi_fn(i), peer(i) if peer else None, m, STILL)
-
-
-def test_interface():
-    e = Estimator()
-    assert isinstance(e, RangeEstimator) and e.name == "kalman2"
-    e.update(0, None)
-    assert e.dist_m is None and e.trend == 0
-    e.update(100, -70)
-    for k in ("rssi_f", "dist_m", "dist_lo_m", "dist_hi_m", "trend_conf", "rate_db_s"):
-        v = getattr(e, k)
-        assert v == v and v is not None
-    assert e.dist_lo_m <= e.dist_m <= e.dist_hi_m
+from tests.est_helpers import STILL, walk, feed
 
 
 def test_still_converges_and_no_trend():
     e = Estimator()
     e.calibrate(-45.0)
-    _feed(e, 0, 300, lambda i: -72 + (3 if i % 3 == 0 else -2 if i % 3 == 1 else -1), walking=False)
+    feed(e, 0, 300, lambda i: -72 + (3 if i % 3 == 0 else -2 if i % 3 == 1 else -1), walking=False)
     assert abs(e.rssi_f - (-72.0)) < 1.5
-    assert abs(e.dist_m - e.pl.rssi_to_dist(e.rssi_f)) < 0.3 * e.dist_m
+    assert abs(e.dist_m - e.pl.rssi_to_dist(e.rssi_f)) < 1e-6 * e.dist_m   # no hidden deadband
     assert e.trend == 0 and abs(e.rate_db_s) < 0.05
 
 
-def test_still_ignores_slow_drift():
-    e = Estimator()
-    _feed(e, 0, 200, lambda i: -70.0 + 0.02 * i, walking=False)
-    assert e.trend == 0
-
-
-def test_trend_follows_walk():
+def test_rate_pinned_to_zero_while_both_still():
+    """Both watches still: the speed bound is 0, so the rate is held at 0 even
+    while the RSSI keeps drifting (it is averaged, not extrapolated)."""
     e = Estimator()
     e.calibrate(-45.0)
-    _feed(e, 0, 150, lambda i: -85.0 + 0.1 * i)
-    assert e.trend == 1 and e.rate_db_s > 0.3 and e.trend_conf > 0.0
-    _feed(e, 15000, 200, lambda i: -70.0 - 0.1 * i)
-    assert e.trend == -1
+    feed(e, 0, 100, lambda i: -85.0 + 0.1 * i)               # walking closer, +1 dB/s
+    assert e.rate_db_s > 0.3
+    feed(e, 10000, 100, lambda i: -75.0 + 0.1 * i, walking=False)
+    assert e.speed == 0.0 and e.vmax == 0.0 and e.rate_db_s == 0.0
+    assert e.p11 < 1e-3, e.p11                                # rate spread decays (TAU_V_STILL)
 
 
-def test_stop_clears_trend():
+def test_rate_never_exceeds_speed_bound():
+    """|rate| <= CAP_K x the IMU bound (10 n / ln10 x speed / max(d, D_MIN))."""
     e = Estimator()
-    _feed(e, 0, 100, lambda i: -85.0 + 0.1 * i)
-    assert e.trend == 1
-    _feed(e, 10000, 30, lambda i: -75.0, walking=False)
-    assert e.trend == 0
+    e.calibrate(-45.0)
+    for i in range(80):
+        t = 100 * i
+        e.update(t, -55.0 - 0.3 * i, None, walk(t, 1.2), STILL)   # -3 dB/s, faster than walking allows
+        if i:
+            assert abs(e.rate_db_s) <= kalman2.CAP_K * e.vmax + 1e-9, (i, e.rate_db_s, e.vmax)
+    assert e.rate_db_s < 0.0 and -e.rate_db_s >= 0.99 * kalman2.CAP_K * e.vmax   # the clamp binds
+
+
+def test_motion_hint_speed():
+    m = kalman2._Mot()
+    for i in range(10):                  # "still" with slow step creep: not walking
+        m.feed(1000 * i, MotionInfo(ACT_STILL, 0.5, i))
+    assert m.v == 0.0
+    m = kalman2._Mot()
+    for i in range(10):                  # unknown activity, slow steps: 0.5 m/s floor
+        m.feed(1000 * i, MotionInfo(ACT_UNKNOWN, 0.3, i))
+    assert m.v == 0.5
+    m.feed(10000, MotionInfo(ACT_WALK, 1.8, 11))
+    assert abs(m.v - 1.8 * kalman2.STRIDE_M) < 1e-9
+
+
+def test_walk_start_kicks_rate_spread():
+    p = []
+    k0 = kalman2.START_K
+    try:
+        for k in (k0, 0.0):
+            kalman2.START_K = k
+            e = Estimator()
+            feed(e, 0, 50, lambda i: -70.0, walking=False)
+            e.update(5000, -70.0, None, walk(5000), STILL)   # first walking packet
+            p.append(e.p11)
+    finally:
+        kalman2.START_K = k0
+    assert p[0] > 1.5 * p[1], p
 
 
 def test_stop_clears_trend_without_packets():
     e = Estimator()
-    _feed(e, 0, 100, lambda i: -85.0 + 0.1 * i)
+    feed(e, 0, 100, lambda i: -85.0 + 0.1 * i)
     assert e.trend == 1
     n = e._me.steps
     for i in range(30):
@@ -71,44 +77,94 @@ def test_stop_clears_trend_without_packets():
     assert e.trend == 0 and e.trend_conf == 0.0
 
 
+def test_calibrate_scales_distance():
+    out = []
+    for cal in (-45.0, -50.0):
+        e = Estimator()
+        e.calibrate(cal)
+        feed(e, 0, 300, lambda i: -72.0, walking=False)
+        out.append(e.dist_m)
+    assert abs(out[0] / out[1] - 10.0 ** (5.0 / (10.0 * e.pl.n))) < 0.05, out
+
+
+def test_jitter_sets_sigma_and_rough_channel_reads_closer():
+    """sig is the clamped noise_db and sets the body/fade bias
+    p0 = cal - (BIAS_A + BIAS_B * sig): a rough channel reads closer."""
+    out = []
+    for amp in (0.0, 8.0):
+        e = Estimator()
+        e.calibrate(-45.0)
+        feed(e, 0, 400, lambda i: -70.0 + (amp if i & 1 else -amp), walking=False)
+        b = kalman2.BIAS_A + kalman2.BIAS_B * e.sig
+        assert abs(e.pl.p0 - (-45.0 - b)) <= 0.5, (amp, e.sig, e.pl.p0)   # _publish hysteresis
+        out.append((e.sig, e.dist_m))
+    assert out[0][0] == kalman2.SIG_MIN and out[1][0] == kalman2.SIG_MAX, out
+    assert out[1][1] < out[0][1], out
+
+
+def test_long_gap_drops_trend_and_resets_rate():
+    e = Estimator()
+    feed(e, 0, 100, lambda i: -85.0 + 0.1 * i)
+    assert e.trend == 1 and e.rate_db_s > 0.3
+    t = 9900
+    for _ in range(40):                     # 4 s without packets, still walking
+        t += 100
+        e.update(t, None, None, walk(t), STILL)
+    assert e.trend == 0 and e.trend_conf == 0.0
+    t += 100
+    e.update(t, e.rssi_f, None, walk(t), STILL)
+    assert abs(e.rate_db_s) < 0.1, e.rate_db_s
+
+
+def test_chip_rate_steps_keep_walking():
+    """BMA423 feature-engine steps are seen ~1.1 s apart (1 s poll + logic tick): still walking."""
+    me = MotionInfo(ACT_WALK, 1.8, 0)
+    e = Estimator()
+    e.calibrate(-45.0)
+    for i in range(300):
+        if i % 11 == 0:
+            me.steps = i * 18 // 100
+        e.update(10000 + 100 * i, -90.0 + 0.04 * i + (2.0 if i % 3 == 0 else -1.0), None, me, STILL)
+        if i >= 50:
+            assert e.speed > 0.0, i
+    assert e.trend == 1 and e.trend_conf >= TREND_CONF_MIN
+
+
+def test_unknown_activity_without_steps_is_still():
+    """A fidgeting wrist (activity unknown, step count unchanged) does not loosen the filter."""
+    m = MotionInfo(ACT_UNKNOWN, 0.0, 5)
+    e = Estimator()
+    e.update(0, -72.0, None, m, m)
+    assert e.speed == 0.0                   # the first step count is a baseline, not a step
+    for i in range(1, 300):
+        e.update(100 * i, -72.0 + (3.0 if i % 2 else -3.0), None, m, m)
+    assert e.speed == 0.0 and e.trend == 0 and abs(e.rate_db_s) < 0.05
+
+
+def test_fade_clipped_more_than_spike():
+    moves = []
+    for jump in (-30.0, 30.0):
+        e = Estimator()
+        feed(e, 0, 100, lambda i: -70.0, walking=False)
+        e.update(10000, -70.0 + jump, None, STILL, STILL)
+        moves.append(abs(e.rssi_f + 70.0))
+    assert moves[0] < 0.6 * moves[1], moves
+
+
 def test_fade_outliers_rejected():
     e = Estimator()
-    _feed(e, 0, 100, lambda i: -70.0, walking=False)
-    _feed(e, 10000, 10, lambda i: -100.0 if i % 2 == 0 else -70.0, walking=False)
+    feed(e, 0, 100, lambda i: -70.0, walking=False)
+    feed(e, 10000, 10, lambda i: -100.0 if i % 2 == 0 else -70.0, walking=False)
     assert abs(e.rssi_f + 70.0) < 2.0
 
 
 def test_peer_offset_learnt():
     e = Estimator()
-    _feed(e, 0, 300, lambda i: -70.0, walking=False, peer=lambda i: -64.0)
+    feed(e, 0, 300, lambda i: -70.0, walking=False, peer=lambda i: -64.0)
     assert abs(e.rssi_f + 70.0) < 1.0 and abs(e.peer_bias - 6.0) < 1.0
 
 
-def test_stride_error_does_not_flip_trend():
-    for hz in (1.2, 1.8, 2.6):
-        e = Estimator()
-        for i in range(150):
-            t = 100 * i
-            e.update(t, -85.0 + 0.1 * i, None, _walk(t, hz), STILL)
-        assert e.trend == 1
-
-
-def test_ticks_wrap():
-    e = Estimator()
-    t0 = ticks_add(0, -3000)
-    for i in range(80):
-        t = ticks_add(t0, 100 * i)
-        e.update(t, -80.0 + 0.1 * i, None, MotionInfo(ACT_WALK, 1.8, i // 5), STILL)
-    assert e.trend == 1 and e.rssi_f > -75.0
-
-
 def test_sim_approach_beats_chance():
-    import sys
-    import finder
-    f = getattr(finder, "__file__", "finder/__init__.py")
-    tools = f[: f.rfind("finder/")] + "tools" if "finder/" in f else "tools"
-    if tools not in sys.path:
-        sys.path.append(tools)
-    from bakeoff import record, evaluate
-    m = evaluate(Estimator, record("approach", "typical", 0, duration=20.0))
+    from tools import bakeoff
+    m = bakeoff.evaluate(Estimator, bakeoff.record("approach", "typical", 0, duration=20.0))
     assert m["trend_acc"] > 0.6 and m["dist_log_rmse"] < 0.8

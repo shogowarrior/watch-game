@@ -19,6 +19,7 @@ class Estimator(RangeEstimator):
     def update(self, t_ms, rssi, peer_rssi=None, my_motion=None, peer_motion=None):
         if rssi is None:
             return
+        self._note_noise(t_ms, rssi)
         if self.rssi_f is None:
             self.rssi_f = float(rssi)
             self.last_t = t_ms

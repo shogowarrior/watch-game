@@ -2,7 +2,7 @@
 # Flash stock MicroPython v1.29.0 (ESP32_GENERIC-SPIRAM) onto a T-Watch 2020 V1.
 #
 # YOU run this; nothing in the repo calls it. It will:
-#   1. download the firmware from micropython.org into firmware/ (if missing),
+#   1. download the firmware from micropython.org into <repo>/firmware/ (if missing),
 #   2. check the file looks like an ESP32 image (size, 0xE9 magic, optional SHA256),
 #   3. show the exact esptool commands and ask y/N,
 #   4. erase the whole flash (this deletes every file on the watch!),
@@ -14,17 +14,19 @@
 #   tools/flash.sh <port> path/to/other.bin          # use a local image instead
 #
 # Env:
-#   BAUD=460800        write baud (drop to 115200 if writes fail)
-#   FW_SHA256=<hex>    expected SHA256 of the image (checked if set)
-#   FW_DIR=firmware    where the download is kept
+#   BAUD=460800             write baud (drop to 115200 if writes fail)
+#   FW_SHA256=<hex>         expected SHA256 of the image (checked if set)
+#   FW_DIR=<repo>/firmware  where the download is kept
 #
-# Needs esptool (pip install esptool). After flashing: tools/deploy.py --port <port>.
+# Needs esptool (pip install esptool). After flashing: tools/deploy.py --port <port> --noapp
+# (first deploy keeps the REPL free; docs/hardware-setup.md step 4).
 set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 FW_NAME="ESP32_GENERIC-SPIRAM-20260824-v1.29.0.bin"
 FW_URL="https://micropython.org/resources/firmware/${FW_NAME}"
 BAUD="${BAUD:-460800}"
-FW_DIR="${FW_DIR:-firmware}"
+FW_DIR="${FW_DIR:-$ROOT/firmware}"
 
 PORT="${1:-}"
 if [[ -z "$PORT" || "$PORT" == "-h" || "$PORT" == "--help" ]]; then
@@ -101,4 +103,4 @@ read -r -p "Erase and flash now? [y/N] " ans
 "${ESPTOOL[@]}" --chip esp32 --port "$PORT" --baud "$BAUD" write_flash -z 0x1000 "$FW"
 
 echo
-echo "Done. Next: python3 tools/deploy.py --port $PORT"
+echo "Done. Next (first time): python3 tools/deploy.py --port $PORT --noapp   (keeps the REPL free; docs/hardware-setup.md step 4)"

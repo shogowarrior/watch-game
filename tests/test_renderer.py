@@ -6,7 +6,9 @@ frame tests need MicroPython framebuf and run in the wasm runner:
     node tools/mpy/run.mjs tests/runner.py test_renderer
 """
 
+import array
 import gc
+import math
 import sys
 
 try:
@@ -14,24 +16,35 @@ try:
     HAVE_FB = True
 except ImportError:
     HAVE_FB = False
-    print("SKIP test_renderer frame tests: framebuf is MicroPython-only")
 
-from ui import GREY, PROX, BG_IRIS, swap16
+from finder import tuning as T
+from finder.compat import ticks_add
+from tests import Skip
+from tools import render_snapshots as rs  # the snapshot fixtures: make_params, hunt, _lost ...
+from ui import PROX, BG_IRIS, swap16
 from ui import field as fld
 
+make_params = rs.make_params
+
 if HAVE_FB:
-    from ui.renderer import FrameCapture, Renderer, make_params
+    from ui.renderer import FrameCapture, Renderer
     from ui import text as tx
     from ui import font
 
-T0 = 100000
+T0 = rs.T0
+
+
+def _need_fb():
+    if not HAVE_FB:
+        raise Skip("framebuf is MicroPython-only")
+CORE = fld.q8(T.CORE_DOT_LEVEL)
+MENU_KW = dict(rs._menu, sub="0", menu_rows=rs.MENU_ROWS)
+FOUND_KW = dict(rs._found, sub="celebrate")
+HOT_KW = rs.hunt(3, intensity=0.9, glow_r_px=56, dist_band="<3")
 
 
 def _warm(**kw):
-    d = dict(screen="WARM", zone=2, intensity=0.55, speed_px_s=80, pulse_period_ms=1000,
-             wavelength_px=80, glow_r_px=42, heartbeat="DOUBLE", dist_band="~10")
-    d.update(kw)
-    return d
+    return rs.hunt(2, dist_band="~10", **kw)
 
 
 def _fr(r, p, cap=None, now=None):
@@ -40,11 +53,12 @@ def _fr(r, p, cap=None, now=None):
 
 
 def _run(r, cap, kw, ms, t0=T0, step=50):
+    """Frames every ``step`` ms for ``ms`` from tick ``t0`` (wrap-aware, like
+    the device clock); returns [(offset_ms, event)]."""
     evs = []
     t = 0
     while t <= ms:
-        ev = _fr(r, make_params(t_ms=t0 + t, **kw), cap)
-        for e in ev:
+        for e in _fr(r, make_params(t_ms=ticks_add(t0, t), **kw), cap):
             evs.append((t, e))
         t += step
     return evs
@@ -55,66 +69,40 @@ def _px(buf, x, y):
     return buf[i] | (buf[i + 1] << 8)       # framebuf's native (swapped) int
 
 
+def _ring_index(x, y):
+    """Reference float formula for the ring-index map."""
+    return min(169, int(math.floor(math.sqrt((x - 119.5) ** 2 + (y - 119.5) ** 2))))
+
+
 # ---- pure maths (CPython + MicroPython) ----------------------------------------
-def _ref_lut(stops):
-    out = []
-    for j in range(64):
-        pos = j * 7 / 63.0
-        k = min(6, int(pos))
-        f = pos - k
-        a, b = stops[k], stops[k + 1]
-        ch = []
-        for sh, bits in ((16, 5), (8, 6), (0, 5)):
-            c = ((a >> sh) & 255) * (1 - f) + ((b >> sh) & 255) * f
-            c8 = int(c + 0.5 + 1e-9)
-            ch.append((c8 * ((1 << bits) - 1) + 127) // 255)
-        out.append(swap16((ch[0] << 11) | (ch[1] << 5) | ch[2]))
-    return out
+def test_lut_is_the_generated_ramp_lut():
+    for name in T.RAMP_NAMES:
+        lut = fld.LUTS[name]
+        assert tuple(lut.c) == T.RAMP_LUT[name], name
+        # r/g/b are the 565 value bit-replicated to 8 bits (crossfade mixing)
+        for j in range(64):
+            n = swap16(lut.c[j])
+            r5, g6, b5 = n >> 11, (n >> 5) & 63, n & 31
+            assert (lut.r[j], lut.g[j], lut.b[j]) == ((r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4),
+                                                      (b5 << 3) | (b5 >> 2)), (name, j)
 
 
-def test_lut_is_swapped_snapped_interpolation():
-    import ui
-    from ui import RAMP_HEX
-    for name in ("green", "gold", "grey"):
-        ref = _ref_lut(RAMP_HEX[name])
-        got = list(fld.LUTS[name].c)
-        assert got == ref, name
-        # stops land exactly on the token colours (LUT[9k] = stop k)
-        for k in range(8):
-            assert got[9 * k] == ui.sw(RAMP_HEX[name][k]), (name, k)
-    assert fld.LUTS["green"].c[0] == PROX[0] and fld.LUTS["green"].c[63] == PROX[7]
-    assert fld.LUTS["green"].c[27] == PROX[3] == 0x871B
-    assert fld.LUTS["grey"].c[54] == GREY[6]
-
-
-def test_colour_constants_match_tokens():
-    try:
-        import json
-        with open("docs/design/tokens.json") as f:
-            tok = json.load(f)
-    except (OSError, ImportError):
-        return  # wasm runner does not ship docs/
-    import ui
-    col = tok["color"]
-    for name, hx in ui.HEX.items():
-        assert int(col[name]["rgb565_swapped"], 16) == ui.sw(hx), name
-        assert int(col[name]["hex"][1:], 16) == hx, name
-    for ramp, names in tok["ramp"].items():
-        if ramp in ui.RAMP_HEX:
-            for k, n in enumerate(names):
-                assert int(col[n]["hex"][1:], 16) == ui.RAMP_HEX[ramp][k], n
-    stops = tok["field"]["vignette_stops"]
-    assert tuple((a, b) for a, b in stops) == fld.VIG_STOPS
+def test_kernel_literals_match_tuning():
+    # the palette kernel source keeps a few tokens as literals (viper speed)
+    assert fld.q8(T.STANDING_BASE) == 512 and fld.q8(T.STANDING_AMP) == 640
+    assert "st = 512 + ((((640 * tp[426 + (i & 31)]" in fld._KSRC
+    assert T.STANDING_WAVELENGTH_PX == len(fld.COS32) == 32
+    assert T.CORE_DOT_R == 6 and "if i <= 6:" in fld._KSRC
 
 
 def test_ring_map_matches_hypot():
     half = fld.build_map(120)
     for (x, y) in ((0, 0), (119, 119), (120, 120), (239, 0), (17, 93), (200, 60), (120, 0)):
         yy = y if y < 120 else 239 - y
-        assert half[yy * 240 + x] == fld.ring_index(x, y), (x, y)
+        assert half[yy * 240 + x] == _ring_index(x, y), (x, y)
     assert max(half) == 168          # corner: 119.5*sqrt(2) = 168.998
     full = fld.build_map(240)
-    assert full[239 * 240 + 239] == 168 and full[130 * 240 + 7] == fld.ring_index(7, 130)
+    assert full[239 * 240 + 239] == 168 and full[130 * 240 + 7] == _ring_index(7, 130)
 
 
 def _field(levels=(768, 0, 1024, 20 * 256), iris=0):
@@ -139,12 +127,12 @@ def test_palette_entries_are_lut_colours():
 
 def test_core_dot_and_iris_in_palette():
     f = _field(levels=(77, 0, 1024, 20 * 256))
-    f.build(0, core=True)
+    f.build(0, core=CORE)
     for i in range(7):
         assert f.pal_arr[i] == PROX[6], i          # sun floor: level 6
     assert f.pal_arr[7] != PROX[6]
     f = _field(iris=64)
-    f.build(0, core=True)
+    f.build(0, core=CORE)
     for i in range(64):
         assert f.pal_arr[i] == BG_IRIS
     assert f.pal_arr[64] == fld.LUTS["green"].c[45]   # rim >= level 5
@@ -175,33 +163,78 @@ def test_temporal_aa_widens_lead():
 
 
 def test_png_roundtrip():
-    sys.path.insert(0, "tools")
-    import png
+    from tools import png
     rgb = bytearray(4 * 3 * 3)
     for i in range(len(rgb)):
         rgb[i] = (i * 37) & 255
-    try:
-        import zlib
-        zlib.decompress
-    except (ImportError, AttributeError):
-        return
     w, h, out = png.decode_rgb(png.encode(4, 3, rgb))
     assert (w, h) == (4, 3) and out == bytes(rgb)
-    assert png.decode_rgb(b"\x89PNG\r\n\x1a\n" + png._chunk(b"IHDR", b"\0\0\0\1\0\0\0\1\x08\2\0\0\0")
-                          + png._chunk(b"IDAT", png._stored(b"\0\1\2\3"))
-                          + png._chunk(b"IEND", b""))[2] == b"\1\2\3"
+
+
+def test_snapshot_tool_fails_loudly():
+    # CPython entry point: a MicroPython error or an unknown fixture name
+    # must surface (stderr, exit 1), not print "wrote 0 snapshots" and exit 0
+    if sys.implementation.name != "cpython":
+        raise Skip("the snapshot tool's CPython entry point")
+    import subprocess
+
+    class Proc:
+        def __init__(self, rc, out, err):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    import io
+    run, out, err = subprocess.run, sys.stdout, sys.stderr
+    try:
+        for proc in (Proc(1, "", "MicroPython traceback\n"), Proc(0, "", "")):
+            subprocess.run = lambda *a, **k: proc
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            try:
+                rs._cpython_main(["render_snapshots.py", "no_such_fixture"])
+                assert False, "no exit"
+            except SystemExit as e:
+                assert e.code == 1, e.code
+            msg = sys.stderr.getvalue()
+            assert ("MicroPython traceback" if proc.returncode else "no_such_fixture") in msg, msg
+    finally:
+        subprocess.run, sys.stdout, sys.stderr = run, out, err
 
 
 # ---- frame tests (MicroPython framebuf) ------------------------------------------
 def test_blit_key_semantics_probe():
-    if not HAVE_FB:
-        return
-    assert tx.KEY_POST is True     # MicroPython 1.29: key compared after palette
+    # ui/text.py relies on MicroPython comparing the blit key after the
+    # palette lookup: a source 0 mapped to the key colour stays transparent
+    _need_fb()
+    import framebuf
+    src = framebuf.FrameBuffer(bytearray(1), 8, 1, framebuf.MONO_HLSB)   # all 0
+    pal = framebuf.FrameBuffer(bytearray(4), 2, 1, framebuf.RGB565)
+    pal.pixel(0, 0, 0x1234)
+    dst = framebuf.FrameBuffer(bytearray(2), 1, 1, framebuf.RGB565)
+    dst.pixel(0, 0, 0x5555)
+    dst.blit(src, 0, 0, 0x1234, pal)
+    assert dst.pixel(0, 0) == 0x5555
+
+
+def test_renderer_tables_match_tuning():
+    _need_fb()
+    from finder import game
+    from ui import renderer as R
+    # the const ids are the index in the §3 lists (FAR..HOT ranges rely on the order)
+    for name, sid in (("PAIRING", R.S_PAIRING), ("SEARCHING", R.S_SEARCHING), ("FAR", R.S_FAR),
+                      ("HOT", R.S_HOT), ("FOUND", R.S_FOUND), ("SCANNING", R.S_SCANNING),
+                      ("LINK_LOST", R.S_LINK_LOST), ("MENU", R.S_MENU)):
+        assert R.SCREENS[name] == sid == T.SCREENS.index(name), name
+    for name, gid in (("glow", R.G_GLOW), ("seeker", R.G_SEEKER), ("chevrons", R.G_CHEV),
+                      ("arrow", R.G_ARROW), ("countdown", R.G_COUNT), ("turn", R.G_TURN),
+                      ("check", R.G_CHECK), ("runes", R.G_RUNES), ("battery", R.G_BATT)):
+        assert R.GLYPHS[name] == gid, name
+    assert R.G_DOTS == len(T.GLYPHS)
+    # copy the renderer keys on that lives in finder/game.py
+    assert (R.W_FOUND, R.W_BUMP) == (game.W_FOUND, game.W_BUMP)
 
 
 def test_frame_pushes_ten_strips_and_colours():
-    if not HAVE_FB:
-        return
+    _need_fb()
     r = Renderer()
     cap = FrameCapture()
     _run(r, cap, _warm(glyph="arrow", arrow_deg=0, cone_deg=31, arrow_style="solid_b"), 500)
@@ -215,12 +248,11 @@ def test_frame_pushes_ten_strips_and_colours():
     # every field pixel is the palette colour of its ring index
     pal = r.field.pal_arr
     for (x, y) in ((5, 120), (230, 60), (119, 3), (40, 200)):
-        assert _px(cap.buf, x, y) == pal[fld.ring_index(x, y)], (x, y)
+        assert _px(cap.buf, x, y) == pal[_ring_index(x, y)], (x, y)
 
 
 def test_core_dot_level_in_frame():
-    if not HAVE_FB:
-        return
+    _need_fb()
     r = Renderer()
     cap = FrameCapture()
     _run(r, cap, dict(screen="FAR", zone=0, intensity=0.0, glow_r_px=20), 300)
@@ -232,8 +264,7 @@ def test_core_dot_level_in_frame():
 
 
 def test_half_and_full_map_frames_identical():
-    if not HAVE_FB:
-        return
+    _need_fb()
     kw = _warm(glyph="chevrons", trend=-1, trend_strong=True, top_text="TAP TO SCAN")
     a = Renderer()
     b = Renderer(full_map=True)
@@ -258,8 +289,7 @@ def _crest(r):
 
 
 def test_ring_crest_travels_at_speed():
-    if not HAVE_FB:
-        return
+    _need_fb()
     r = Renderer()
     cap = FrameCapture()
     kw = dict(screen="NEAR", zone=1, intensity=0.0, speed_px_s=80, pulse_period_ms=4000,
@@ -272,14 +302,12 @@ def test_ring_crest_travels_at_speed():
 
 
 def test_heartbeat_on_live_spawns_only():
-    if not HAVE_FB:
-        return
+    _need_fb()
     r = Renderer()
     cap = FrameCapture()
     kw = _warm(pulse_period_ms=500, heartbeat="TICK", heartbeat_every=1)
     ev = _run(r, cap, kw, 2000)
     ticks = [t for t, e in ev if e == "TICK"]
-    assert len(ticks) == 5, ticks            # spawns at 0, 500, ..., 2000
     assert ticks == [0, 500, 1000, 1500, 2000]
     r.reset()
     ev = _run(r, cap, _warm(pulse_period_ms=500, heartbeat="TICK", ring_live=False), 2000)
@@ -289,72 +317,75 @@ def test_heartbeat_on_live_spawns_only():
     ev = _run(r, cap, _warm(pulse_period_ms=500, heartbeat="TICK", heartbeat_every=2), 2000)
     assert len(ev) == 2                       # FAR-style: every 2nd ring
     r.reset()                                 # screen off: state advances, no display
-    n = 0
-    for k in range(41):
-        n += len(_fr(r, make_params(t_ms=T0 + 50 * k, **kw)))
-    assert n == 5
+    assert len(_run(r, None, kw, 2000)) == 5
 
 
-def test_haptic_event_and_burst_once_per_params():
-    if not HAVE_FB:
-        return
+def test_burst_once_per_params_and_no_event_echo():
+    _need_fb()
     r = Renderer()
     cap = FrameCapture()
     p = make_params(t_ms=T0, **_warm(burst=True, haptic="CLOSER", heartbeat=None))
-    assert _fr(r, p, cap) == ["CLOSER"]
+    assert _fr(r, p, cap) == ()               # params.haptic is the caller's to play
     n_on = sum(r.field.r_on)
-    assert _fr(r, p, cap, T0 + 50) == ()     # same params: no repeat
+    assert _fr(r, p, cap, T0 + 50) == ()      # same params: no second burst
     assert sum(r.field.r_on) == n_on
     bursts = [k for k in range(fld.MAXR) if r.field.r_on[k] and r.field.r_amp[k] == 1792]
     assert len(bursts) == 1 and r.field.r_v[bursts[0]] == 160
 
 
 def test_menu_freezes_rings_and_dims():
-    if not HAVE_FB:
-        return
+    _need_fb()
     r = Renderer()
     cap = FrameCapture()
     _run(r, cap, _warm(), 600)
-    menu = dict(screen="MENU", sub="0", intensity=0.55, speed_px_s=80, pulse_period_ms=1000)
-    _run(r, cap, menu, 700, t0=T0 + 650)
-    rs = [r.field.ring_r(k, T0 + 1350) for k in range(fld.MAXR) if r.field.r_on[k]]
-    _run(r, cap, menu, 500, t0=T0 + 1400)
+    _run(r, cap, MENU_KW, 700, t0=T0 + 650)
+    rs1 = [r.field.ring_r(k, T0 + 1350) for k in range(fld.MAXR) if r.field.r_on[k]]
+    _run(r, cap, MENU_KW, 500, t0=T0 + 1400)
     rs2 = [r.field.ring_r(k, T0 + 1900) for k in range(fld.MAXR) if r.field.r_on[k]]
-    assert rs == rs2 and rs
+    assert rs1 == rs2 and rs1
     assert r.field.dim == 128
 
 
+def test_menu_freezes_hue_crossfade():
+    # ui-spec MENU: the field is frozen, so a hue crossfade running when the
+    # menu opens (green -> grey on link loss) waits behind it
+    _need_fb()
+    r = Renderer()
+    cap = FrameCapture()
+    _run(r, cap, _warm(), 500)
+    lost = dict(rs._lost, banner=None)
+    _run(r, cap, lost, 300, t0=T0 + 550)                  # 1500 ms crossfade under way
+    mix0 = list(r.field.mix.c)
+    assert mix0 != list(fld.LUTS["grey"].c) and mix0 != list(fld.LUTS["green"].c)
+    _run(r, cap, dict(MENU_KW, ramp="grey"), 2000, t0=T0 + 900)
+    assert list(r.field.mix.c) == mix0
+    _run(r, cap, lost, 1500, t0=T0 + 2950)
+    assert list(r.field.mix.c) == list(fld.LUTS["grey"].c)
+
+
 def test_ramp_crossfade_to_gold():
-    if not HAVE_FB:
-        return
+    _need_fb()
     r = Renderer()
     cap = FrameCapture()
     _run(r, cap, _warm(), 200)
-    found = dict(screen="FOUND", sub="celebrate", ramp="gold", intensity=1.0, speed_px_s=0,
-                 glow_r_px=90, glyph="check")
-    _run(r, cap, found, 200, t0=T0 + 250)
+    _run(r, cap, FOUND_KW, 200, t0=T0 + 250)
     mid = list(r.field.mix.c)
     assert mid != list(fld.LUTS["gold"].c) and mid != list(fld.LUTS["green"].c)
-    _run(r, cap, found, 300, t0=T0 + 500)     # 400 ms crossfade into FOUND
+    _run(r, cap, FOUND_KW, 300, t0=T0 + 500)     # 400 ms crossfade into FOUND
     assert list(r.field.mix.c) == list(fld.LUTS["gold"].c)
 
 
 def test_renders_finder_render_params():
-    if not HAVE_FB:
-        return
-    try:
-        from finder import render_params as rp
-    except ImportError:
-        return
+    _need_fb()
+    from finder import render_params as rp
     r = Renderer()
     cap = FrameCapture()
     p = rp.make_params(t_ms=T0)                       # a valid SEARCHING frame
     assert rp.validate(p) == []
     assert _fr(r, p, cap) == ()
     assert cap.pushes == 10
-    hot = dict(screen="HOT", zone=3, ramp="green", intensity=0.9, speed_px_s=120,
-               pulse_period_ms=500, glow_r_px=56, ring_live=True, glyph="glow",
-               dist_band="<3", word="BUMP!", heartbeat="TICK", status=(55, None, 4, True))
+    hot = dict(HOT_KW, ramp="green", ring_live=True, glyph="glow", word="BUMP!",
+               status=(55, None, 4, True, False))
     assert rp.validate(rp.make_params(t_ms=T0, **hot)) == []
     for k in range(1, 33):          # iris 44 -> 0 (300 ms), grey -> green (1500 ms)
         _fr(r, rp.make_params(t_ms=T0 + 50 * k, **hot), cap)
@@ -365,19 +396,16 @@ def test_renders_finder_render_params():
 def test_rings_interpolate_between_10hz_params():
     # §3/§4 rule 3: logic at 10 Hz, render at 20 fps. Each params object is
     # drawn twice; the render clock (now), not p.t_ms, must move the rings.
-    if not HAVE_FB:
-        return
+    _need_fb()
     r = Renderer()
     cap = FrameCapture()
-    hot = dict(screen="HOT", zone=3, intensity=0.9, speed_px_s=120, pulse_period_ms=500,
-               glow_r_px=56, ring_live=True, heartbeat="TICK", dist_band="<3")
     f = r.field
     p = None
     prev = None
     steps = 0
     for k in range(40):
         if k % 2 == 0:
-            p = make_params(t_ms=T0 + 50 * k, **hot)
+            p = make_params(t_ms=T0 + 50 * k, **HOT_KW)
         now = T0 + 50 * k
         r.frame(p, cap, now)
         assert f.t == now
@@ -395,10 +423,41 @@ def test_rings_interpolate_between_10hz_params():
     assert 45 <= f.dt <= 55, f.dt                     # frame EMA sees 50 ms
 
 
+def test_wedge_glides_between_10hz_params():
+    # §3: the renderer interpolates; the sweep wedge turns linearly at
+    # 30 deg/s instead of jumping 3 deg every second frame
+    _need_fb()
+    from ui import glyphs as gl
+    cap = FrameCapture()
+
+    def wedge(deg):
+        gl.prep_wedge(deg)
+        return list(gl._wedge)
+
+    r = Renderer()
+    sw = dict(rs._scan, sub="sweep", glyph="turn", glow_r_px=12)
+    for k in range(4):                        # params at 10 Hz, frames at 20 fps
+        p = make_params(t_ms=T0 + 100 * k, sweep=(90.0 + 3 * k, rs.BINS, 3, False), **sw)
+        a = 90 + 3 * (k - 1) if k else 90         # glides over one tick: 100 ms behind
+        _fr(r, p, cap, T0 + 100 * k)
+        assert list(gl._wedge) == wedge(a), k
+        _fr(r, p, cap, T0 + 100 * k + 50)
+        assert list(gl._wedge) == wedge(a + 1 if k else a), k     # 1.5 deg in
+    # paused: holds at the logic's angle
+    p = make_params(t_ms=T0 + 400, sweep=(102.0, rs.BINS, 3, True), **sw)
+    _fr(r, p, cap, T0 + 450)
+    assert list(gl._wedge) == wedge(102)
+    # the DIRECTION pacer turning left crosses 0 the short way
+    r = Renderer()
+    _fr(r, make_params(t_ms=T0, **_turn(2)), cap)
+    _fr(r, make_params(t_ms=T0 + 100, **_turn(359)), cap, T0 + 100)
+    _fr(r, make_params(t_ms=T0 + 100, **_turn(359)), cap, T0 + 150)
+    assert list(gl._wedge) == wedge(0)
+
+
 def test_frame_default_clock_is_ticks_ms():
-    if not HAVE_FB:
-        return
-    from finder.compat import ticks_add, ticks_diff, ticks_ms
+    _need_fb()
+    from finder.compat import ticks_diff, ticks_ms
     r = Renderer()
     p = make_params(t_ms=ticks_add(ticks_ms(), 500000), **_warm())
     r.frame(p)
@@ -407,8 +466,7 @@ def test_frame_default_clock_is_ticks_ms():
 
 
 def test_text_cache_reuse():
-    if not HAVE_FB:
-        return
+    _need_fb()
     tc = tx.TextCache()
     a = tc.get(font.WORD, "~10")
     b = tc.get(font.WORD, "~10")
@@ -425,8 +483,7 @@ def test_text_cache_reuse():
 
 
 def test_font_scaling_shapes():
-    if not HAVE_FB:
-        return
+    _need_fb()
     buf, w, h = font.render(font.DISPLAY, "1")
     assert (w, h) == (24, 48) and len(buf) == 3 * 48
     rows = font.char_rows("1")
@@ -440,113 +497,76 @@ def test_font_scaling_shapes():
             assert got == on, (r, c)
 
 
-def test_no_allocation_growth_over_100_frames():
-    if not HAVE_FB:
-        return
-    r = Renderer()
-    cap = FrameCapture()
-    kw = _warm(glyph="arrow", arrow_deg=30, cone_deg=31, arrow_style="solid_b", trend=1,
-               top_text="TAP TO SCAN", status=(64, 71, 3, False))
-    ps = [make_params(t_ms=T0 + 50 * k, **kw) for k in range(130)]
-    for k in range(30):
-        _fr(r, ps[k], cap)
-    gc.collect()
-    free0 = gc.mem_free()
-    a0 = gc.mem_alloc()
-    for k in range(30, 130):
-        _fr(r, ps[k], cap)
-    grown = gc.mem_alloc() - a0
-    gc.collect()
-    free1 = gc.mem_free()
-    assert abs(free1 - free0) < 512, (free0, free1)
-    # float params are converted once per params object and heartbeat event
-    # lists are reused, so a steady frame loop allocates nothing
-    assert grown < 512, grown
-
-
 # ---- review round 1 regressions --------------------------------------------------
-def test_viper_self_check_covers_standing_wave():
-    # a kernel that differs only in the FOUND standing-wave branch must fail
+def test_viper_self_check_covers_branches():
+    # a kernel that differs in any one branch (FOUND standing wave, fill,
+    # core dot, ghost channel) must fail the self-check
     ns = {"ptr16": lambda x: x, "ptr32": lambda x: x}
     py = {"ptr16": lambda x: x, "ptr32": lambda x: x}
     exec(fld._KSRC, py)
     assert fld.kernel_agrees(py["pal_kernel"], py["pal_kernel"])
-    for a, b in (("tp[426 + (i & 31)]", "tp[426 + (i & 15)]"), ("* sb) >> 8)", "* sb) >> 7)")):
+    for a, b in (("tp[426 + (i & 31)]", "tp[426 + (i & 15)]"), ("* sb) >> 8)", "* sb) >> 7)"),
+                 ("* sw) >> 8", "* sw) >> 7"), ("fill_v + (fill_v >> 1)", "fill_v + (fill_v >> 2)"),
+                 ("if i <= 6:", "if i <= 5:"), ("g = (g * dim) >> 8", "g = (g * dim) >> 7"),
+                 ("c = tp[522 + j]", "c = tp[521 + j]"),
+                 ("j = ((g * 9 + 128) >> 8) + lift", "j = ((g * 9 + 120) >> 8) + lift"),
+                 ("j = ((g * 9 + 128) >> 8) + lift", "j = (g * 9 + 128) >> 8")):
         src = fld._KSRC.replace(a, b)
         assert src != fld._KSRC, a
         exec(src, ns)
         assert not fld.kernel_agrees(py["pal_kernel"], ns["pal_kernel"]), b
-    assert any(v[fld.P_STAND] and v[fld.P_RIM] >= 0 for v in fld.CHECK_PRMS)
-
-
-def _run_ticks(r, cap, kw, t0, n, step=50):
-    """n frames from tick t0 using wrap-aware ticks_add (the device clock)."""
-    from finder.compat import ticks_add
-    evs = []
-    for k in range(n):
-        t = ticks_add(t0, k * step)
-        for e in _fr(r, make_params(t_ms=t, **kw), cap):
-            evs.append((k * step, e))
-    return evs
+    assert any(0 < v[fld.P_STAND_W] < 256 and v[fld.P_RIM] >= 0 for v in fld.CHECK_PRMS)
 
 
 def _ticks_ok(r):
     f = r.field
-    vals = [f.next_spawn, f.last_spawn, f.xf_t0, f.iris_t0] + \
+    vals = [f.next_spawn, f.last_spawn, f.xf_t0, f.iris_t0, f.ramp_t0, f.stand_t0] + \
         [f.r_t0[k] for k in range(fld.MAXR) if f.r_on[k]]
     return all(0 <= v < (1 << 30) for v in vals), vals
 
 
 def test_rings_and_heartbeats_steady_across_ticks_wrap():
-    if not HAVE_FB:
-        return
+    _need_fb()
     r = Renderer()
     kw = _warm(pulse_period_ms=500, heartbeat="TICK", heartbeat_every=1)
-    ev = _run_ticks(r, None, kw, (1 << 30) - 5000, 201)      # 10 s across the wrap
+    ev = _run(r, None, kw, 10000, t0=(1 << 30) - 5000)       # 10 s across the wrap
     ticks = [t for t, e in ev if e == "TICK"]
     assert len(ticks) == 21, ticks                           # every 500 ms, no stall
     ok, vals = _ticks_ok(r)
     assert ok, vals
     # MENU hold shifts ring clocks across the wrap too
-    menu = dict(screen="MENU", sub="0", intensity=0.55, speed_px_s=80, pulse_period_ms=500)
-    _run_ticks(r, None, menu, (1 << 30) - 300, 20)
+    _run(r, None, dict(MENU_KW, pulse_period_ms=500), 950, t0=(1 << 30) - 300)
     ok, vals = _ticks_ok(r)
     assert ok, vals
-    ev = _run_ticks(r, None, kw, 1500, 41)
+    ev = _run(r, None, kw, 2000, t0=1500)
     assert len([1 for t, e in ev if e == "TICK"]) >= 4
 
 
 def test_no_phantom_arrow_or_dark_field_at_high_ticks():
-    if not HAVE_FB:
-        return
-    from finder.compat import ticks_add
+    _need_fb()
     cap = FrameCapture()
     r = Renderer()
-    t0 = (1 << 29) + 5000
-    _run_ticks(r, cap, _warm(), t0, 60)
+    _run(r, cap, _warm(), 2950, t0=(1 << 29) + 5000)
     assert not r.arrow
     f = r.field
     assert f.fl > 77 and f.gl > 512 and f.pu > 1024, (f.fl, f.gl, f.pu)
     # a stale expire timestamp 2^29 ms old must not revive the dart
     r = Renderer()
     arrow = _warm(glyph="arrow", arrow_deg=40, cone_deg=31, arrow_style="solid_b")
-    _run_ticks(r, cap, arrow, 1000, 10)
-    _run_ticks(r, cap, _warm(), 1500, 20)
+    _run(r, cap, arrow, 450, t0=1000)
+    _run(r, cap, _warm(), 950, t0=1500)
     assert not r.arrow
-    _run_ticks(r, cap, _warm(), ticks_add(ticks_add(1500, 1 << 28), (1 << 28) + 100), 5)
+    _run(r, cap, _warm(), 200, t0=ticks_add(ticks_add(1500, 1 << 28), (1 << 28) + 100))
     assert not r.arrow
 
 
 def test_arrow_expire_shrink_only_on_same_zone_screen():
-    if not HAVE_FB:
-        return
+    _need_fb()
     cap = FrameCapture()
     arrow = dict(glyph="arrow", arrow_deg=0, cone_deg=20, arrow_style="solid_a")
     r = Renderer()
     _run(r, cap, _warm(screen="HOT", zone=3, **arrow), 1000)
-    found = dict(screen="FOUND", sub="celebrate", ramp="gold", intensity=1.0,
-                 speed_px_s=0, glow_r_px=90, glyph="check")
-    _fr(r, make_params(t_ms=T0 + 1050, **found), cap)
+    _fr(r, make_params(t_ms=T0 + 1050, **FOUND_KW), cap)
     assert not r.arrow
     from ui import ACC_FOUND
     assert _px(cap.buf, 120, 84) == ACC_FOUND
@@ -566,13 +586,122 @@ def test_arrow_expire_shrink_only_on_same_zone_screen():
     assert not r.arrow
 
 
-def test_calibrate_fill_follows_countdown_not_clock():
-    if not HAVE_FB:
-        return
+def test_wake_shows_current_state_without_intro():
+    # §8: the first frame after the screen was off is the current state. An
+    # arrow dropped while off stays gone (no expire shrink after the gap,
+    # §12), one re-aimed while off sits at its new angle at full size, and a
+    # banner raised while off is at rest.
+    _need_fb()
+    cap = FrameCapture()
+    walk = dict(sub="walk", glyph="arrow", cone_deg=31, arrow_style="solid_b")
+    r = Renderer()
+    _run(r, cap, _warm(arrow_deg=90, **walk), 1000)
+    assert _px(cap.buf, 155, 120) == PROX[6]               # the dart, pointing right
+    _run(r, None, _warm(arrow_deg=90, **walk), 1950, t0=T0 + 1050)
+    _run(r, None, _warm(), 30000, t0=T0 + 3050)
+    _fr(r, make_params(t_ms=T0 + 33100, **_warm()), cap)
+    assert not r.arrow
+    assert _px(cap.buf, 155, 120) == r.field.pal_arr[_ring_index(155, 120)]   # field, no dart
+    # at ticks >= 2^29 the banner clock's reset value 0 is in the future:
+    # the wake must still put a banner raised while dark at rest
+    r = Renderer()
+    t1 = (1 << 29) + 5000
+    _run(r, cap, _warm(arrow_deg=0, **walk), 1000, t0=t1)
+    _run(r, None, _warm(arrow_deg=90, banner=("SCAN AGAIN", "info", False), **walk),
+         1000, t0=ticks_add(t1, 1050))
+    _fr(r, make_params(t_ms=ticks_add(t1, 2100),
+                       **_warm(arrow_deg=90, banner=("SCAN AGAIN", "info", False), **walk)), cap)
+    assert r.arrow and not r._a_grow and r._a_q == 90 * 16
+    assert _px(cap.buf, 155, 120) == PROX[6]
+    assert r.bot_dy == 0
+
+
+def test_toast_falls_out():
+    # tokens motion toast_out: 150 ms in_cubic, then the word/readout returns
+    _need_fb()
+    from ui.renderer import B_READOUT, B_TOAST
     cap = FrameCapture()
     r = Renderer()
-    cal = dict(screen="PAIRING", sub="calibrate", glyph="countdown", countdown=3,
-               top_text="STAND 1 STEP APART", word="HOLD STILL", speed_px_s=0)
+    _run(r, cap, _warm(banner=("BACK IN RANGE", "info", False)), 500)
+    dys = []
+    for k in range(4):
+        _fr(r, make_params(t_ms=T0 + 550 + 50 * k, **_warm()), cap)
+        dys.append(r.bot_dy if r.bot == B_TOAST else None)
+    assert dys[0] == 0 and dys[2] > 0 and dys[3] is None, dys
+    assert r.bot == B_READOUT
+    # a new banner during the exit rises in again
+    _fr(r, make_params(t_ms=T0 + 800, **_warm(banner=("SCAN AGAIN", "info", False))), cap)
+    _fr(r, make_params(t_ms=T0 + 850, **_warm()), cap)
+    _fr(r, make_params(t_ms=T0 + 900, **_warm(banner=("SCAN AGAIN", "info", False))), cap)
+    assert r.bot == B_TOAST and r.bot_dy == 12
+
+
+def _level_probe():
+    """Wrap the palette kernel so each build also records the area-weighted
+    mean field level (ramp steps): the same kernel run on copies with
+    identity LUTs, the iris as level 0 and the rim at its ramp level."""
+    m = fld.build_map(240)
+    wts = [0] * 170
+    for b in m:
+        wts[b] += 1
+    orig = fld.pal_kernel
+    means = []
+
+    def probe(pal, acc, tab, prm):
+        tid = array.array("H", tab)
+        for j in range(64):
+            tid[fld.T_LUT + j] = j
+            tid[fld.T_GLUT + j] = j
+        q = array.array("i", prm)
+        q[fld.P_IRISC] = 0
+        q[fld.P_RIM] = -1
+        lv = array.array("H", [0] * 256)
+        orig(lv, array.array("i", acc), tid, q)
+        means.append(sum(wts[i] * lv[i] for i in range(170)) / (9.0 * 240 * 240))
+        orig(pal, acc, tab, prm)
+
+    return probe, orig, means
+
+
+def test_flash_limit_across_transitions():
+    # §4 / §11: no full-field change > 2 ramp steps in 333 ms. The calibrate
+    # fill and the FOUND standing wave used to switch off in one frame.
+    _need_fb()
+    cal = rs._cal
+    split = dict(rs._pair, sub="split", glyph="countdown", countdown=24, top_text="NO PEEKING",
+                 word="SPLIT UP")
+    hot_split = dict(split, zone=3, intensity=0.9, speed_px_s=120, pulse_period_ms=500,
+                     wavelength_px=None, glow_r_px=56)
+    probe, orig, means = _level_probe()
+    fld.pal_kernel = probe
+    try:
+        for phases in (
+                [(0, dict(cal, countdown=3)), (1000, dict(cal, countdown=2)),
+                 (2000, dict(cal, countdown=1)), (3000, split)],
+                [(0, HOT_KW), (1000, dict(FOUND_KW, burst=True)), (1050, FOUND_KW),
+                 (4000, hot_split)],
+                [(0, FOUND_KW), (3000, split)]):
+            del means[:]
+            r = Renderer()
+            cap = FrameCapture()
+            for k in range(len(phases)):
+                end = phases[k + 1][0] if k + 1 < len(phases) else phases[k][0] + 1500
+                t = phases[k][0]
+                while t < end:
+                    _fr(r, make_params(t_ms=T0 + t, **phases[k][1]), cap)
+                    t += 50
+            for i in range(len(means)):
+                for j in range(i + 1, min(i + 7, len(means))):      # windows <= 300 ms
+                    assert abs(means[j] - means[i]) <= 2.0, (phases[-1][0], i, j, means[i], means[j])
+    finally:
+        fld.pal_kernel = orig
+
+
+def test_calibrate_fill_follows_countdown_not_clock():
+    _need_fb()
+    cap = FrameCapture()
+    r = Renderer()
+    cal = dict(rs._cal, countdown=3)
     _run(r, cap, cal, 500)
     fr = r.field.prm[fld.P_FILL_R]
     assert 78 <= fr <= 82, fr                        # ~500 ms of 3000
@@ -589,101 +718,106 @@ def test_calibrate_fill_follows_countdown_not_clock():
 
 
 def test_unreliable_status_bars_warn():
-    if not HAVE_FB:
-        return
+    _need_fb()
     from ui import TEXT_SEC, WARN
     cap = FrameCapture()
     r = Renderer()
-    _fr(r, make_params(t_ms=T0, **_warm(status=(80, 80, 3, True))), cap)
+    # §5.5: while unreliable the pinned strip shows the link bars in status.warn
+    _fr(r, make_params(t_ms=T0, **_warm(status=(80, 80, 3, True, False))), cap)
     assert _px(cap.buf, 110, 27) == TEXT_SEC
     _fr(r, make_params(t_ms=T0 + 50, **_warm(status=(80, 80, 3, True, True))), cap)
     assert _px(cap.buf, 110, 27) == WARN
 
 
 def test_hint_chip_outranks_pinned_status():
-    if not HAVE_FB:
-        return
+    _need_fb()
     from ui.renderer import T_CHIP, T_STATUS
     cap = FrameCapture()
     r = Renderer()
-    _fr(r, make_params(t_ms=T0, **_warm(status=(15, 80, 4, True),
+    _fr(r, make_params(t_ms=T0, **_warm(status=(15, 80, 4, True, False),
                                          top_text="TAP WATCHES")), cap)
     assert r.top == T_CHIP
-    _fr(r, make_params(t_ms=T0 + 50, screen="LINK_LOST", ramp="grey", speed_px_s=-30,
-                        pulse_period_ms=3000, glyph="seeker", dist_band="~20",
-                        dist_stale=True, status=(15, 80, 0, True)), cap)
+    _fr(r, make_params(t_ms=T0 + 50, **dict(rs._lost, status=(15, 80, 0, True, False))), cap)
     assert r.top == T_STATUS                          # strip outranks LAST
 
 
 def test_sticky_banner_rises_once():
-    if not HAVE_FB:
-        return
+    _need_fb()
     cap = FrameCapture()
     r = Renderer()
-    lost = dict(screen="LINK_LOST", ramp="grey", speed_px_s=-30, pulse_period_ms=3000,
-                glyph="seeker")
     dys = []
     for k in range(60):
         s = "LOST 0:%02d" % (k // 20)
-        _fr(r, make_params(t_ms=T0 + 50 * k, banner=(s, "warn", True), **lost), cap)
+        _fr(r, make_params(t_ms=T0 + 50 * k, **dict(rs._lost, banner=(s, "warn", True))), cap)
         dys.append(r.bot_dy)
     assert dys[0] == 12 and max(dys[5:]) == 0, dys
     # a different non-sticky toast is a new toast and rises again
-    _fr(r, make_params(t_ms=T0 + 3000, banner=("SCAN AGAIN", "info", False), **lost), cap)
-    _fr(r, make_params(t_ms=T0 + 3050, banner=("BACK IN RANGE", "info", False), **lost), cap)
+    for k, s in enumerate(("SCAN AGAIN", "BACK IN RANGE")):
+        _fr(r, make_params(t_ms=T0 + 3000 + 50 * k,
+                           **dict(rs._lost, banner=(s, "info", False))), cap)
     assert r.bot_dy == 12
 
 
 def test_scan_result_morphs_best_bin_into_dart():
-    if not HAVE_FB:
-        return
+    _need_fb()
     cap = FrameCapture()
     r = Renderer()
     bins = [0.2] * 12
     bins[3] = 1.0
-    res = dict(screen="SCANNING", sub="result", glyph="turn", intensity=0.5,
-               speed_px_s=80, pulse_period_ms=1000)
+    res = rs._result
     for k in range(25):                                  # 0..1200 ms
         e = 50 * k
         act = 3 if (e < 800 and not (e // 200) & 1) else None
-        _fr(r, make_params(t_ms=T0 + e, sweep=(360.0, bins, act, False), **res), cap)
+        _fr(r, make_params(t_ms=T0 + e, sweep=(100.0, bins, act, False), **res), cap)
         if e == 700:
             assert not r.arrow and r.morph == -1
         if e == 900:
             assert r.arrow and r.morph == 3 and 0 < r.morph_e < 256
     assert r.morph == 3 and r.morph_e == 256
-    # dart at 90 deg (bin 3): body right of centre, not the turn glyph
+    # dart at theta 100 deg (bin 3): body right of centre, not the turn glyph
     assert _px(cap.buf, 150, 120) in (PROX[7], PROX[6]), hex(_px(cap.buf, 150, 120))
-    # reveal: no second scale-in; the dart glides from 90 deg toward theta
+    # reveal: no second scale-in; the dart is already at theta
     _fr(r, make_params(t_ms=T0 + 1250, **_warm(sub="reveal", glyph="arrow", arrow_deg=100,
                                                 cone_deg=31, arrow_style="solid_a")), cap)
     assert r.arrow and not r._a_grow
-    assert 90 * 16 <= r._a_q < 100 * 16
+    assert r._a_q == 100 * 16
 
 
 # ---- snapshot review round (visual defects) --------------------------------------
-def _turn(pacer, inten=1.0):
+def _turn(pacer):
+    # the halo is the live mirror: Game sends glow_r 12 in turn as in the sweep
     return _warm(sub="turn", glyph="arrow", arrow_deg=40, cone_deg=33, arrow_style="solid_b",
-                 intensity=inten, word="TURN RIGHT", heartbeat=None,
+                 intensity=1.0, glow_r_px=12, word="TURN RIGHT", heartbeat=None,
                  sweep=(pacer, (None,) * 12, None, False))
 
 
 def test_turn_halo_is_live_mirror_not_zone_glow():
-    if not HAVE_FB:
-        return
+    _need_fb()
     cap = FrameCapture()
     r = Renderer()
     _run(r, cap, _turn(60), 1000)
-    assert r.field.gr == 12 * 256, r.field.gr          # glow_r 12, not 20 + 40 I
+    assert r.field.gr == 12 * 256, r.field.gr
     assert r.field.gl == 256 + 5 * 256                  # glow_amp 1 + 5 I at I = 1
     # the pacer has a bg.base keyline: 1 px outside its r 110 edge at 60 deg
     assert _px(cap.buf, 120 + 96, 120 - 56) == 0, hex(_px(cap.buf, 216, 64))
     assert _px(cap.buf, 120 + 87, 120 - 50) == PROX[6]
 
 
+def test_static_face_it_keeps_zone_glow():
+    # static arrow mode: FACE IT is sub "turn" too but has no pacer sweep, so
+    # its halo keeps the zone levels (§4 rule 1), not the live mirror
+    _need_fb()
+    cap = FrameCapture()
+    r = Renderer()
+    kw = _warm(sub="turn", glyph="arrow", arrow_deg=40, cone_deg=33, arrow_style="solid_b",
+               word="FACE IT", heartbeat=None)
+    _run(r, cap, kw, 1000)
+    iq = int(make_params(**kw).intensity * 256)
+    assert r.field.gl == fld.GL_A + ((fld.GL_B * iq) >> 8), r.field.gl
+
+
 def test_turn_pacer_behind_yields_bottom_slot():
-    if not HAVE_FB:
-        return
+    _need_fb()
     from ui.renderer import B_NONE, B_WORD, T_NONE
     cap = FrameCapture()
     r = Renderer()
@@ -695,8 +829,7 @@ def test_turn_pacer_behind_yields_bottom_slot():
 
 
 def test_readout_keeps_mark_slot_while_arrow_up():
-    if not HAVE_FB:
-        return
+    _need_fb()
     cap = FrameCapture()
     r = Renderer()
     walk = dict(sub="walk", glyph="arrow", arrow_deg=0, cone_deg=31, arrow_style="solid_b")
@@ -732,37 +865,35 @@ def test_core_never_dimmer_than_new_crest():
     lvl = {lut[j]: j for j in range(64)}
     iq = 140
     f.dt = 50
-    f.set_levels(0, 77 + ((333 * iq) >> 8), 512 + 4 * iq, 1024 + ((384 * iq) >> 8),
-                 42 * 256, False)
+    f.set_levels(0, fld.FL_A + ((fld.FL_B * iq) >> 8), fld.GL_A + ((fld.GL_B * iq) >> 8),
+                 fld.PU_A + ((fld.PU_B * iq) >> 8), 42 * 256, False)
     f.set_iris(0, 0)
     f.started = True
     f.spawn(0, 0, 80, f.pu, 3, 18, False)
     for t in (100, 150, 200):
-        f.build(t, core=True)
+        f.build(t, core=CORE)
         core = min(lvl[f.pal_arr[i]] for i in range(7))
         ring = max(lvl[f.pal_arr[i]] for i in range(7, 19))
         assert core >= ring, (t, core, ring)
 
 
 def test_digit_one_flag_joins_stem():
-    if not HAVE_FB:
-        return
+    _need_fb()
     rows = font.char_rows("1")
     stem = rows[0]
     for r in (1, 2):                          # flag grows left from the stem top
         assert rows[r] & stem == stem and rows[r] & ~stem & 0xFF, r
-    assert rows[1] & ~stem & 0xFF & (rows[2] << 1) or rows[1] & rows[2]
+    # the flag is a diagonal: each row's flag pixel sits left of the one below
+    assert rows[1] & ~stem & 0xFF & (rows[2] << 1)
 
 
 def test_menu_backplate_hides_frozen_rings():
-    if not HAVE_FB:
-        return
+    _need_fb()
     from ui import BG_BASE
     cap = FrameCapture()
     r = Renderer()
     _run(r, cap, _warm(), 600)
-    menu = dict(screen="MENU", sub="0", intensity=0.55, speed_px_s=80, pulse_period_ms=1000)
-    _run(r, cap, menu, 300, t0=T0 + 650)
+    _run(r, cap, MENU_KW, 300, t0=T0 + 650)
     for y in (73, 117, 161):                   # the 4 px gaps between rows
         for x in (40, 120, 200):
             assert _px(cap.buf, x, y) == BG_BASE, (x, y)
@@ -771,52 +902,50 @@ def test_menu_backplate_hides_frozen_rings():
 def test_menu_scroll_triangles_and_highlight():
     """ui-spec MENU: triangles at x 207-213 (up y 36-41, down y 195-200) only when
     rows are hidden that way; the PROX[5] border marks the visible index in ``sub``."""
-    if not HAVE_FB:
-        return
+    _need_fb()
     from ui import TEXT_SEC
-    menu = dict(intensity=0.55, speed_px_s=80, pulse_period_ms=1000, screen="MENU")
     for sub, up, dn, k_sel in (("0v", False, True, 0), ("3^", True, False, 3),
                                ("2^v", True, True, 2), ("1", False, False, 1)):
         cap = FrameCapture()
         r = Renderer()
-        _run(r, cap, dict(sub=sub, **menu), 100)
+        _run(r, cap, dict(MENU_KW, sub=sub), 100)
         assert (_px(cap.buf, 210, 39) == TEXT_SEC) == up, sub
         assert (_px(cap.buf, 210, 197) == TEXT_SEC) == dn, sub
         for k in range(4):
-            y = (32, 76, 120, 164)[k] + 20             # row's left border, mid-height
+            y = T.MENU_ROWS_Y[k] + 20                  # row's left border, mid-height
             assert (_px(cap.buf, 24, y) == PROX[5]) == (k == k_sel), (sub, k, hex(_px(cap.buf, 24, y)))
 
 
 def test_scan_active_bin_drawn_over_wedge():
-    if not HAVE_FB:
-        return
+    _need_fb()
     cap = FrameCapture()
     r = Renderer()
     bins = [0.5] * 12
-    sw = dict(screen="SCANNING", sub="sweep", glyph="turn", intensity=0.5, glow_r_px=12,
-              speed_px_s=80, pulse_period_ms=1000)
+    sw = dict(rs._scan, sub="sweep", glyph="turn", glow_r_px=12)
     _run(r, cap, dict(sweep=(90, bins, 3, False), **sw), 200)
     # bin 3 (90 deg) sits mid-wedge: its prox.5 bar shows at r 75 on the wedge
     assert _px(cap.buf, 195, 120) == PROX[5], hex(_px(cap.buf, 195, 120))
     assert _px(cap.buf, 225, 120) == PROX[6]               # wedge lit past the bar
 
 
-def test_no_allocation_turn_sweep_menu():
-    if not HAVE_FB:
-        return
+def test_no_allocation_steady_frames():
+    _need_fb()
     bins = [0.2, None, 0.6, 0.9, 1.0, 0.75, 0.4, None, 0.15, 0.1, None, 0.05]
     cases = (
+        _warm(glyph="arrow", arrow_deg=30, cone_deg=31, arrow_style="solid_b", trend=1,
+              top_text="TAP TO SCAN", status=(64, 71, 3, False, False)),
         _turn(170),
-        dict(screen="SCANNING", sub="sweep", glyph="turn", intensity=0.5, glow_r_px=12,
-             speed_px_s=80, pulse_period_ms=1000, sweep=(100, bins, 3, False)),
-        dict(screen="MENU", sub="1", intensity=0.55, speed_px_s=80, pulse_period_ms=1000),
+        dict(rs._scan, sub="sweep", glyph="turn", glow_r_px=12, sweep=(100, bins, 3, False)),
+        dict(MENU_KW, sub="1"),
         # the subs Game really emits: suffix parsing + scroll triangles (fb.poly)
-        dict(screen="MENU", sub="0v", intensity=0.55, speed_px_s=80, pulse_period_ms=1000),
-        dict(screen="MENU", sub="3^", intensity=0.55, speed_px_s=80, pulse_period_ms=1000),
-        dict(screen="MENU", sub="2^v", intensity=0.55, speed_px_s=80, pulse_period_ms=1000),
+        dict(MENU_KW, sub="0v"),
+        dict(MENU_KW, sub="3^"),
+        dict(MENU_KW, sub="2^v"),
         _warm(sub="walk", glyph="arrow", arrow_deg=0, cone_deg=31, arrow_style="solid_b",
               trend=0),
     )
+    # float params are converted once per params object and heartbeat event
+    # lists are reused, so a steady frame loop allocates nothing
     for kw in cases:
         r = Renderer()
         cap = FrameCapture()
@@ -829,3 +958,142 @@ def test_no_allocation_turn_sweep_menu():
             _fr(r, ps[k], cap)
         grown = gc.mem_alloc() - a0
         assert grown < 512, (kw.get("screen"), kw.get("sub"), grown)
+
+
+# ---- review round 2 regressions --------------------------------------------------
+def _luma(c):
+    n = swap16(c)
+    return 299 * ((n >> 11) << 1) + 587 * ((n >> 5) & 63) + 114 * ((n & 31) << 1)
+
+
+def test_sun_ghost_rings_lifted_with_field():
+    # §8 sun mode lifts the ramp LUT one stop; a ghost ring (§4 rule 5: drawn
+    # where v_ghost > v) must be lifted too, or it is a dark notch in the field
+    _need_fb()
+    orig = fld.pal_kernel
+    won = []
+    darker = []
+
+    def probe(pal, acc, tab, prm):
+        q = array.array("i", prm)
+        q[fld.P_GHOST] = 0
+        plain = array.array("H", [0] * 256)
+        orig(plain, array.array("i", acc), tab, q)
+        orig(pal, acc, tab, prm)
+        for i in range(170):
+            if pal[i] != plain[i]:
+                won.append(i)
+                if _luma(pal[i]) < _luma(plain[i]):
+                    darker.append(i)
+
+    fld.pal_kernel = probe
+    try:
+        _run(Renderer(), FrameCapture(),
+             dict(screen="SEARCHING", zone=None, ramp="grey", intensity=0.15, speed_px_s=-36,
+                  pulse_period_ms=3200, glow_r_px=18, ring_live=False, glyph="seeker", sun=True),
+             5000)
+    finally:
+        fld.pal_kernel = orig
+    assert won and not darker, (len(won), darker[:10])
+
+
+def test_menu_freezes_found_standing_wave():
+    # ui-spec MENU: the field is frozen, so the FOUND standing wave stops
+    # breathing under a menu opened from FOUND
+    _need_fb()
+    r = Renderer()
+    cap = FrameCapture()
+    _run(r, cap, dict(FOUND_KW, sub="result"), 3000)
+    menu = dict(MENU_KW, ramp="gold", zone=3, speed_px_s=0, pulse_period_ms=1200)
+    _run(r, cap, menu, 700, t0=T0 + 3050)                 # past the 600 ms dim slew
+    pal = list(r.field.pal_arr)
+    for k in range(12):
+        _fr(r, make_params(t_ms=T0 + 3800 + 100 * k, **menu), cap)
+        assert list(r.field.pal_arr) == pal, k
+
+
+def test_zone_tempo_rings_use_zone_widths():
+    # §5.3: lead / trail are part of the zone tempo, also where Game plays it
+    # outside FAR..HOT (PAIRING split, SCANNING ready)
+    _need_fb()
+    for kw, z in ((rs.hunt(3, screen="PAIRING", sub="split", glyph="countdown", countdown=24,
+                           heartbeat=None), 3),
+                  (dict(rs._scan, sub="ready", glyph="countdown", countdown=3), 2)):
+        r = Renderer()
+        _run(r, None, kw, 1500)
+        f = r.field
+        rings = [k for k in range(fld.MAXR) if f.r_on[k]]
+        assert rings, kw["screen"]
+        for k in rings:
+            assert (f.r_lead[k], f.r_trail[k]) == (T.ZONE_LEAD_PX[z], T.ZONE_TRAIL_PX[z]), \
+                (kw["screen"], f.r_lead[k], f.r_trail[k])
+
+
+def test_ring_schedule_retimes_on_period_change():
+    # §5.3 tempo change: a shorter period times the next ring from the last
+    # spawn instead of waiting out the old period
+    f = fld.RippleField()
+    assert f.schedule(0, 2400, 64 << 8, 40, 3, 22, True, False) == 1
+    assert f.next_spawn == 2400
+    assert f.schedule(300, 500, 64 << 8, 56, 3, 20, True, False) == 0
+    assert f.next_spawn == 500
+    assert f.schedule(500, 500, 64 << 8, 56, 3, 20, True, False) == 1 and f.last_spawn == 500
+
+
+def test_wake_wedge_at_current_angle():
+    # §8: a wedge that moved while the screen was off is drawn at its current
+    # angle on wake, not glided from the angle before the gap
+    _need_fb()
+    from ui import glyphs as gl
+    cap = FrameCapture()
+    r = Renderer()
+    _run(r, cap, _turn(60), 200)
+    _run(r, None, _turn(150), 500, t0=T0 + 250)
+    _fr(r, make_params(t_ms=T0 + 800, **_turn(150)), cap)
+    got = list(gl._wedge)
+    gl.prep_wedge(150)
+    assert got == list(gl._wedge)
+
+
+def test_glyph_culling_boxes_cover_glyphs():
+    # G_Y0/G_Y1 are typed in, the glyph geometry comes from tokens: a box
+    # that stops covering its glyph clips it at a strip edge
+    _need_fb()
+    from ui import renderer as R
+    cases = list(rs.FIXTURES) + [       # plus the widest beam all round
+        ("arrow_%d" % d, [(0, _warm(glyph="arrow", arrow_deg=d, cone_deg=60,
+                                    arrow_style="outline"))], 400) for d in range(0, 360, 45)]
+    r = Renderer()
+    a = FrameCapture()
+    b = FrameCapture()
+    y0, y1 = R.G_Y0, R.G_Y1
+    for name, phases, run_ms in cases:
+        rs.render_fixture(r, a, name, phases, run_ms)
+        R.G_Y0 = (0,) * 10
+        R.G_Y1 = (240,) * 10
+        try:
+            rs.render_fixture(r, b, name, phases, run_ms)
+        finally:
+            R.G_Y0, R.G_Y1 = y0, y1
+        assert a.buf == b.buf, name
+
+
+def test_fixtures_match_snapshots():
+    # every snapshot fixture still renders the frame its PNG was made from
+    # (frame CRCs in tests/snapshot_crc.json, written by render_snapshots)
+    _need_fb()
+    import binascii
+    import json
+    try:
+        with open(rs.CRC_FILE) as f:
+            crc = json.load(f)
+    except OSError:
+        raise AssertionError(rs.CRC_FILE + " missing: run python3 tools/render_snapshots.py")
+    r = Renderer()
+    cap = FrameCapture()
+    stale = []
+    for name, phases, run_ms in rs.FIXTURES:
+        rs.render_fixture(r, cap, name, phases, run_ms)
+        if crc.get(name) != binascii.crc32(cap.buf):
+            stale.append(name)
+    assert not stale, "re-render the snapshots (python3 tools/render_snapshots.py): %s" % stale

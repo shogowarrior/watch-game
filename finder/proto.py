@@ -10,7 +10,7 @@
       8 H   steps        u16 step count, wraps (use ``steps_delta``)
      10 B   activity     ACT_* code (finder.estimators.base)
      11 B   battery      percent 0..100, BATT_UNKNOWN if unknown
-     12 B   game_state   game-defined
+     12 B   game_state   screen code + ST_* bits, see finder/session.py (bump VERSION if it changes)
      13 B   flags        bit0 sweeping, bits1-3 tap counter (mod 8), bit4 walking
      14 H   bump_ago_ms  ms since my last bump spike; BUMP_NONE = none / too old
 
@@ -24,7 +24,7 @@ from finder.compat import const, ticks_diff
 FMT = "<2sBBHbbHBBBBH"
 SIZE = const(16)
 MAGIC = b"SK"
-VERSION = const(1)
+VERSION = const(3)         # 3: state screen code 9 = SC_PAIRED (PAIRING calibrate/split)
 
 RSSI_NONE = const(-128)
 BUMP_NONE = const(0xFFFF)
@@ -84,10 +84,6 @@ def seq_of(buf):
     return buf[4] | (buf[5] << 8)
 
 
-def bump_ago_of(buf):
-    return buf[14] | (buf[15] << 8)
-
-
 def _i8(v):
     return v - 256 if v > 127 else v
 
@@ -95,12 +91,11 @@ def _i8(v):
 class Beacon:
     """Mutable beacon fields; reuse one instance for TX and one for RX."""
 
-    __slots__ = ("game_id", "version", "seq", "rssi_last", "rssi_filt", "steps",
+    __slots__ = ("game_id", "seq", "rssi_last", "rssi_filt", "steps",
                  "activity", "battery", "state", "flags", "bump_ago_ms")
 
     def __init__(self, game_id=0):
         self.game_id = game_id
-        self.version = VERSION
         self.seq = 0
         self.rssi_last = RSSI_NONE
         self.rssi_filt = RSSI_NONE
@@ -149,7 +144,6 @@ class Beacon:
         """Decode fields from ``buf`` (no validation, no allocation)."""
         b = buf
         o = off
-        self.version = b[o + 2]
         self.game_id = b[o + 3]
         self.seq = b[o + 4] | (b[o + 5] << 8)
         self.rssi_last = _i8(b[o + 6])

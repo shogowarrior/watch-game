@@ -2,9 +2,14 @@
 #
 # Skip the app (REPL stays free for mpremote / the notebook) by creating
 # /noapp (tools/deploy.py --noapp) or by double-pressing, or holding, the side
-# key within the first second after boot. Ctrl-C stops the game (on battery the
-# hardware watchdog then reboots within 8 s; on USB it is switched off); then
-# ``import app; app.rt.print_stats()`` shows the loop timing.
+# key within the first second after boot. Ctrl-C stops the game; then
+# ``import app; app.rt.print_stats()`` shows the loop timing. With /tele
+# (tools/deploy.py --tele A) the game logs telemetry to /log. The watchdog
+# (hal/watchdog.py) is the stoppable soft one while the game has only run on
+# USB, and the ESP32 hardware WDT from the first battery reading off USB. A
+# game started on battery keeps the hardware WDT after USB is plugged in, so
+# Ctrl-C then reboots the watch within 8 s (tools/deploy.py hard-resets first
+# for this reason).
 
 from hal.board import Board, safe_boot
 
@@ -22,7 +27,15 @@ else:
         except ImportError as e:  # app/ is a package with no imports of its own
             print("app/ not deployed (python3 tools/deploy.py copies it):", e)
         else:
-            app.run(board, watchdog_ms=8000)   # hal/watchdog.py: reboots a hung loop
+            kw = {}
+            try:                                # field-test switch: tools/deploy.py --tele A
+                with open("/tele") as f:
+                    dev = f.read().strip() or "A"
+                from app.telemetry import session
+                kw["telemetry"] = session(dev)  # appends to /log/<n>_<dev>.jsonl
+            except OSError:
+                pass                            # no /tele (or no /log): no telemetry
+            app.run(board, watchdog_ms=8000, **kw)   # hal/watchdog.py: reboots a hung loop
     except KeyboardInterrupt:
         print("stopped: import app; app.rt.print_stats()")
     except Exception as e:  # noqa: BLE001 - keep the REPL reachable

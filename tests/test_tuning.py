@@ -2,33 +2,98 @@ import math
 import sys
 
 from finder import tuning as T
+from tests import Skip
 
 
-def _cpython_with_docs():
+def _gen():
+    """(tools/gen_tuning module, parsed tokens.json); CPython only."""
     if sys.implementation.name != "cpython":
-        return None
-    import os
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if not os.path.exists(os.path.join(root, "docs", "design", "tokens.json")):
-        return None
-    return root
+        raise Skip("needs CPython + docs/design/tokens.json")
+    import json
+    from tools import gen_tuning
+    with open(gen_tuning.TOKENS) as f:
+        return gen_tuning, json.load(f)
+
+
+def _rejects(gen, tok, edit, errors=(ValueError,)):
+    """True if ``gen.build`` fails on a copy of ``tok`` changed by ``edit``."""
+    import copy
+    t = copy.deepcopy(tok)
+    edit(t)
+    try:
+        gen.build(t)
+    except errors:
+        return True
+    return False
 
 
 def test_generated_file_up_to_date():
-    root = _cpython_with_docs()
-    if root is None:
-        print("SKIP test_generated_file_up_to_date: needs CPython + docs/design/tokens.json")
-        return
-    import os
-    sys.path.insert(0, os.path.join(root, "tools"))
-    try:
-        import gen_tuning
-    finally:
-        sys.path.pop(0)
-    with open(os.path.join(root, "finder", "tuning.py")) as f:
+    gen, _tok = _gen()
+    with open(gen.OUT) as f:
         cur = f.read()
-    assert gen_tuning.generate() == cur, "finder/tuning.py is stale: run python3 tools/gen_tuning.py"
-    assert gen_tuning.main(["--check"]) == 0
+    assert gen.generate() == cur, "finder/tuning.py is stale: run python3 tools/gen_tuning.py"
+
+
+def test_generator_rejects_changed_token_strings():
+    """Token strings that carry numbers must match their whole template, and
+    no token falls back to a default: a reworded token fails the generator."""
+    gen, tok = _gen()
+    gen.build(tok)
+
+    def fails(edit):
+        return _rejects(gen, tok, edit, (ValueError, KeyError))
+
+    def squared(*path):
+        def edit(t):
+            for k in path[:-1]:
+                t = t[k]
+            t[path[-1]] += "^2"
+        return edit
+
+    for path in (("field", "intensity_map", "floor"), ("field", "intensity_map", "glow_r_px"),
+                 ("thresholds", "proximity", "formula"), ("thresholds", "arrow", "sigma_model"),
+                 ("thresholds", "found", "requires"),
+                 ("field", "standing_wave"), ("field", "ghost_rings"), ("field", "iris"),
+                 ("motion", "flash_limit"), ("motion", "temporal_aa"), ("haptics", "queue")):
+        assert fails(squared(*path)), path
+    assert fails(lambda t: t["thresholds"]["calibrate"].pop("n_indoor"))
+    assert fails(lambda t: t["thresholds"]["found"].update(
+        requires=t["thresholds"]["found"]["requires"].replace("~5", "~7")))     # not a band label
+
+
+def test_generator_rejects_disagreeing_copies():
+    """A value tokens.json holds twice must agree, or the generator fails."""
+    gen, tok = _gen()
+
+    def fails(edit):
+        return _rejects(gen, tok, edit)
+
+    assert fails(lambda t: t["power"]["backlight"].update(low_battery=0.5))
+    assert fails(lambda t: t["motion"]["use"]["sweep_rotation"].update(deg_per_s=40))
+    # scan.py hard-codes the 3-2-1 countdown, 30 deg bins and one full turn
+    assert fails(lambda t: t["thresholds"]["scan"].update(ready_ms=5000))
+    assert fails(lambda t: t["thresholds"]["scan"].update(bins=8))
+    assert fails(lambda t: t["thresholds"]["scan"].update(duration_ms=10000))
+    assert fails(lambda t: t["field"]["intensity_map"].update(glow_r_px="20 + 40*I (FOUND 80)"))
+    assert fails(lambda t: t["states"]["FOUND"].update(glow_r=80))
+    assert fails(lambda t: t["motion"]["duration_ms"].update(breathe_found=1200))
+    assert fails(lambda t: t["motion"]["duration_ms"].update(breathe_pairing=3000))
+    assert fails(lambda t: t["motion"]["duration_ms"].update(hue_crossfade=1000))
+    assert fails(lambda t: t["glyphs"]["link_bars"].update(count=5))
+    for st in ("PAIRING", "SEARCHING", "LINK_LOST"):
+        assert fails(lambda t: t["states"][st].update(wavelength_px=t["states"][st]["wavelength_px"] + 5)), st
+
+
+def test_tokens_keep_no_spec_copies():
+    """tokens.json wins over ui-spec (AGENTS rule 8), so it holds no stale copies:
+    per-screen glyphs, copy and haptics live in ui-spec §6/§7, iris radii in
+    layout, and the iris rim floor comes from field.iris."""
+    gen, tok = _gen()
+    for name, st in tok["states"].items():
+        assert not set(st) & {"glyph", "text", "haptic", "iris_r"}, name
+    tok["field"]["iris"] = tok["field"]["iris"].replace("max(5,", "max(6,")
+    built = dict((n, v) for _title, rows in gen.build(tok) for n, v, _c in rows)
+    assert built["IRIS_RIM_MIN_LEVEL"] == 6.0 and T.IRIS_RIM_MIN_LEVEL == 5.0
 
 
 def test_header_and_version():
@@ -55,11 +120,13 @@ def test_zone_tempo_matches_spec_table():
     spec_wl = (96, 90, 80, 60)
     for z in range(4):
         wl = T.ZONE_SPEED_PX_S[z] * T.ZONE_PERIOD_MS[z] / 1000.0
-        assert abs(T.ZONE_WAVELENGTH_PX[z] - wl) < 1e-9
         assert abs(wl - spec_wl[z]) <= 1.0
         assert T.ZONE_HEARTBEAT[z] in T.HAPTIC_PATTERNS
     assert T.ZONE_HB_EVERY == (2, 1, 1, 1)
     assert T.ZONE_HEARTBEAT[2] == "DOUBLE"
+    assert T.ZONE_PERIOD_MS == (2400, 1600, 1000, 500)
+    assert T.ZONE_SPEED_PX_S == (40.0, 56.0, 80.0, 120.0)
+    assert T.ZONE_LEAD_PX == (3, 3, 3, 3) and T.ZONE_TRAIL_PX == (22, 20, 18, 14)
 
 
 def test_intensity_map_sun_floor():
@@ -70,22 +137,13 @@ def test_intensity_map_sun_floor():
     assert T.GLOW_R_A == 20.0 and T.GLOW_R_B == 40.0 and T.GLOW_R_FOUND == 90.0
 
 
-def test_proximity_reference_values():
-    def prox(d):
-        p = math.log(T.PROX_D_FAR_M / max(d, T.PROX_D_MIN_M)) / T.PROX_LN_RATIO
-        return min(1.0, max(0.0, p))
-    for d, p in ((55, 0.03), (28, 0.22), (14, 0.43), (7, 0.63), (3, 0.88)):
-        assert abs(prox(d) - p) < 0.01, (d, prox(d))
-    assert prox(60) == 0.0 and prox(2) > 0.999
-
-
 def test_calibration_matches_path_loss_defaults():
     from finder.estimators import make
     pl = make().pl                      # the estimator the game runs
     assert T.P1M_NOMINAL_DBM == pl.p0
     assert T.PATH_LOSS_N == pl.n
     assert T.PATH_LOSS_N_INDOOR > T.PATH_LOSS_N
-    assert T.CAL_AT_M == 1.0 and T.CAL_CLAMP_DB == 6.0
+    assert T.CAL_CLAMP_DB == 6.0
 
 
 def test_sigma_model_and_tiers():
@@ -117,39 +175,26 @@ def _swap(c):
     return ((c & 0xFF) << 8) | (c >> 8)
 
 
-def _rgb565(rgb):
-    r, g, b = rgb
-    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
-
-
-def test_colours_swapped_and_rgb_agree():
-    for name, sw in T.COLOR_SWAPPED.items():
-        assert _swap(_rgb565(T.COLOR_RGB[name])) == sw, name
-    assert T.C_BG_IRIS == 0x6100 and T.C_BG_IRIS_RGB == (0, 12, 8)
-    assert T.C_ACCENT_FOUND == T.COLOR_SWAPPED["found.5"]
-    assert T.C_GLYPH_ARROW == T.COLOR_SWAPPED["prox.7"]
-
-
 def test_ramps():
-    prefix = {"green": "prox.", "gold": "found.", "grey": "grey."}
     for r in T.RAMP_NAMES:
-        assert len(T.RAMP_HEX[r]) == len(T.RAMP_SWAPPED[r]) == len(T.RAMP_RGB[r]) == 8
+        stops = T.RAMP_SWAPPED[r]
         lut = T.RAMP_LUT[r]
-        assert len(lut) == T.RAMP_LUT_SIZE == 64
+        assert len(stops) == 8 and len(lut) == 64
         for k in range(8):
-            assert T.RAMP_SWAPPED[r][k] == T.COLOR_SWAPPED[prefix[r] + str(k)]
-            assert _swap(_rgb565(T.RAMP_RGB[r][k])) == T.RAMP_SWAPPED[r][k]
-            assert lut[9 * k] == T.RAMP_SWAPPED[r][k], (r, k)   # j = 9k is stop k exactly
+            assert lut[9 * k] == stops[k], (r, k)   # j = 9k is stop k exactly
         # brightness (green channel) never decreases along the LUT
         g6 = [(_swap(c) >> 5) & 0x3F for c in lut]
         assert g6 == sorted(g6), r
+    assert T.C_BG_IRIS == 0x6100
+    assert T.C_ACCENT_FOUND == T.RAMP_SWAPPED["gold"][5]
 
 
 def test_layout_geometry():
     assert T.CENTER == (120, 120)
-    assert T.IRIS_R_CHEVRONS == 44 and T.IRIS_R_ARROW == 64 and T.IRIS_R_RUNES == 92
-    assert T.BEAM_R < T.IRIS_R_ARROW < T.SWEEP_R_INNER < T.SWEEP_R_OUTER
-    assert T.TOP_SLOT == (12, 12, 216, 23) and T.BOTTOM_SLOT == (24, 186, 192, 40)
+    ir = T.IRIS_R
+    assert ir["chevrons"] == ir["seeker"] == 44 and ir["arrow"] == ir["scan"] == 64 and ir["runes"] == 92
+    assert T.BEAM_R < ir["arrow"] < T.SWEEP_R_INNER < T.SWEEP_R_OUTER
+    assert T.TOP_SLOT == (12, 12, 216, 24) and T.BOTTOM_SLOT == (24, 186, 192, 40)
     assert T.FIELD_R_MAX == 168 and T.CORE_DOT_R == 6
     # the dart fits inside the beam radius
     for x, y in T.DART_PTS:
@@ -161,9 +206,12 @@ def test_link_scan_beacon():
     assert T.LINK_LOST_AFTER_MS == 5000 and T.LIVE_WINDOW_MS == 1000
     assert T.RELINK_PACKETS == 3 and T.RELINK_WINDOW_MS == 2000
     assert (T.BEACON_HZ_NORMAL, T.BEACON_HZ_HOT, T.BEACON_HZ_SCAN, T.BEACON_HZ_SAVER) == (10, 20, 20, 5)
-    assert T.SCAN_BINS * T.SCAN_WEDGE_DEG == 360
     assert T.SCAN_DURATION_MS * T.SCAN_DEG_PER_S / 1000 == 360
-    assert T.SWEEP_DEG_PER_S == T.SCAN_DEG_PER_S
+
+
+def test_found_gate():
+    assert (T.BUMP_WINDOW_MS, T.FALLBACK_PRESS_WINDOW_MS) == (400, 3000)
+    assert T.BAND_LABELS[T.FALLBACK_MAX_BAND] == "~5"
 
 
 def test_field_presets():
@@ -171,5 +219,12 @@ def test_field_presets():
         assert p[0] in T.RAMP_NAMES
         assert p[2] < 0                                   # inward "listening" rings
         assert abs(p[2]) * p[3] / 1000.0 <= T.WAVELENGTH_MAX_PX
+    # ui-spec §6 values the renderer reads from tokens.json (states)
+    assert (T.PAIRING_SEEN_FLOOR, T.SEARCHING_GLOW_AMP) == (0.4, 1.5)
+    assert T.FIELD_LEAD_TRAIL_PX == (3, 22) and T.FOUND_LEAD_TRAIL_PX == (3, 24)
+    assert T.FIELD_SCAN_READY_PULSE_SCALE == 0.4 and T.FIELD_SCAN_READY_GLOW_R == 8.0
+    assert T.FIELD_SCAN_SWEEP_GLOW_AMP == (1.0, 5.0) and T.FIELD_SCAN_SWEEP_GLOW_R == 12.0
+    assert T.BREATHE_PAIRING_MS == 2400 and T.LINK_Q_MAX == len(T.LINK_BARS[2])
+    assert T.IDLE_DIM_BACKLIGHT < T.BACKLIGHT_NORMAL < T.BACKLIGHT_BOOST
     assert T.TEMPORAL_AA_K == 1.5
     assert (T.FLASH_LIMIT_STEPS, T.FLASH_LIMIT_MS) == (2, 333)

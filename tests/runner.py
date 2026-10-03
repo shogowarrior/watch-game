@@ -1,38 +1,56 @@
 """Minimal test runner that works on CPython *and* MicroPython.
 
 MicroPython has no unittest/pytest, so tests are plain modules named
-``test_*.py`` with functions named ``test_*`` that use ``assert``.
+``test_*.py`` with functions named ``test_*`` that use ``assert``. A test that
+cannot run on this runtime raises ``tests.Skip("reason")``.
 
     python3 tests/runner.py                  # CPython
     node tools/mpy/run.mjs tests/runner.py   # MicroPython (WebAssembly)
+    python3 tests/runner.py test_game        # some modules (tests/test_game.py works too)
+
+Tests run from the repo root, so they open repo files by relative path. An
+unknown module name, or a run in which no test passed or failed, exits 1.
 """
 
+import os
 import sys
 
-try:
-    import os
-    _listdir = os.listdir
-except ImportError:  # pragma: no cover
-    import uos as os
-    _listdir = os.listdir
 
-
-def _here():
+def _root():
+    """Absolute repo root, from this file's path."""
     f = globals().get("__file__", "tests/runner.py")
-    i = f.rfind("/")
-    return f[:i] if i >= 0 else "."
+    if not f.startswith("/"):
+        f = os.getcwd() + "/" + f
+    f = f[:f.rfind("/")]        # .../tests
+    return f[:f.rfind("/")]
+
+
+def _module(sel):
+    """'tests/test_x.py', 'test_x.py' or 'test_x' -> 'test_x'."""
+    sel = sel[sel.rfind("/") + 1:]
+    return sel[:-3] if sel.endswith(".py") else sel
+
+
+def _select(names, selected):
+    """(kept names in run order, unknown selectors)."""
+    sel = [_module(s) for s in selected]
+    return [n for n in names if n in sel], [s for s in sel if s not in names]
 
 
 def run(selected=None):
-    here = _here()
-    root = here[: here.rfind("/")] if "/" in here else "."
-    for p in (root, here):
+    root = _root()
+    os.chdir(root)
+    for p in (root, root + "/tests"):
         if p not in sys.path:
             sys.path.insert(0, p)
-    names = sorted(n[:-3] for n in _listdir(here) if n.startswith("test_") and n.endswith(".py"))
+    from tests import Skip
+    names = sorted(n[:-3] for n in os.listdir("tests") if n.startswith("test_") and n.endswith(".py"))
     if selected:
-        names = [n for n in names if n in selected]
-    passed = failed = 0
+        names, missing = _select(names, selected)
+        if missing:
+            print("unknown test module(s): " + ", ".join(missing))
+            return 1
+    passed = skipped = failed = 0
     for modname in names:
         mod = __import__(modname)
         for attr in sorted(dir(mod)):
@@ -44,20 +62,24 @@ def run(selected=None):
             try:
                 fn()
                 passed += 1
+            except Skip as e:
+                skipped += 1
+                print("SKIP %s.%s: %s" % (modname, attr, e))
             except Exception as e:  # noqa: BLE001 - report and continue
                 failed += 1
                 print("FAIL %s.%s: %s: %s" % (modname, attr, type(e).__name__, e))
-                try:
-                    sys.print_exception(e)  # MicroPython
-                except AttributeError:
+                pe = getattr(sys, "print_exception", None)   # MicroPython
+                if pe is not None:
+                    pe(e)
+                else:
                     import traceback
-                    traceback.print_exc()
-    impl = sys.implementation.name
-    print("[%s] %d passed, %d failed" % (impl, passed, failed))
+                    traceback.print_exception(type(e), e, e.__traceback__)
+    print("[%s] %d passed, %d skipped, %d failed" % (sys.implementation.name, passed, skipped, failed))
+    if passed + failed == 0:
+        print("no tests ran")
+        return 1
     return failed
 
 
 if __name__ == "__main__":
-    _args = globals().get("__argv__") or getattr(sys, "argv", [])
-    sel = [a for a in _args[1:] if not a.startswith("-")]
-    sys.exit(1 if run(sel or None) else 0)
+    sys.exit(1 if run([a for a in sys.argv[1:] if not a.startswith("-")]) else 0)

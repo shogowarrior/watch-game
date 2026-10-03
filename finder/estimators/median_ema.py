@@ -8,8 +8,9 @@ last few seconds, set only when significant (slope / stderr) and only while at
 least one watch is walking. The IMU only gates and scales; steps are never
 integrated into a position, so step-counter/stride drift cannot build up.
 
-Ranging uses a steep path-loss exponent (shrinks log errors) and adds back a
-body/fade loss that grows with the packet-to-packet jitter (rough channels
+Ranging uses a steep path-loss exponent (shrinks log errors; in the game
+Game.set_place() replaces N_PL with tokens calibrate.n / n_indoor) and adds back
+a body/fade loss that grows with the packet-to-packet jitter (rough channels
 also block and fade more). The displayed log-distance has a small backlash.
 """
 
@@ -34,10 +35,7 @@ Z_ON = 0.5          # |slope|/stderr to set or reverse the trend; kept until the
 N_PL = 3.0          # effective path-loss exponent (open air 2.0 .. indoor 3.0; steep errs small)
 BODY_DB = 2.0       # body-blocking/fade loss (dB) added back at JIT_REF jitter ...
 BODY_B = 1.5        # ... plus this per dB of jitter above JIT_REF
-JIT_REF = 5.0       # jitter: mean |rssi_k - rssi_k-1| of own packets, dB
-JIT_INIT = 4.0      # jitter assumed before any data
-JIT_A = 0.02        # jitter adaptation per packet pair
-JIT_GAP_MS = 1000   # packets further apart than this don't form a pair
+JIT_REF = 5.0       # jitter (base ``jit``): mean |rssi_k - rssi_k-1| of own packets, dB
 DEAD_LOG = 0.04     # displayed log10(distance) backlash (fewer zone flips)
 SHADOW_VAR = 16.0   # dB^2 of slow shadowing no filter can remove (for dist_lo/hi)
 REBASE_MS = 4000    # re-origin the LS sums this often (float32 on ESP32)
@@ -81,7 +79,7 @@ class Estimator(RangeEstimator):
         self._wy = [0.0] * WIN_CAP
         self._me = _Mover()
         self._peer = _Mover()
-        pl = path_loss or PathLoss(-45.0, N_PL)
+        pl = path_loss or PathLoss(n=N_PL)
         self._cal = pl.p0
         RangeEstimator.__init__(self, pl)
 
@@ -105,10 +103,7 @@ class Estimator(RangeEstimator):
         self.var_f = 9.0
         self._k = 0
         self.moving = False
-        self.jit = JIT_INIT
         self._lg = None
-        self._raw = None
-        self._raw_t = 0
         self._me.__init__()
         self._peer.__init__()
 
@@ -218,11 +213,7 @@ class Estimator(RangeEstimator):
                 self.trend = 0
                 self.trend_conf = 0.0
             return
-        if self._raw is not None and ticks_diff(t_ms, self._raw_t) < JIT_GAP_MS:
-            d = rssi - self._raw
-            self.jit += JIT_A * ((d if d > 0 else -d) - self.jit)
-        self._raw = rssi
-        self._raw_t = t_ms
+        self._note_noise(t_ms, rssi)
         y = self._median(float(rssi))
         if peer_rssi is not None:
             y = self._median(float(peer_rssi))

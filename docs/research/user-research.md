@@ -10,10 +10,10 @@ Display math used throughout: a 1.54" diagonal square has a 27.7 mm side, so 240
 
 | Term | Meaning in this doc |
 |---|---|
-| **Beacon** | Periodic radio packet (BLE advert or ESP-NOW frame) carrying `pair_id`, `seq`, battery %, and game state |
+| **Beacon** | 16-byte ESP-NOW frame carrying `game_id`, `seq`, battery % and game state |
 | **RSSI / filtered distance** | Raw received signal strength and its smoothed estimate converted to metres. It is noisy, so treat it as roughly ±30-50% |
-| **Zone** | A discrete proximity band shown to the player (e.g. Far / Near / Close / Very close / Here) |
-| **Trend** | Warmer (+1), steady (0) or colder (−1), computed from the filtered distance while the player is moving |
+| **Zone** | A discrete proximity level felt by the player: FAR / NEAR / WARM / HOT (4 zones) |
+| **Trend** | Warmer (+1), colder (−1) or none (0, shown as the plain glow), computed from the filtered signal while the player is moving |
 | **Scan** | A guided 360° turn with the watch held at the chest. The RSSI peak gives a bearing relative to the heading at scan start |
 | **Probe** | Gradient maneuver: walk N steps, turn 90°, walk N steps, then compare the RSSI change on each leg |
 | **Bearing confidence** | How much the direction estimate can still be trusted. It decays with steps taken, time elapsed and suspected turns |
@@ -26,7 +26,7 @@ Display math used throughout: a 1.54" diagonal square has a 27.7 mm side, so 240
 | **R1 Desk sim** | 3-5 friends, 15 min each | Desk, **web 2-watch simulator** (top view, drag and rotate the watches) | Comprehension of zones, trend and arrow-after-turn with no radio noise confound | 1 evening |
 | **R2 Field pilot** | Builder + 1 friend | Park | Dry-run of the protocol, logging and ground-truth capture | 1 session |
 | **R3 Field study** | 3-4 friend pairs, with roles swapped | Open park + mixed park/buildings + 1 indoor | Main usability test (§4) | 3-4 sessions × 60 min |
-| **R4 Context probes** | 1-2 parent+kid pairs; 1 festival/crowd outing | Playground; event | Check the non-game jobs (JTBD J5, J6) and kid-specific issues | Opportunistic |
+| **R4 Context probes** | 1-2 parent+kid pairs; 1 festival/crowd outing | Playground; event | Check the non-game jobs (jobs-to-be-done J5, J6, §2) and kid-specific issues | Opportunistic |
 
 ---
 
@@ -64,7 +64,7 @@ Risk = impact if wrong × current uncertainty. H = high, M = medium, L = low.
 | **A9** | A 30-min session fits the battery at ~20-30 fps rendering, radio and haptics | Game dies mid-hunt, with a large emotional low | M | M×M | Telemetry `batt_mv` per mode | If the projected drain exceeds budget, add a haptic-first low-power mode with the screen off between glances |
 | **A10** | "Found" can be decided from RSSI alone | False "found" through a wall or floor, or no closure when 2 m apart | M | M×M | T7 | Require a physical confirm such as a watch-to-watch bump detected by BMA423 tap detection |
 | **A11** | Wrist-tilt wake works while walking and doesn't false-wake too often | Players miss glances or drain battery | M | M×L | Log `tilt_wake` vs `screen_on`, observation | Tune the tilt threshold; allow the side button as a fallback wake |
-| **A12** | The TotK-style ripple aesthetic *adds* motivation and doesn't just look nice | Effort spent on polish that doesn't change play | L | L×M | Interview reaction, would-play-again | Informs the polish budget only |
+| **A12** | The *Tears of the Kingdom*-style ripple aesthetic *adds* motivation and doesn't just look nice | Effort spent on polish that doesn't change play | L | L×M | Interview reaction, would-play-again | Informs the polish budget only |
 | **A13** | Step count + activity (still/walk/run) is a good enough proxy for "you have moved" to decay bearing confidence. Double-integrating the accelerometer, as tried in `notebooks/watch movement.ipynb`, drifts within seconds without a gyro or reference and cannot be used | Stale direction shown as confident | M | M×M | T6 logs (`steps_since_scan` vs pointing error) | Tune the decay constants from data |
 | **A14** | Indoors or near buildings, multipath makes RSSI occasionally *mislead* (e.g. stronger through a doorway) and players forgive it if warned | Unexplained failures break trust | M | M×M | Indoor session in R3 | Add a "signal unreliable here" state when variance is high |
 
@@ -84,7 +84,7 @@ These are **proto-personas**: assumption-based sketches built from the brief and
 - **Needs from UX:** A hidden debug overlay, logs, and replay in the web simulator. The default player UI stays clean.
 
 ### P2: "The Casual Seeker" (friend handed a watch)
-- **Who:** Adult friend who may know Zelda: TotK. Gets a 30-second explanation and plays 1-3 rounds.
+- **Who:** Adult friend who may know *Zelda: Tears of the Kingdom*. Gets a 30-second explanation and plays 1-3 rounds.
 - **Wants:** Fun tension, the feeling of "I'm getting it", and a clear win.
 - **Context:** Walking in a park, phone in pocket, glancing at the wrist, sometimes in full sun. One hand is often busy with a drink or bag.
 - **Frustrations (hypothesised):** Doesn't know if the watch is working. Direction feels random. Having to read small text. Being told to "calibrate".
@@ -197,7 +197,7 @@ journey
 - **Hide spots:** Before the session, choose 4-6 spots at a range of distances (e.g. roughly 20 / 50 / 80 m) from a start marker. Record each distance and bearing from the start by pacing or tape and a map/compass. The hider draws a spot card.
 - **Heading ground truth for scans:** Strap a phone to the seeker's chest running a sensor-logging app (magnetometer heading + accelerometer). Start with a **"triple clap"**, a sharp tap that shows as a spike in both the phone's and the watch's accelerometer logs, and align clocks with it.
 - **Position ground truth (optional):** A GPS track on each player's phone. It is only accurate to a few metres in open sky and worse near buildings, so use it for path shape and wrong-turn detection, not for fine distance.
-- **Cross-watch time alignment:** Each watch logs the `seq` of beacons it sends and the `peer_seq` of beacons it receives. Aligning on `seq` syncs A and B logs without a shared clock.
+- **Cross-watch time alignment:** Each watch logs the `seq` of beacons it sends and the `peer_seq` of beacons it receives. Aligning on `seq` syncs A and B logs without a shared clock. Logs from `deploy --tele` carry them only in the 5 Hz state records (no `bcn_rx`), so the alignment is to about 200 ms.
 
 ### 4.4 Session protocol (≈60 min)
 
@@ -208,7 +208,7 @@ journey
 | 8-10 | Standard briefing | **Fixed 30-second script** (same for everyone): what glow, buzz and arrow mean; the side button asks for direction. Nothing more. | n/a |
 | 10-17 | **T2 Glance test** (static) | Partner stands at 3 known distances (near/mid/far, in random order), in sun and shade. The seeker keeps the wrist down, raises it for ~2 s on the cue "look", lowers it, then says "how close?" and "warmer or colder?" | Correct zone named; response time; sun vs shade |
 | 17-24 | **T3 Haptic-only walk** | Screen covered with tape or disabled. The partner stands still. The seeker walks a straight line toward and then away from the partner (the facilitator picks the order) and says "closer" or "farther" whenever they notice a change. Repeat with haptic scheme B if testing. | Latency and correctness of calls vs ground truth |
-| 24-32 | **T4 Guided scan** | At the start marker, the hider is at a known spot. "Use the watch to find out which way she is." Repeat 2-3 times from different start headings. | Completion, abort reason, scan bearing vs true bearing, pace adherence (chest phone) |
+| 24-32 | **T4 Guided scan** | At the start marker, the hider is at a known spot. "Use the watch to find out which way she is." Repeat 2-3 times from different start headings. | Completion, abort reason, steps the watch counts during the sweep, scan bearing vs true bearing, pace adherence (chest phone) |
 | 32-45 | **T5 Full hunt** | The hider draws a spot card and walks there during a 60 s countdown. "Find her. Use anything the watch gives you." Max 10 min. Swap roles and use variant B of the direction aid (persistent arrow vs face-and-go). | Time-to-find, path, wrong turns, scans, glances, quotes |
 | (in T5) | **T6 Point-to-partner** | Twice during the hunt the observer says "point!". The seeker points with their arm; the observer reads the arm bearing with a compass app. (T6b: the hider steps behind a building once to force Lost.) | Pointing error vs `steps_since_scan`; Lost recovery |
 | (end T5) | **T7 Found** | No instruction. Observe what they do when close. | Found confirmation success; false found |
@@ -219,49 +219,63 @@ journey
 
 ### 4.5 What the watches log (telemetry)
 
-**Format:** JSON Lines on flash, one file per session (`/log/<session_id>_<device>.jsonl`). Write in buffered chunks (e.g. every ~2 s) to limit flash wear and frame drops. Budget check: a ~120-byte record at 5 Hz is ~600 B/s, which is ~36 KB/min or ~1.1 MB per 30 min. Check free space with `os.statvfs` before each session and drop to 2 Hz if space is short.
+**Format:** JSON Lines on flash, one file per boot (`/log/<n>_<device>.jsonl`, n one past the highest number already in `/log`). Written in buffered chunks (every ~2 s) to limit flash wear and frame drops.
+
+**Turning logging on:** the game logs nothing by default. `python3 tools/deploy.py --tele A` (`B` on the other watch) creates `/tele`; from then on every boot appends to `/log/<n>_A.jsonl` (`app.telemetry.session`, called from main.py). To pull logs, plug in USB and run `mpremote reset` first, then wait about 3 s: a game started on battery keeps the hardware watchdog, which would reboot the watch in the middle of the copy, and after the reset the game runs with the stoppable USB watchdog. List the files with `mpremote fs ls :/log`, then `mpremote fs cp :/log/<n>_A.jsonl .`. Every boot, that reset included, starts a new `<n>`. `--no-tele` stops logging. If a write fails, the file ends and only the newest 900 records (about 3 min) stay in RAM, lost on a reboot.
+
+**Budget check:** a state record is about 470 bytes (33 keys), so 5 Hz is about 2.3 KB/s, about 140 KB/min and about 4.2 MB per 30 min, before `bcn_rx` events. Check free flash with `os.statvfs("/")` before each session.
 
 **A. Periodic state record (`"ev":"s"`, 5 Hz)**
 
-| Field | Type | Source | Why |
-|---|---|---|---|
-| `t` | int ms | `time.ticks_ms()` since boot | Timeline |
-| `sid`, `dev`, `role` | str | config | Session, A/B, seeker/hider |
-| `fw`, `uiv` | str | build | Firmware and UI variant under test |
-| `rssi` | int dBm | last beacon | Raw signal |
-| `rssi_f` | float dBm | filter | Filter behaviour |
-| `d_est`, `d_lo`, `d_hi` | float m | model | Estimate and its uncertainty band |
-| `zone` | int 0-4 | UI logic | What the player saw |
-| `trend`, `trend_c` | int −1/0/+1, float 0-1 | UI logic | Trend and its confidence |
-| `lost_s` | float s | since last beacon | Link health |
-| `steps` | int | BMA423 step counter (cumulative) | Movement |
-| `act` | enum still/walk/run | BMA423 activity | Movement state; hider stillness |
-| `steps_since_scan` | int | derived | Arrow decay input |
-| `arrow_deg`, `arrow_c` | int deg / null, float | UI | What direction was shown and how confidently |
-| `ui` | enum | state machine | pair/countdown/search/scan/probe/lost/close/found/lowbatt |
-| `scr` | bool | backlight | Screen on (glance proxy) |
-| `bl` | int 0-100 | backlight | Brightness level |
-| `fps` | int | render loop | Performance vs spec |
-| `batt_pct`, `batt_mv`, `chg` | int, int, bool | AXP202 | Battery drain per mode |
-| `p_batt` | int | partner beacon | Partner battery |
+The "Logged?" column says what `app/telemetry.py` records today. It also logs
+`sub` (screen sub-state), `cone`, `hz` (beacon rate), `buzz` and the link
+counters `seq`, `peer_seq`, `rx` and `loss`.
+
+| Field | Type | Source | Why | Logged? |
+|---|---|---|---|---|
+| `t` | int ms | `time.ticks_ms()` since boot | Timeline | yes |
+| `sid`, `dev`, `role` | str | config | Session, A/B, seeker/hider | `sid`, `dev`; not `role` |
+| `fw`, `uiv` | str | build | Firmware and UI variant under test | not yet |
+| `rssi` | int dBm | last beacon | Raw signal | yes |
+| `rssi_f` | float dBm | filter | Filter behaviour | yes |
+| `d_est`, `d_lo`, `d_hi` | float m | model | Estimate and its uncertainty band | yes |
+| `zone` | int 0-3 (FAR..HOT) | UI logic | What the player saw | yes |
+| `trend`, `trend_c` | int −1/0/+1, float 0-1 | UI logic | Trend and its confidence | yes, but the estimator's raw trend, not the gated one the player saw |
+| `lost_s` | float s | since last beacon | Link health | yes |
+| `steps` | int | BMA423 step counter (cumulative) | Movement | yes |
+| `act` | enum still/walk/run | BMA423 activity | Movement state; hider stillness | yes |
+| `steps_since_scan` | int | `arrow.steps_walked`: steps counted by the σ model; paused while a warmer trend holds, None without an arrow | Arrow decay input | yes |
+| `arrow_deg`, `arrow_c` | int deg / null, float | UI | What direction was shown and how confidently | `arrow_deg` (plus `cone`); not `arrow_c` |
+| `ui` | enum | state machine | pair/countdown/search/scan/probe/lost/close/found/lowbatt | yes, as the screen name (`PAIRING` .. `MENU`) |
+| `scr` | bool | backlight | Screen on (glance proxy) | yes |
+| `bl` | int 0-100 | backlight | Brightness level | yes |
+| `fps` | int | render loop | Performance vs spec | yes |
+| `batt_pct`, `batt_mv`, `chg` | int, int, bool | AXP202 | Battery drain per mode | yes |
+| `p_batt` | int | partner beacon | Partner battery | yes |
 
 **B. Event records**
 
-| `ev` | Fields | Notes |
-|---|---|---|
-| `bcn_rx` | `peer_seq`, `rssi`, `ch` | Every received beacon. Gives loss rate and cross-device sync; the channel matters for BLE adverts |
-| `bcn_tx` | `seq` | Every sent beacon |
-| `haptic` | `pattern` (id), `dur_ms` | Which buzz fired |
-| `tilt_wake`, `tap`, `dtap` | n/a | BMA423 interrupts |
-| `btn` | `kind` short/long | Side button (AXP202 IRQ) |
-| `touch` | `x`, `y`, `target` | Touch hits and misses (missed targets = target size issue) |
-| `scan_start` | `pose_ok`, `az_g` | Pose check result |
-| `scan_sample` | `k`, `deg_assumed`, `rssi` | Per sample, assumed angle from timing |
-| `scan_end` | `ok`, `abort` (steps/pose/timeout/user), `dur_ms`, `peak_deg`, `prom_db` (peak minus median), `width_deg`, `conf` | Scan quality |
-| `probe_start` / `probe_leg` / `probe_end` | `leg`, `steps`, `d_rssi`, `result` (quadrant) | Gradient maneuver |
-| `found_prompt`, `found_ok` | `method` (bump/tap/button), `rssi` | Found confirmation |
-| `mark` | `note_id` | Facilitator marker (e.g. long-press when "point!" is called) |
-| `clap` | n/a | Sync spike |
+| `ev` | Fields | Notes | Logged? |
+|---|---|---|---|
+| `bcn_rx` | `peer_seq`, `rssi` | Every received beacon. Gives loss rate and cross-device sync (ESP-NOW uses one fixed channel) | only with `Telemetry(beacons=True)` built by hand (REPL/notebook); `deploy --tele` leaves it off |
+| `bcn_tx` | `seq` | Every sent beacon | not yet (`seq` is in the state record) |
+| `haptic` | `pattern` (id), `dur_ms` | Which buzz fired | `pattern` only |
+| `tilt_wake`, `tap`, `dtap` | n/a | BMA423 interrupts | `tap` (the bump spike, with `ok`); not the others |
+| `btn` | `kind` short/long | Side button (AXP202 IRQ) | yes |
+| `touch` | `x`, `y`, `target` | Touch hits and misses (missed targets = target size issue) | gesture, `x`, `y`; not `target` |
+| `scan_start` | `pose_ok`, `az_g` | Pose check result | not yet |
+| `scan_sample` | `k`, `deg_assumed`, `rssi` | Per sample, assumed angle from timing | not yet |
+| `scan_end` | `ok`, `abort` (steps/pose/timeout/user), `dur_ms`, `peak_deg`, `prom_db` (peak minus median), `width_deg`, `conf` | Scan quality | not yet |
+| `probe_start` / `probe_leg` / `probe_end` | `leg`, `steps`, `d_rssi`, `result` (quadrant) | Gradient maneuver | no (probe not built) |
+| `found_prompt`, `found_ok` | `method` (bump/tap/button), `rssi` | Found confirmation | not yet |
+| `mark` | `note_id` | Facilitator marker (e.g. long-press when "point!" is called) | not yet |
+| `clap` | n/a | Sync spike | not yet |
+
+It also logs a `pwr` event at power-off, and a `crash` event (`e`: the exception) when the game loop raises; the ring is flushed to the file then. Until the missing events exist, scan and FOUND timing can only be read from the
+`ui`/`sub` changes in the state records, and the metrics that need
+`scan_end.peak_deg`, `found_ok` or the displayed trend (Scan accuracy,
+Time-to-find, Trend correctness) and the triple-clap clock sync cannot be
+computed from logs. Add them before R2.
 
 **C. Manual observer sheet (per session):** timestamp · stage · what happened · quote · severity 0-4. Also mark every stop longer than 5 s, every visible "which way?" gesture, and every time they look at the watch for more than 3 s ("stare").
 
@@ -275,7 +289,7 @@ journey
 | **Scan completion rate** | `scan_end.ok` ÷ `scan_start` | Log | A1 behaviour |
 | **Scan accuracy** | Share of completed scans with \|`peak_deg` − true relative bearing\| ≤ 45°. The true relative bearing = map bearing to the hide spot − chest-phone heading at `scan_start` | Log + chest phone + map | A1 physics + behaviour |
 | **Scan pace adherence** | Chest-phone turn rate vs the guide's rate across the scan (deviation in °/s, and where it peaks) | Chest phone | Why scans fail |
-| **Point-to-partner error** | \|pointed bearing − true bearing\|, plotted against `steps_since_scan` and time since scan | T6 + map | A2, decay tuning |
+| **Point-to-partner error** | \|pointed bearing − true bearing\|, plotted against raw steps since the scan (`steps` minus its value at the scan's `ui`/`sub` change; `steps_since_scan` is the σ model's count) and time since scan | T6 + map | A2, decay tuning |
 | **Trend correctness** | Over 10 s windows while `act=walk` and the true distance changed by > 3 m: share where the displayed `trend` sign matches | Log + GPS | A3 |
 | **Trend reversal rate** | Displayed trend sign changes per minute while walking | Log | A3 flip-flop |
 | **Haptic discrimination** | T3: share of correct "closer/farther" calls; latency from zone change to call | T3 | A4 |
@@ -284,7 +298,7 @@ journey
 | **Lost recovery time** | `lost` entered → next beacon (s); what the player did | Log + observer | F1 |
 | **Found confirmation** | `found_ok` success; false "Here" without a partner in sight | Log + observer | A10 |
 | **Battery drain** | Δ`batt_mv` per 10 min, split by `ui` and backlight level | Log | A9 |
-| **Subjective (1-7 SEQ per task; 1-5 trust, fun, would-play-again)** | Asked right after each task / session | Interview | Triangulation |
+| **Subjective (1-7 SEQ (Single Ease Question) per task; 1-5 trust, fun, would-play-again)** | Asked right after each task / session | Interview | Triangulation |
 
 **Analysis stance:** With 3-4 pairs, report per-session values and medians and look for consistent patterns. Don't compute p-values. A metric that fails its decision rule (§1.2) in most sessions is a design problem, not noise.
 
@@ -372,7 +386,7 @@ Severity: 0 none · 1 cosmetic · 2 minor delay · 3 major (wrong way / needed h
 6. **Replay library.** Tag 3-5 representative log segments (best hunt, worst wrong turn, a failed scan, Lost) for regression checks in the web simulator.
 
 ### 4.9 The web 2-watch simulator as a research instrument
-The planned web simulator (top view of two players and watches; drag to move, rotate to turn; each watch's 240×240 screen updates live) makes the research cheaper:
+The web simulator (`web/sim`: a top view of two players and watches; drag to move, rotate to turn; each watch's 240×240 screen updates live) runs the real `finder/`, `ui/` and `sim/` code, with the four radio profiles and a truth overlay (true distance and bearing, and the share of time the true bearing is inside the arrow's cone). Not built yet: the scripted test scenarios of `sim/scenarios.py` (the page starts from one fixed layout; the scenarios run headless in `tools/bakeoff.py`), log replay, noise sliders and 1:1 physical size. Its Auto-pair switch (on by default) shortens pairing for demos; turn it off for spec timing (ui-spec §3). It makes the research cheaper:
 - **R1 comprehension tests without radio noise:** ask "which way is your partner?" after turning the avatar. This isolates A2 (arrow meaning) from A1 (scan physics).
 - **Noise-model tuning:** expose RSSI noise, body-shadow strength and beacon loss as sliders. Tune filter and hysteresis constants until the trend stops flip-flopping in simulation, then confirm in the field.
 - **Log replay:** load a session's JSONL pair and scrub the timeline so both screens re-render as the players saw them. This drives the interview (§4.7) and synthesis (§4.8).
@@ -381,6 +395,8 @@ The planned web simulator (top view of two players and watches; drag to move, ro
 ---
 
 ## 5. Design implications: prioritised requirements
+
+**Status:** [ui-spec](../design/ui-spec.md) v0.2 implements these with changes, and where they differ the ui-spec wins. R-01: 4 zones, HOT rings at 2/s. R-03: no steady state and no hue tilt (green only). R-06: LOST is a 5 × 60 ms stutter. R-07: 60 ms pulses. R-08: telemetry only; the debug overlay is not built, and the side-button long press opens the MENU. R-10: the fallback is a short press on both watches, and the bump is a software spike detector on the 100 Hz accelerometer FIFO (`app/imu_feed.py`), not the chip's tap interrupt. R-11: 3 runes confirmed with a tap or press; beacons carry `game_id`. R-14: no hint text; an unreliable signal turns the trend off, widens the cone by 15° and turns the link bars warn (ui-spec §5.5). R-15: not built. The table below stays as the hypothesis record.
 
 P0 = must have before R3 field sessions. P1 = needed for a good game. P2 = later or context modes.
 "Render" notes whether the element is **palette** (radial, ~free via ring-index map + palette cycling) or **overlay** (drawn per frame: polygons, rects, bitmap glyphs).

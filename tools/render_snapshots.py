@@ -10,24 +10,43 @@ the last full 240x240 frame.
 The renderer needs framebuf, so frames are always rendered by MicroPython
 (the WebAssembly port). Its filesystem is in-memory, so under ``--emit`` the
 PNGs (encoded in MicroPython by tools/png.py) are printed as base64 between
-``@@PNG <name>`` / ``@@END`` markers; the CPython entry point runs that
-command and writes the files. ``--bench`` prints per-fixture ms/frame.
-On a MicroPython port with a real filesystem, ``--write`` writes directly.
+``@@PNG <name>`` / ``@@END`` markers, after an ``@@CRC <name> <crc32>`` line
+for the raw frame; the CPython entry point runs that command, writes the
+files and the frame CRCs to tests/snapshot_crc.json (which
+tests/test_renderer.py renders the fixtures against), and exits 1 if any
+named fixture (or, with no names, every fixture) wrote nothing. ``--bench``
+prints per-fixture ms/frame.
+
+``make_params`` here is the fixture constructor tests/test_renderer.py uses too.
 """
 
 import sys
 
 try:
-    from finder.compat import argv
+    from finder.render_params import make_params as _make_params, validate
 except ImportError:  # CPython entry point: repo root not on sys.path yet
-    argv = None
+    _make_params = validate = None
 
 OUT_DIR = "docs/design/snapshots"
+CRC_FILE = "tests/snapshot_crc.json"
 T0 = 100000
 FPS_MS = 50
 
+# Fixture base: a FAR hunt frame (finder.render_params.DEFAULTS is SEARCHING).
+FIXTURE_BASE = {"screen": "FAR", "zone": 0, "ramp": "green", "intensity": 0.1,
+                "speed_px_s": 40.0, "pulse_period_ms": 2400, "glow_r_px": 24.0,
+                "ring_live": True, "glyph": "glow", "status": (80, 80, 4, False, False)}
+
+
+def make_params(**kw):
+    """finder.render_params.make_params over FIXTURE_BASE."""
+    d = dict(FIXTURE_BASE)
+    d.update(kw)
+    return _make_params(**d)
+
+
 # ---- fixtures: name -> (phases [(offset_ms, kw)], run_ms) ---------------------
-STATUS_OFF = (82, 76, 4, False)
+STATUS_OFF = (82, 76, 4, False, False)
 _hunt = {
     0: dict(screen="FAR", zone=0, intensity=0.12, speed_px_s=40, pulse_period_ms=2400,
             wavelength_px=96, glow_r_px=25, heartbeat="TICK", heartbeat_every=2),
@@ -50,35 +69,30 @@ def hunt(z, **kw):
 _pair = dict(screen="PAIRING", zone=None, ramp="green", intensity=0.1, speed_px_s=-30,
              pulse_period_ms=3000, wavelength_px=90, glow_r_px=30, glyph="runes",
              status=STATUS_OFF)
+RUNES = (0, 3, 6)
+_menu = dict(screen="MENU", zone=2, intensity=0.55, speed_px_s=80, pulse_period_ms=1000,
+             glow_r_px=42, status=STATUS_OFF)
+MENU_ROWS = ("RESUME", "SUN: OFF", "BUZZ: FULL", "PLACE: OUT")
 _scan = dict(screen="SCANNING", zone=2, intensity=0.5, speed_px_s=80, pulse_period_ms=1000,
              glow_r_px=8, status=STATUS_OFF)
 BINS = (0.2, 0.35, 0.6, 0.9, 1.0, 0.75, 0.4, None, 0.15, 0.1, None, 0.05)
 _lost = dict(screen="LINK_LOST", zone=1, ramp="grey", intensity=0.33, speed_px_s=-30,
              pulse_period_ms=3000, wavelength_px=90, glow_r_px=16, ring_live=False,
              glyph="seeker", dist_band="~20", dist_stale=True, trend=0, status=STATUS_OFF)
-
-
-def _m(base, **kw):
-    d = dict(base)
-    d.update(kw)
-    return d
-
+_cal = dict(_pair, sub="calibrate", speed_px_s=0, wavelength_px=0, glyph="countdown",
+            top_text="STAND 1 STEP APART", word="HOLD STILL")
+_found = dict(screen="FOUND", zone=3, ramp="gold", intensity=1.0, speed_px_s=0,
+              pulse_period_ms=1200, glow_r_px=90, glyph="check", top_text="TIME 12:48",
+              status=STATUS_OFF)
+_result = dict(_scan, sub="result", glyph="turn", intensity=0.6, glow_r_px=12)
 
 FIXTURES = [
-    ("pairing_looking", [(0, _m(_pair, sub="looking", top_text="PAIR", word="LOOKING"))], 2000),
-    ("pairing_seen", [(0, _m(_pair, sub="seen", speed_px_s=0, wavelength_px=0, top_text="SAME RUNES?",
-                             word="TAP = YES"))], 1200),
-    ("pairing_confirmed", [(0, _m(_pair, sub="confirmed", speed_px_s=0, wavelength_px=0,
-                                  top_text="WAITING",
-                                  word="WAITING"))], 1200),
-    ("pairing_calibrate", [(0, _m(_pair, sub="calibrate", speed_px_s=0, wavelength_px=0,
-                                  glyph="countdown",
-                                  countdown=3, top_text="STAND 1 STEP APART",
-                                  word="HOLD STILL")),
-                           (1000, _m(_pair, sub="calibrate", speed_px_s=0, wavelength_px=0,
-                                  glyph="countdown",
-                                     countdown=2, top_text="STAND 1 STEP APART",
-                                     word="HOLD STILL"))], 1500),
+    ("pairing_looking", [(0, dict(_pair, sub="looking", top_text="PAIR", word="LOOKING"))], 2000),
+    ("pairing_seen", [(0, dict(_pair, sub="seen", speed_px_s=0, wavelength_px=0, runes=RUNES,
+                               top_text="SAME RUNES?", word="TAP = YES"))], 1200),
+    ("pairing_confirmed", [(0, dict(_pair, sub="confirmed", speed_px_s=0, wavelength_px=0,
+                                    runes=RUNES, top_text="WAITING", word="WAITING"))], 1200),
+    ("pairing_calibrate", [(0, dict(_cal, countdown=3)), (1000, dict(_cal, countdown=2))], 1500),
     ("pairing_split", [(0, hunt(1, screen="PAIRING", sub="split", glyph="countdown",
                                 countdown=24, top_text="NO PEEKING", word="SPLIT UP",
                                 heartbeat=None))], 2000),
@@ -86,7 +100,9 @@ FIXTURES = [
                             speed_px_s=-36, pulse_period_ms=3200, wavelength_px=115,
                             glow_r_px=18, ring_live=False, glyph="seeker", word="SEARCHING",
                             status=STATUS_OFF))], 2500),
-    ("far_glow_status", [(0, hunt(0, dist_band="~40", status=(64, 71, 4, True)))], 1500),
+    ("far_glow_status", [(0, hunt(0, dist_band="~40", status=(64, 71, 4, True, False)))], 1500),
+    # sun mode (§8): floor >= 1.0 and the ramp LUT lifted one stop
+    ("far_glow_sun", [(0, hunt(0, dist_band="~40", sun=True))], 1500),
     ("far_hint", [(0, hunt(0, dist_band="60+", intensity=0.03, top_text="TAP TO SCAN"))], 1500),
     ("far_ghost_rings", [(0, hunt(0, dist_band="~40", ring_live=False))], 1500),
     ("near_warmer", [(0, hunt(1, glyph="chevrons", trend=1, dist_band="~20"))], 1500),
@@ -108,153 +124,117 @@ FIXTURES = [
                                     arrow_style="solid_a", dist_band="~5"))], 1500),
     ("direction_reveal", [(0, hunt(2, sub="reveal", glyph="arrow", arrow_deg=120, cone_deg=22,
                                    arrow_style="solid_a", word="4 O'CLOCK"))], 1500),
+    # turn: the halo is the live mirror, glow_r 12 as in the sweep (§5.7)
     ("direction_turn", [(0, hunt(2, sub="turn", glyph="arrow", arrow_deg=60, cone_deg=33,
-                                 arrow_style="solid_b", intensity=0.7, word="TURN RIGHT",
+                                 arrow_style="solid_b", intensity=0.7, glow_r_px=12,
+                                 word="TURN RIGHT",
                                  sweep=(60, (None,) * 12, None, False),
                                  heartbeat=None))], 1500),
     # pacer near 6 o'clock (turning toward something behind): the wedge
     # would sit under the TURN word, so the bottom slot yields; I_mirror = 1
     ("direction_turn_behind", [(0, hunt(2, sub="turn", glyph="arrow", arrow_deg=10,
                                         cone_deg=33, arrow_style="solid_b", intensity=1.0,
-                                        word="TURN RIGHT",
+                                        glow_r_px=12, word="TURN RIGHT",
                                         sweep=(170, (None,) * 12, None, False),
                                         heartbeat=None))], 1500),
     ("direction_walk_outline", [(0, hunt(0, sub="walk", glyph="arrow", arrow_deg=0,
                                          cone_deg=52, arrow_style="outline", trend=-1,
                                          dist_band="~40", top_text="TAP TO RESCAN"))], 1500),
-    ("found_celebrate", [(0, dict(screen="FOUND", sub="celebrate", zone=3, ramp="gold",
-                                  intensity=1.0, speed_px_s=0, pulse_period_ms=1200,
-                                  glow_r_px=90, glyph="check", burst=True,
-                                  top_text="TIME 12:48", word="FOUND", haptic="FOUND",
-                                  status=STATUS_OFF)),
-                         (50, dict(screen="FOUND", sub="celebrate", zone=3, ramp="gold",
-                                   intensity=1.0, speed_px_s=0, pulse_period_ms=1200,
-                                   glow_r_px=90, glyph="check", top_text="TIME 12:48",
-                                   word="FOUND", status=STATUS_OFF))], 450),
-    ("found_result", [(0, dict(screen="FOUND", sub="result", zone=3, ramp="gold",
-                               intensity=1.0, speed_px_s=0, pulse_period_ms=1200,
-                               glow_r_px=90, glyph="check", top_text="TIME 12:48",
-                               word="TAP=AGAIN", status=STATUS_OFF))], 2500),
-    ("scan_ready_flat", [(0, _m(_scan, sub="ready", glyph="countdown", countdown=3,
-                                top_text="HOLD AT CHEST", word="TURN RIGHT"))], 1500),
-    ("scan_ready_tilted", [(0, _m(_scan, sub="ready", glyph="countdown", countdown=2,
-                                  top_text="HOLD FLAT", word="TURN RIGHT"))], 1500),
-    ("scan_sweep", [(0, _m(_scan, sub="sweep", glyph="turn", intensity=0.6, glow_r_px=12,
-                           sweep=(135, BINS, 4, False)))], 1500),
+    ("found_celebrate", [(0, dict(_found, sub="celebrate", word="FOUND", burst=True,
+                                  haptic="FOUND")),
+                         (50, dict(_found, sub="celebrate", word="FOUND"))], 450),
+    ("found_result", [(0, dict(_found, sub="result", word="TAP=AGAIN"))], 2500),
+    ("scan_ready_flat", [(0, dict(_scan, sub="ready", glyph="countdown", countdown=3,
+                                  top_text="HOLD AT CHEST", word="TURN RIGHT"))], 1500),
+    ("scan_ready_tilted", [(0, dict(_scan, sub="ready", glyph="countdown", countdown=2,
+                                    top_text="HOLD FLAT", word="TURN RIGHT"))], 1500),
+    ("scan_sweep", [(0, dict(_scan, sub="sweep", glyph="turn", intensity=0.6, glow_r_px=12,
+                             sweep=(135, BINS, 4, False)))], 1500),
     # sweep start: every bin still under 4 packets (hollow), the first active
-    ("scan_sweep_start", [(0, _m(_scan, sub="sweep", glyph="turn", intensity=0.4,
-                                 glow_r_px=12, sweep=(15, (None,) * 12, 0, False)))], 600),
-    ("scan_sweep_paused", [(0, _m(_scan, sub="sweep", glyph="turn", intensity=0.3,
-                                  glow_r_px=12, sweep=(200, BINS, 6, True)))], 1500),
-    ("scan_result_ok", [(0, _m(_scan, sub="result", glyph="turn", intensity=0.6,
-                               glow_r_px=12, sweep=(360, BINS, 4, False)))], 450),
-    ("scan_result_morph", [(0, _m(_scan, sub="result", glyph="turn", intensity=0.6,
-                                  glow_r_px=12, sweep=(360, BINS, 4, False))),
-                           (200, _m(_scan, sub="result", glyph="turn", intensity=0.6,
-                                    glow_r_px=12, sweep=(360, BINS, None, False))),
-                           (400, _m(_scan, sub="result", glyph="turn", intensity=0.6,
-                                    glow_r_px=12, sweep=(360, BINS, 4, False))),
-                           (600, _m(_scan, sub="result", glyph="turn", intensity=0.6,
-                                    glow_r_px=12, sweep=(360, BINS, None, False)))], 1000),
+    ("scan_sweep_start", [(0, dict(_scan, sub="sweep", glyph="turn", intensity=0.4,
+                                   glow_r_px=12, sweep=(15, (None,) * 12, 0, False)))], 600),
+    ("scan_sweep_paused", [(0, dict(_scan, sub="sweep", glyph="turn", intensity=0.3,
+                                    glow_r_px=12, sweep=(200, BINS, 6, True)))], 1500),
+    # result: slot 0 is theta (131 deg, in best bin 4), the angle the bin morphs into
+    ("scan_result_ok", [(0, dict(_result, sweep=(131, BINS, 4, False)))], 450),
+    ("scan_result_morph", [(0, dict(_result, sweep=(131, BINS, 4, False))),
+                           (200, dict(_result, sweep=(131, BINS, None, False))),
+                           (400, dict(_result, sweep=(131, BINS, 4, False))),
+                           (600, dict(_result, sweep=(131, BINS, None, False)))], 1000),
     # no fix: the Game returns to the zone screen at once and raises the toast
     ("scan_result_no_fix", [(0, hunt(2, dist_band="~10",
                                      banner=("NO FIX, TRY AGAIN", "info", False)))], 1500),
-    ("link_lost", [(0, _m(_lost, banner=("LOST 0:12", "warn", True)))], 2500),
-    # The LAST chip's last-trend mark: RenderParams has no field for it
-    # (validate() forces trend 0 in LINK_LOST); the renderer reads ``trend``.
-    ("link_lost_last_trend", [(0, _m(_lost, trend=1,
-                                     banner=("LOST 0:27 KEEP ON", "warn", True)))], 2500),
-    ("link_lost_friend_off", [(0, _m(_lost,
-                                     banner=("FRIEND IS OFF", "critical", True)))], 2500),
+    ("link_lost", [(0, dict(_lost, banner=("LOST 0:12", "warn", True)))], 2500),
+    # The LAST chip's last-trend mark (§6 LINK-LOST): drawn from ``trend``,
+    # the last trend before the loss (§3).
+    ("link_lost_last_trend", [(0, dict(_lost, trend=1,
+                                       banner=("LOST 0:27 KEEP ON", "warn", True)))], 2500),
+    ("link_lost_friend_off", [(0, dict(_lost,
+                                       banner=("FRIEND IS OFF", "critical", True)))], 2500),
     ("low_battery_saver", [(0, hunt(1, glyph="battery", word="SAVER ON",
-                                    status=(10, 64, 3, True)))], 1500),
-    ("low_battery_toast", [(0, hunt(0, dist_band="~40", status=(20, 70, 1, True),
+                                    status=(10, 64, 3, True, False)))], 1500),
+    ("low_battery_toast", [(0, hunt(0, dist_band="~40", status=(20, 70, 1, True, False),
                                     banner=("BATTERY 20%", "warn", False)))], 1500),
     ("relink_burst", [(0, hunt(1, dist_band="~20", burst=True, haptic="CLOSER",
                                banner=("BACK IN RANGE", "info", False))),
                       (50, hunt(1, dist_band="~20",
                                 banner=("BACK IN RANGE", "info", False)))], 700),
+    # menu_rows: Menu.rows (finder/menu.py), a 4-row window into the 5-row list
     ("menu", [(0, hunt(2, dist_band="~10")),
-              (1000, dict(screen="MENU", sub="1v", zone=2, intensity=0.55, speed_px_s=80,
-                          pulse_period_ms=1000, glow_r_px=42, status=STATUS_OFF))], 1800),
+              (1000, dict(_menu, sub="1v", menu_rows=MENU_ROWS))], 1800),
     ("menu_scrolled", [(0, hunt(2, dist_band="~10")),
-                       (1000, dict(screen="MENU", sub="2^", zone=2, intensity=0.55, speed_px_s=80,
-                                   pulse_period_ms=1000, glow_r_px=42, status=STATUS_OFF))], 1800),
+                       (1000, dict(_menu, sub="2^",
+                                   menu_rows=("SUN: OFF", "BUZZ: FULL", "PLACE: IN",
+                                              "END ROUND")))], 1800),
 ]
 
-# Visible menu rows per fixture (Game.menu_rows: a 4-row window into the 5-row list).
-MENU_ROWS = {
-    "menu": ["RESUME", "SUN: OFF", "BUZZ: FULL", "PLACE: OUT"],
-    "menu_scrolled": ["SUN: OFF", "BUZZ: FULL", "PLACE: IN", "END ROUND"],
-}
 
-
-def render_fixture(r, cap, name, phases, run_ms, make_params, bench=None):
-    """Run a fixture; returns the number of heartbeat/haptic events seen."""
+def render_fixture(r, cap, name, phases, run_ms, bench=None):
+    """Run a fixture at 20 fps; ``cap`` holds its last frame."""
     import time
     r.reset()
-    if name in MENU_ROWS:
-        r.menu_rows = MENU_ROWS[name]
-    events = 0
     k = 0
-    kw = phases[0][1]
     us = 0
     n = 0
     t = 0
     while t <= run_ms:
         while k + 1 < len(phases) and phases[k + 1][0] <= t:
             k += 1
-        kw = phases[k][1]
-        p = make_params(t_ms=T0 + t, **kw)
+        p = make_params(t_ms=T0 + t, **phases[k][1])
         t_us = time.ticks_us()
-        ev = r.frame(p, cap, T0 + t)
+        r.frame(p, cap, T0 + t)
         us += time.ticks_diff(time.ticks_us(), t_us)
         n += 1
-        events += len(ev)
         t += FPS_MS
     if bench is not None:
         bench.append((name, us / n / 1000.0))
-    return events
 
 
 def _mpy_main(args):
     import binascii
     import gc
-    here = "tools"
-    if here not in sys.path:
-        sys.path.append(here)
-    import png
-    from ui.renderer import FrameCapture, Renderer, make_params
+    from tools import png
+    from ui.renderer import FrameCapture, Renderer
     emit = "--emit" in args
-    write = "--write" in args
     bench = [] if "--bench" in args else None
     sel = [a for a in args[1:] if not a.startswith("-")]
-    try:
-        from finder.render_params import validate
-    except ImportError:
-        validate = None
     r = Renderer()
     cap = FrameCapture()
     for name, phases, run_ms in FIXTURES:
         if sel and name not in sel:
             continue
-        if validate is not None:
-            for _, kw in phases:
-                for err in validate(make_params(t_ms=T0, **kw)):
-                    print("WARN %s: %s" % (name, err))
-        render_fixture(r, cap, name, phases, run_ms, make_params, bench)
-        if not (emit or write):
+        for _, kw in phases:
+            for err in validate(make_params(t_ms=T0, **kw)):
+                print("WARN %s: %s" % (name, err))
+        render_fixture(r, cap, name, phases, run_ms, bench)
+        if not emit:
             continue
+        print("@@CRC %s %08x" % (name, binascii.crc32(cap.buf)))
         data = png.encode(240, 240, png.rgb565sw_to_rgb(cap.buf, 240, 240))
-        if write:
-            with open(OUT_DIR + "/" + name + ".png", "wb") as f:
-                f.write(data)
-            print("wrote", name)
-        else:
-            print("@@PNG " + name)
-            for i in range(0, len(data), 57):
-                sys.stdout.write(binascii.b2a_base64(data[i:i + 57]).decode())
-            print("@@END")
+        print("@@PNG " + name)
+        for i in range(0, len(data), 57):
+            sys.stdout.write(binascii.b2a_base64(data[i:i + 57]).decode())
+        print("@@END")
         gc.collect()
     if bench:
         tot = 0.0
@@ -266,34 +246,57 @@ def _mpy_main(args):
 
 def _cpython_main(args):
     import base64
+    import json
     import os
     import subprocess
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cmd = ["node", os.path.join(root, "tools", "mpy", "run.mjs"),
            "tools/render_snapshots.py", "--emit"] + args[1:]
-    out = subprocess.run(cmd, cwd=root, check=True, capture_output=True, text=True).stdout
+    proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)          # the MicroPython traceback, if any
+    if proc.returncode != 0:
+        sys.exit(proc.returncode)
+    want = [a for a in args[1:] if not a.startswith("-")]
+    seen = []
+    crc_path = os.path.join(root, CRC_FILE)
+    crc = {}
+    if want and os.path.exists(crc_path):      # a partial run updates its fixtures only
+        with open(crc_path) as f:
+            crc = json.load(f)
     os.makedirs(os.path.join(root, OUT_DIR), exist_ok=True)
     name = None
     chunks = []
-    n = 0
-    for line in out.splitlines():
-        if line.startswith("@@PNG "):
+    for line in proc.stdout.splitlines():
+        if line.startswith("@@CRC "):
+            k, v = line[6:].split()
+            crc[k] = int(v, 16)
+        elif line.startswith("@@PNG "):
             name = line[6:].strip()
             chunks = []
         elif line == "@@END" and name:
             with open(os.path.join(root, OUT_DIR, name + ".png"), "wb") as f:
                 f.write(base64.b64decode("".join(chunks)))
-            n += 1
+            seen.append(name)
             name = None
         elif name:
             chunks.append(line.strip())
         elif line.strip():
             print(line)
-    print("wrote %d snapshots to %s" % (n, OUT_DIR))
+    if seen:
+        with open(crc_path, "w") as f:
+            json.dump(crc, f, indent=1, sort_keys=True)
+            f.write("\n")
+    print("wrote %d snapshots to %s" % (len(seen), OUT_DIR))
+    missing = [w for w in want if w not in seen]
+    if missing or not seen:
+        sys.stderr.write("no snapshot written for: %s (unknown fixture?)\n"
+                         % (", ".join(missing) or "any fixture"))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     if sys.implementation.name == "micropython":
-        _mpy_main(argv(globals()))
+        _mpy_main(sys.argv)
     else:
         _cpython_main(sys.argv)

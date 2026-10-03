@@ -3,14 +3,30 @@
     tele = Telemetry(dev="A", sid="s1")       # RAM ring, 5 Hz state records
     rt = Runtime(board, telemetry=tele)       # the runtime calls record()/event()
     >>> import app; app.rt.tele.dump()        # REPL: print the ring (JSONL)
-    >>> app.rt.tele.save("/log/s1_A.jsonl")   # or write it to flash
+    >>> import os; os.mkdir("/log")           # once, then
+    >>> app.rt.tele.save("/log/s1_A.jsonl")   # write the ring to flash
 
-State records are ``{"ev": "s", ...}`` at ``hz`` (5 by default) with the
-§4.5 A fields the watch knows (rssi, rssi_f, d_est/d_lo/d_hi, zone, trend,
-lost_s, steps, act, arrow_deg, ui, scr, bl, fps, batt_pct, batt_mv, p_batt)
-plus link counters (``seq``, ``peer_seq``, ``rx``, ``loss``) for cross-watch
-alignment. Events (``btn``, ``touch``, ``tap``, ``haptic``, ``pwr``) go in
-the same ring. With ``path`` set, new lines are appended to that file every
+Field tests log to flash as they go: ``session("A")`` appends to
+``/log/<n>_A.jsonl``; main.py builds it when ``/tele`` exists
+(``tools/deploy.py --tele A``). Pull the files with ``mpremote fs cp
+:/log/0_A.jsonl .``. The RAM ring alone holds ~3 min (900 records at 5 Hz),
+and on battery the hardware WDT reboots the watch ~8 s after Ctrl-C, before
+any REPL dump. A state record is ~470 bytes (~140 KB a minute at 5 Hz), so
+check free flash (``os.statvfs("/")``) between sessions; a failed write ends
+the file (``err`` says why) and the ring carries on in RAM.
+
+State records are ``{"ev": "s", ...}`` at ``hz`` (5 by default) with a
+subset of the §4.5 A fields (rssi, rssi_f, d_est/d_lo/d_hi, zone, trend,
+trend_c, lost_s, steps, act, steps_since_scan, arrow_deg, ui, scr, bl, fps,
+batt_pct, batt_mv, chg, p_batt) plus ``sub`` (screen sub-state), ``cone``,
+``hz`` (beacon rate), ``buzz`` and link counters (``seq``, ``peer_seq``,
+``rx``, ``loss``) for cross-watch alignment. Events (``btn``, ``touch``,
+``tap``, ``haptic``, ``pwr``, ``crash`` (``e``: the exception that stopped
+the loop; the ring is flushed then), and ``bcn_rx`` with ``beacons=True``)
+go in the same ring. Not logged: ``role``, ``fw``/``uiv``, ``arrow_c`` and the
+``bcn_tx``, ``scan_*``, ``probe_*``, ``found_*``, ``mark`` and ``clap``
+events; scan and found timing come from the ``ui``/``sub`` changes in the
+5 Hz records. With ``path`` set, new lines are appended to that file every
 ``flush_ms`` (buffered, to limit flash wear); leave it None for RAM only.
 
 Records allocate (a dict and a string) but only at 5 Hz plus rare events.
@@ -27,6 +43,31 @@ def _r1(v):
     return None if v is None else round(v, 1)
 
 
+def _write(path, mode, lines):
+    with open(path, mode) as f:
+        for s in lines:
+            f.write(s)
+            f.write("\n")
+
+
+def session(dev, logdir="/log"):
+    """Telemetry appending to ``<logdir>/<n>_<dev>.jsonl``, ``n`` one past
+    the highest session number already there (a deleted log never makes two
+    sessions share a file); creates ``logdir``."""
+    import os
+    try:
+        os.mkdir(logdir)
+    except OSError:
+        pass                       # already there
+    n = 0
+    for f in os.listdir(logdir):
+        i = f.find("_")
+        if i > 0 and f[:i].isdigit() and int(f[:i]) >= n:
+            n = int(f[:i]) + 1
+    sid = str(n)
+    return Telemetry(dev=dev, sid=sid, path="%s/%s_%s.jsonl" % (logdir, sid, dev))
+
+
 class Telemetry:
     """Ring of JSONL strings; newest ``cap`` records are kept."""
 
@@ -39,7 +80,7 @@ class Telemetry:
         self.path = path
         self.flush_ms = flush_ms
         self.beacons = beacons     # also log every received beacon (bcn_rx)
-        self.enabled = True
+        self.err = None            # the OSError that ended writing to ``path``
         self.clear()
 
     def clear(self):
@@ -53,10 +94,8 @@ class Telemetry:
 
     # ---- writing ----
     def add(self, d):
-        """Append one record (a dict, or an already-encoded JSON string)."""
-        if not self.enabled:
-            return
-        s = d if isinstance(d, str) else json.dumps(d)
+        """Append one record (a dict)."""
+        s = json.dumps(d)
         i = self._i
         self._ring[i] = s
         self._i = (i + 1) % self.cap
@@ -67,8 +106,6 @@ class Telemetry:
 
     def event(self, t, ev, a=None, b=None, c=None):
         """Event record: ``ev`` plus up to three (key, value) pairs."""
-        if not self.enabled:
-            return
         d = {"t": t, "ev": ev}
         for kv in (a, b, c):
             if kv is not None:
@@ -77,7 +114,7 @@ class Telemetry:
 
     def due(self, now):
         """True when a state record is due (``hz``)."""
-        if not self.enabled or not self.period_ms:
+        if not self.period_ms:
             return False
         nx = self._next
         if nx is None or ticks_diff(now, nx) >= 0:
@@ -90,9 +127,10 @@ class Telemetry:
         """State record from a ``Runtime`` (call when ``due``)."""
         g = rt.game
         p = g.params
+        a = g.arrow
         est = g.est
         link = rt.link
-        age = link.age_ms(now) if link is not None else None
+        age = link.age_ms(now)
         d = {
             "t": now, "ev": "s", "sid": self.sid, "dev": self.dev,
             "rssi": g.rssi_last, "rssi_f": _r1(est.rssi_f),
@@ -100,15 +138,15 @@ class Telemetry:
             "zone": g.px.zone, "trend": est.trend, "trend_c": _r1(est.trend_conf),
             "lost_s": None if age is None else _r1(age / 1000.0),
             "steps": g.me.steps, "act": ACT_NAMES[g.me.activity & 3],
-            "arrow_deg": None if p is None else _r1(p.arrow_deg),
-            "cone": None if p is None else _r1(p.cone_deg),
-            "ui": g.screen, "sub": None if p is None else p.sub,
+            "steps_since_scan": None if a is None else a.steps_walked,
+            "arrow_deg": _r1(p.arrow_deg), "cone": _r1(p.cone_deg),
+            "ui": g.screen, "sub": p.sub,
             "scr": rt.screen_is_on, "bl": int((rt.bl_level or 0.0) * 100 + 0.5),
             "fps": _r1(rt.fps), "batt_pct": g.battery, "batt_mv": rt.batt_mv,
+            "chg": rt.batt_chg,
             "p_batt": g.peer.battery,
-            "seq": rt.tx.seq, "peer_seq": None if link is None or link.last_seq < 0 else link.last_seq,
-            "rx": None if link is None else link.n_rx,
-            "loss": None if link is None else link.loss_pct(),
+            "seq": rt.tx.seq, "peer_seq": None if link.last_seq < 0 else link.last_seq,
+            "rx": link.n_rx, "loss": link.loss_pct(),
             "hz": g.beacon_hz, "buzz": g.buzz,
         }
         self.add(d)
@@ -134,10 +172,7 @@ class Telemetry:
     def save(self, path, n=None):
         """Write the ring (or its newest ``n``) to ``path`` as JSONL; returns lines."""
         ls = self.lines(n)
-        with open(path, "w") as f:
-            for s in ls:
-                f.write(s)
-                f.write("\n")
+        _write(path, "w", ls)
         return len(ls)
 
     # ---- flash ----
@@ -155,11 +190,9 @@ class Telemetry:
             return 0
         ls = self.lines(k)
         try:
-            with open(self.path, "a") as f:
-                for s in ls:
-                    f.write(s)
-                    f.write("\n")
-        except OSError:
+            _write(self.path, "a", ls)
+        except OSError as e:
+            self.err = e
             self.path = None           # no flash space / no dir: RAM only from now on
             return 0
         self._flushed = self.n

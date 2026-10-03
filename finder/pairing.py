@@ -2,16 +2,24 @@
 
     looking -> seen -> confirmed -> calibrate -> split -> done
 
-* ``looking``: a nearby watch that is also pairing is heard 3 times within
-  2 s at a strong RSSI (relative to the nominal p1m) -> ``seen``.
+* ``looking``: a nearby watch that is also pairing (screen PAIRING; one in
+  calibrate or split is already paired) is heard 3 times within 2 s at a
+  strong RSSI (relative to the nominal p1m) -> ``seen``. The
+  ``SEEN_SLOTS`` strongest candidates are tracked at once (two pairs starting
+  side by side); one is taken only if no other candidate heard within the
+  last 2 s is stronger.
 * ``seen``: both watches show the same 3 runes, taken from a hash of the two
   sorted MACs (tokens ``glyphs.runes.code``). A tap / short press confirms
   this side (``confirmed``); a matched bump confirms both at once.
+  ``seen``/``confirmed`` return to ``looking`` when the partner is silent for
+  5 s or has not shown PAIRING for 2 s (it paired with another watch, or its
+  round started without this one).
 * ``calibrate``: 3 s mean RSSI at 1 m. The fill pauses while the sd over
   the last 1 s exceeds 4 dB (``unstable`` -> chip ``HOLD STILL`` once paused
   for 0.7 s, so the chip does not flicker); the result is clamped to nominal +-6 dB; after
   10 s the nominal p1m is used (toast ``CAL SKIPPED``).
-* ``split``: 30 s countdown, TICK at 3/2/1, CLOSER and ``GO`` at 0 for 1 s.
+* ``split``: 30 s countdown (``split_s``), TICK at 3/2/1, CLOSER and ``GO`` at 0
+  for 1 s.
 
 ``update(t)`` returns the haptic started this frame (or None); ``toast`` is a
 one-shot set on the update that raised it. Pure logic, no radio access.
@@ -20,8 +28,9 @@ one-shot set on the update that raised it. Pure logic, no radio access.
 import math
 from array import array
 
-from finder.compat import ticks_diff
+from finder.compat import TickRing, ticks_diff
 from finder import tuning as T
+from finder.haptic_patterns import stronger
 
 LOOKING = "looking"
 SEEN = "seen"
@@ -30,12 +39,13 @@ CALIBRATE = "calibrate"
 SPLIT = "split"
 DONE = "done"
 
-SEEN_MIN_DB = -15.0        # candidate RSSI >= p1m + this (about 5 m at n 2.2)
+SEEN_MIN_DB = -15.0        # candidate RSSI >= p1m + this (about 3.8 m at n 2.6)
 SEEN_PACKETS = T.RELINK_PACKETS
 SEEN_WINDOW_MS = T.RELINK_WINDOW_MS
+SEEN_SLOTS = 4             # pairing candidates tracked at once
 SEEN_LOST_MS = T.LINK_LOST_AFTER_MS   # candidate silent this long -> looking
-GO_MS = 1000
 UNSTABLE_SHOW_MS = 700     # fill paused this long before the chip says HOLD STILL (no flicker)
+HINT_HOLD_STILL = "HOLD STILL"   # calibrate chip while ``unstable`` (the renderer keys on it)
 TOAST_CAL_SKIPPED = "CAL SKIPPED"
 
 _FNV_OFF = 0x811C9DC5
@@ -148,15 +158,11 @@ class Calibrator:
         return False
 
     @property
-    def progress(self):
-        f = self.fill_ms / self.window_ms
-        return 1.0 if f > 1.0 else f
-
-    @property
     def digit(self):
-        """Countdown digit 3/2/1 from the fill."""
-        d = 3 - self.fill_ms // 1000
-        return 1 if d < 1 else 3 if d > 3 else d
+        """Countdown digit (3/2/1 for a 3 s window) from the fill."""
+        n = (self.window_ms + 999) // 1000
+        d = n - self.fill_ms // 1000
+        return 1 if d < 1 else n if d > n else d
 
 
 class Pairing:
@@ -166,9 +172,12 @@ class Pairing:
         self.my_mac = bytes(my_mac) if my_mac is not None else None
         self.nominal = nominal
         self.cal = Calibrator(nominal)
-        self._c_mac = None
-        self._c_t = array("i", [0] * SEEN_PACKETS)
-        self._c_n = 0
+        self.split_s = T.PAIR_SPLIT_S   # split countdown length, s (the web sim's demo shortens it)
+        # looking: candidate table (MAC, packet times, last RSSI and time)
+        self._c_mac = [None] * SEEN_SLOTS
+        self._c_rx = [TickRing(SEEN_PACKETS) for _ in range(SEEN_SLOTS)]
+        self._c_rssi = [0] * SEEN_SLOTS
+        self._c_last = [0] * SEEN_SLOTS
         self.p1m = None
         self.reset(0)
 
@@ -179,12 +188,12 @@ class Pairing:
         self.peer_mac = None
         self.runes = None
         self.p1m = None
-        self.cal_skipped = False
         self.confirmed = False
         self.peer_confirmed = False
-        self._c_mac = None
-        self._c_n = 0
+        for k in range(SEEN_SLOTS):
+            self._c_mac[k] = None
         self._last_rx = None
+        self._last_pair = None     # the partner last showed PAIRING (seen/confirmed)
         self.countdown = None
         self.toast = None
         self.unstable = False
@@ -195,47 +204,69 @@ class Pairing:
     def start_split(self, t_ms):
         """New round with the existing pairing and calibration."""
         self._set(SPLIT, t_ms)
-        self.countdown = T.PAIR_SPLIT_S
-        self._digit = T.PAIR_SPLIT_S
+        self.countdown = self.split_s
+        self._digit = self.split_s
 
     def _set(self, sub, t_ms):
         self.sub = sub
         self.t_sub = t_ms
 
     def _emit(self, name):
-        h = self._haptic
-        if h is None or T.HAPTIC_RANK[name] >= T.HAPTIC_RANK[h]:
-            self._haptic = name
+        self._haptic = stronger(self._haptic, name)
 
     # ---- inputs ----------------------------------------------------------------
     def on_candidate(self, t_ms, mac, rssi, peer_pairing=True):
-        """Any valid beacon while looking/seen. Returns True if it is the partner."""
+        """Any valid beacon while looking/seen/confirmed (``peer_pairing``: the
+        sender shows PAIRING). Returns True if it is the partner."""
         if self.sub == LOOKING:
             if not peer_pairing or rssi < self.nominal + SEEN_MIN_DB:
                 return False
-            if self._c_mac != mac:
-                self._c_mac = bytes(mac)   # the radio driver may reuse its buffer
-                self._c_n = 0
-            i = self._c_n % SEEN_PACKETS
-            self._c_t[i] = t_ms
-            self._c_n += 1
-            if self._c_n >= SEEN_PACKETS:
-                oldest = self._c_t[self._c_n % SEEN_PACKETS]
-                if ticks_diff(t_ms, oldest) <= SEEN_WINDOW_MS:
-                    self.peer_mac = bytes(mac)
-                    if self.my_mac is not None:
-                        self.runes = rune_ids(self.my_mac, self.peer_mac)
-                    else:
-                        self.runes = rune_ids(self.peer_mac, self.peer_mac)
-                    self._set(SEEN, t_ms)
-                    self._last_rx = t_ms
-                    self._emit("DOUBLE")
-                    return True
-            return False
+            k = self._slot(mac, rssi)
+            if k < 0:
+                return False
+            rx = self._c_rx[k]
+            rx.note(t_ms)
+            self._c_rssi[k] = rssi
+            self._c_last[k] = t_ms
+            if not rx.full_within(t_ms, SEEN_WINDOW_MS):
+                return False
+            for j in range(SEEN_SLOTS):
+                if j != k and self._c_mac[j] is not None and self._c_rssi[j] > rssi:
+                    return False          # a stronger candidate is still around
+            self.peer_mac = self._c_mac[k]
+            if self.my_mac is not None:
+                self.runes = rune_ids(self.my_mac, self.peer_mac)
+            else:
+                self.runes = rune_ids(self.peer_mac, self.peer_mac)
+            self._set(SEEN, t_ms)
+            self._last_rx = t_ms
+            self._last_pair = t_ms
+            self._emit("DOUBLE")
+            return True
         if self.peer_mac is not None and mac == self.peer_mac:
             self._last_rx = t_ms
+            if peer_pairing:
+                self._last_pair = t_ms
             return True
         return False
+
+    def _slot(self, mac, rssi):
+        """Candidate slot of ``mac``. A new MAC takes an empty slot, else the weakest
+        one if it is stronger than that; otherwise -1 (it could never be taken)."""
+        cm = self._c_mac
+        cr = self._c_rssi
+        k = 0
+        for j in range(SEEN_SLOTS):
+            m = cm[j]
+            if m == mac:
+                return j
+            if cm[k] is not None and (m is None or cr[j] < cr[k]):
+                k = j
+        if cm[k] is not None and cr[k] >= rssi:
+            return -1
+        cm[k] = bytes(mac)            # the radio driver may reuse its buffer
+        self._c_rx[k].clear()
+        return k
 
     def on_rssi(self, t_ms, rssi):
         """Partner packet RSSI (own measurement); feeds the calibration."""
@@ -274,15 +305,23 @@ class Pairing:
         self._unst_t = None
         self.cal.reset(t_ms)
         self._digit = 0
-        self.countdown = 3
+        self.countdown = self.cal.digit
 
     # ---- per frame -------------------------------------------------------------
     def update(self, t_ms):
         """Advance timers; returns the haptic started this frame (or None)."""
         self.toast = None
         sub = self.sub
-        if sub == SEEN or sub == CONFIRMED:
-            if self._last_rx is not None and ticks_diff(t_ms, self._last_rx) > SEEN_LOST_MS:
+        if sub == LOOKING:
+            for k in range(SEEN_SLOTS):   # forget candidates silent for the window
+                if (self._c_mac[k] is not None
+                        and ticks_diff(t_ms, self._c_last[k]) > SEEN_WINDOW_MS):
+                    self._c_mac[k] = None
+        elif sub == SEEN or sub == CONFIRMED:
+            lr = self._last_rx
+            lp = self._last_pair
+            if ((lr is not None and ticks_diff(t_ms, lr) > SEEN_LOST_MS)
+                    or (lp is not None and ticks_diff(t_ms, lp) > SEEN_WINDOW_MS)):
                 self.reset(t_ms)
         elif sub == CALIBRATE:
             c = self.cal
@@ -297,7 +336,6 @@ class Pairing:
             self.countdown = d
             if fin:
                 self.p1m = c.p1m
-                self.cal_skipped = c.skipped
                 if c.skipped:
                     self.toast = TOAST_CAL_SKIPPED
                 self._emit("CLOSER")
@@ -307,8 +345,8 @@ class Pairing:
                 self._emit("TICK")
         elif sub == SPLIT:
             el = ticks_diff(t_ms, self.t_sub)
-            left = T.PAIR_SPLIT_S * 1000 - el
-            if left <= -GO_MS:
+            left = self.split_s * 1000 - el
+            if left <= -T.PAIR_GO_MS:
                 self.countdown = 0
                 self._set(DONE, t_ms)
             else:

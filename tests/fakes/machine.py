@@ -3,7 +3,7 @@
 _freq = [160000000]
 pins = {}
 i2c_devices = {}   # (bus_id, addr) -> FakeI2CDevice
-spi_log = []       # list of (spi_id, "write"/"cs", payload)
+spi_log = []       # list of (spi_id, "write", payload)
 
 
 def reset_fakes():
@@ -84,7 +84,7 @@ class PWM:
 
 
 class FakeI2CDevice:
-    """256-byte register file; ``on_write(reg, data)`` hook for side effects."""
+    """256-byte register file."""
 
     def __init__(self, addr, regs=None):
         self.addr = addr
@@ -112,6 +112,28 @@ class FakeI2CDevice:
 def add_i2c_device(bus_id, addr, regs=None):
     dev = FakeI2CDevice(addr, regs)
     i2c_devices[(bus_id, addr)] = dev
+    return dev
+
+
+class FakeAXP202(FakeI2CDevice):
+    """AXP202 register file: IRQ status 0x48..0x4C are write-1-to-clear."""
+
+    def write(self, reg, data):
+        if 0x48 <= reg <= 0x4C:
+            self.writes.append((reg, bytes(data)))
+            self.regs[reg] &= ~data[0] & 0xFF
+            return
+        FakeI2CDevice.write(self, reg, data)
+
+
+def add_axp202(regs=None, bus_id=0):
+    """AXP202 at 0x35 (chip id 0x41, DCDC3 on) plus ``regs`` overrides."""
+    r = {0x03: 0x41, 0x12: 0x02}
+    if regs:
+        for k in regs:
+            r[k] = regs[k]
+    dev = FakeAXP202(0x35, r)
+    i2c_devices[(bus_id, 0x35)] = dev
     return dev
 
 

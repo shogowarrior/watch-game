@@ -3,16 +3,18 @@
 An ``Arrow`` is born from a scan result ``(theta, s0)`` or a walk-test probe
 and then runs by itself at the logic rate (10 Hz):
 
-    reveal (1.5 s) -> turn (guided pacer) | face (static) -> lock -> walk -> expire -> done
+    reveal (1.5 s) -> turn (guided pacer) | face (static) -> lock -> walk -> done
 
 Angles are degrees clockwise from screen-up; ``theta`` is relative to the
 heading at scan start (screen-up). After every ``update`` the object exposes
 the RenderParams fields it owns: ``glyph``, ``arrow_deg``, ``cone_deg``,
-``arrow_style``, ``sweep``, ``word``, ``top_text``, ``sub``, ``scale`` plus
-the one-shot events ``haptic`` and ``toast`` (set only on the update that
-started them). ``sigma`` is the display half-angle before clamping. During
-the guided turn ``sweep`` is ``(pacer_wedge_deg, None, None, False)``: bins
-None means "draw the wedge only, no bin bars".
+``arrow_style``, ``sweep``, ``word``, ``top_text``, ``sub`` plus the one-shot
+events ``haptic`` and ``toast`` (set only on the update that started them;
+two haptics on one update keep the higher rank, ``haptic_patterns.stronger``).
+``sigma`` is the display half-angle before clamping. During the guided turn
+``sweep`` is the §3 pacer shape ``(pacer_wedge_deg, 12×None, None, False)``.
+On expiry (sigma > 60 or age > 120 s) the arrow is done at once, with FARTHER
+and SCAN AGAIN on that update; the renderer runs the 600 ms shrink-out itself.
 
 Design choices where the spec is silent (all calibration starting values):
   * steps and still-time grow sigma from birth, not only after lock
@@ -24,39 +26,38 @@ Design choices where the spec is silent (all calibration starting values):
     ``outline`` but never hides or expires the arrow
   * link loss pauses reveal/turn/face clocks; an arrow that cannot come back
     (lost > 20 s, sigma > 60, age > 120 s) ends silently (no toast/haptic)
+  * the WRONG WAY chip after a colder hit lasts the hint-chip time (4 s)
 """
 
 import math
+from finder import tuning as T
 from finder.compat import const, ticks_diff, ticks_add
 from finder.estimators.base import ACT_STILL
+from finder.render_params import arrow_style
+from finder.haptic_patterns import stronger
 
-# --- tokens.json thresholds.arrow / scan / probe -----------------------------
-REVEAL_MS = const(1500)
-PACER_DEG_S = 30.0            # thresholds.scan.deg_per_s
-TICK_EVERY_DEG = 45.0
-LOCK_EASE_MS = const(300)
-LOCK_WORD_MS = const(3000)
-EXPIRE_MS = const(600)
-FACE_MS = const(6000)         # static mode auto-lock (= slowest guided turn)
-MAX_AGE_MS = const(120000)    # thresholds.arrow.max_age_ms
-BORN_MAX_SIGMA = 45.0         # thresholds.arrow.born_max_sigma_deg
-TIER_A = 25.0
-TIER_B = 45.0
-TIER_OUTLINE = 60.0
-CONE_MIN = 12.0
-CONE_MAX = 60.0
-SKIP_TURN_DEG = 20.0
-CLOCK_MAX_SIGMA = 30.0
-COLDER_HIT_MS = const(6000)   # thresholds.arrow.colder_hit_ms
-COLDER_EVERY_MS = const(15000)
-COLDER_HIT_DEG = 20.0
-HINT_MS = const(4000)         # top hint chip lifetime after a colder hit
-RELINK_RESTORE_MS = const(20000)
-UNRELIABLE_DEG = 15.0
-PROBE_MIN_SIGMA = 35.0        # thresholds.probe.sigma_min_deg
-K_TURN = 0.15
-K_STEP = 0.7
-K_STILL = 1.0
+REVEAL_MS = T.DIRECTION_REVEAL_MS
+PACER_DEG_S = T.PACER_DEG_PER_S
+TICK_EVERY_DEG = T.PACER_TICK_DEG
+LOCK_EASE_MS = T.DIRECTION_LOCK_EASE_MS
+LOCK_WORD_MS = T.DIRECTION_WALK_WORD_MS
+FACE_MS = const(6000)         # static mode auto-lock (= slowest guided turn; spec-silent)
+MAX_AGE_MS = T.ARROW_MAX_AGE_MS
+BORN_MAX_SIGMA = T.ARROW_BORN_MAX_SIGMA_DEG
+CONE_MIN = T.CONE_DRAW_MIN_DEG
+CONE_MAX = T.ARROW_HIDE_SIGMA_DEG   # drawn cone 12..60; a true sigma above it expires
+SKIP_TURN_DEG = T.DIRECTION_AHEAD_DEG
+CLOCK_MAX_SIGMA = T.DIRECTION_CLOCK_MAX_SIGMA_DEG
+COLDER_HIT_MS = T.COLDER_HIT_MS
+COLDER_EVERY_MS = T.COLDER_HIT_EVERY_MS
+COLDER_HIT_DEG = T.SIGMA_COLDER_HIT_DEG
+HINT_MS = T.HINT_CHIP_MS
+RELINK_RESTORE_MS = T.ARROW_RELINK_RESTORE_MS
+UNRELIABLE_DEG = T.SIGMA_UNRELIABLE_DEG
+PROBE_MIN_SIGMA = T.PROBE_SIGMA_MIN_DEG
+K_TURN = T.SIGMA_TURN_K
+K_STEP = T.SIGMA_STEP_K
+K_STILL = T.SIGMA_STILL_K
 
 MODE_GUIDED = "guided"
 MODE_STATIC = "static"
@@ -66,12 +67,11 @@ PH_TURN = "turn"
 PH_FACE = "face"
 PH_LOCK = "lock"
 PH_WALK = "walk"
-PH_EXPIRE = "expire"
 PH_DONE = "done"
 
-# RenderParams.sub for each phase (lock/expire belong to the walk sub-screen)
+# RenderParams.sub for each drawn phase (lock belongs to the walk sub-screen)
 _SUB = {PH_REVEAL: "reveal", PH_TURN: "turn", PH_FACE: "turn",
-        PH_LOCK: "walk", PH_WALK: "walk", PH_EXPIRE: "walk"}
+        PH_LOCK: "walk", PH_WALK: "walk"}
 
 W_TURN_RIGHT = "TURN RIGHT"
 W_TURN_LEFT = "TURN LEFT"
@@ -86,6 +86,8 @@ H_DOUBLE = "DOUBLE"
 H_NOPE = "NOPE"
 H_FARTHER = "FARTHER"
 
+_NO_BINS = (None,) * T.SCAN_BINS   # turn pacer: wedge only, no bin bars (§3)
+
 
 def wrap180(a):
     """Angle to (-180, 180]."""
@@ -99,24 +101,13 @@ def wrap360(a):
     return 0.0 if a >= 360.0 else a
 
 
-def sigma(s0, turn_deg, steps_walked, still_s, colder_hits, unreliable=False):
-    """Cone half-angle model of ui-spec §5.6 (degrees)."""
+def sigma(s0, turn_deg, steps_walked, still_s, colder_hits):
+    """Cone half-angle model of ui-spec §5.6 (degrees), without the display-only
+    unreliable widening."""
     a = K_TURN * abs(turn_deg)
     b = K_STEP * steps_walked
     c = K_STILL * still_s
-    s = math.sqrt(s0 * s0 + a * a + b * b + c * c) + COLDER_HIT_DEG * colder_hits
-    return s + (UNRELIABLE_DEG if unreliable else 0.0)
-
-
-def tier(s):
-    """Style tier for sigma ``s``: solid_a / solid_b / outline / None (hidden)."""
-    if s <= TIER_A:
-        return "solid_a"
-    if s <= TIER_B:
-        return "solid_b"
-    if s <= TIER_OUTLINE:
-        return "outline"
-    return None
+    return math.sqrt(s0 * s0 + a * a + b * b + c * c) + COLDER_HIT_DEG * colder_hits
 
 
 def clock_word(theta):
@@ -150,10 +141,8 @@ def _out_cubic(x):
 
 def make(theta_deg, s0_deg, t_ms, mode=MODE_GUIDED, probe=False):
     """New Arrow, or None when sigma at birth exceeds 45 deg (no arrow is born)."""
-    s0 = max(s0_deg, PROBE_MIN_SIGMA) if probe else s0_deg
-    if s0 > BORN_MAX_SIGMA:
-        return None
-    return Arrow(theta_deg, s0, t_ms, mode, probe)
+    a = Arrow(theta_deg, s0_deg, t_ms, mode, probe)
+    return a if a.s0 <= BORN_MAX_SIGMA else None
 
 
 class Arrow:
@@ -186,9 +175,6 @@ class Arrow:
         self._walk_deg = self.theta if probe else 0.0
         self._dir = 1.0 if self.theta >= 0 else -1.0
         self._word0 = reveal_word(self.theta, self.s0)
-        self._last_deg = self.theta
-        self._last_cone = CONE_MIN
-        self._last_style = tier(self.s0)
         self.haptic = None
         self.toast = None
         self._render(t_ms)
@@ -198,20 +184,13 @@ class Arrow:
     def done(self):
         return self.phase == PH_DONE
 
-    @property
-    def visible(self):
-        return self.glyph is not None
-
-    def age_ms(self, t_ms):
-        return ticks_diff(t_ms, self.t0)
-
     def sigma_true(self):
         """Model sigma without the display-only unreliable widening."""
         return sigma(self.s0, self.turn_deg, self.steps_walked, self.still_s,
-                     self.colder_hits, False)
+                     self.colder_hits)
 
     # --- inputs --------------------------------------------------------------
-    def tap(self, t_ms=None):
+    def tap(self):
         """Press/tap: "I'm facing it". True if consumed (turn/face phase)."""
         if self.link_ok and (self.phase == PH_TURN or self.phase == PH_FACE):
             self._tap = True
@@ -251,13 +230,13 @@ class Arrow:
                 self._ph_t = ticks_add(self._ph_t, lost)
         self.link_ok = True
         self._step(t_ms, trend, partner_walking)
-        if self.phase != PH_EXPIRE and self.phase != PH_DONE and self._stale(t_ms):
-            self._expire(t_ms)
+        if self._stale(t_ms):
+            self._expire()
         self._render(t_ms)
 
     # --- internals -----------------------------------------------------------
     def _stale(self, t_ms):
-        return self.sigma_true() > TIER_OUTLINE or ticks_diff(t_ms, self.t0) > MAX_AGE_MS
+        return self.sigma_true() > CONE_MAX or ticks_diff(t_ms, self.t0) > MAX_AGE_MS
 
     def _update_lost(self, t_ms):
         self.link_ok = False
@@ -265,8 +244,7 @@ class Arrow:
         self._tap = False
         if self._lost_t is None:
             self._lost_t = t_ms
-        if (self.phase == PH_EXPIRE or self._stale(t_ms)
-                or ticks_diff(t_ms, self._lost_t) > RELINK_RESTORE_MS):
+        if self._stale(t_ms) or ticks_diff(t_ms, self._lost_t) > RELINK_RESTORE_MS:
             self.phase = PH_DONE
         self._render(t_ms)
 
@@ -278,14 +256,12 @@ class Arrow:
         self._lock_t = t_ms
         self._cold_t = None
         self._tap = False
-        self.haptic = H_DOUBLE
+        self.haptic = stronger(self.haptic, H_DOUBLE)
 
-    def _expire(self, t_ms):
-        self.phase = PH_EXPIRE
-        self._ph_t = t_ms
+    def _expire(self):
+        self.phase = PH_DONE
         self.toast = TOAST_EXPIRE
-        if self.haptic is None:        # a NOPE on the same frame outranks FARTHER
-            self.haptic = H_FARTHER
+        self.haptic = stronger(self.haptic, H_FARTHER)   # a lock on the same update: FARTHER wins
 
     def _step(self, t, trend, partner_walking):
         ph = self.phase
@@ -319,7 +295,7 @@ class Arrow:
             n = int(p / TICK_EVERY_DEG)
             if n > self._ticks:
                 self._ticks = n
-                self.haptic = H_TICK
+                self.haptic = stronger(self.haptic, H_TICK)
             return
         if ph == PH_FACE:
             if self._tap or ticks_diff(t, self._ph_t) >= FACE_MS:
@@ -331,9 +307,6 @@ class Arrow:
                 self._ph_t = t
         if ph == PH_LOCK or ph == PH_WALK:
             self._colder(t, trend, partner_walking)
-            return
-        if ph == PH_EXPIRE and ticks_diff(t, self._ph_t) >= EXPIRE_MS:
-            self.phase = PH_DONE
 
     def _colder(self, t, trend, partner_walking):
         if trend >= 0 or partner_walking:
@@ -349,11 +322,10 @@ class Arrow:
         self.colder_hits += 1
         self._hit_t = t
         self._cold_t = t
-        self.haptic = H_NOPE
+        self.haptic = stronger(self.haptic, H_NOPE)
 
     def _render(self, t):
-        s_true = self.sigma_true()
-        s = s_true + (UNRELIABLE_DEG if self.unreliable else 0.0)
+        s = self.sigma_true() + (UNRELIABLE_DEG if self.unreliable else 0.0)
         self.sigma = s
         self.sub = None
         self.glyph = None
@@ -363,31 +335,21 @@ class Arrow:
         self.sweep = None
         self.word = None
         self.top_text = None
-        self.scale = 1.0
         ph = self.phase
         if ph == PH_DONE or not self.link_ok:
             return
         self.sub = _SUB[ph]
         self.glyph = "arrow"
         el = ticks_diff(t, self._ph_t)
-        if ph == PH_EXPIRE:
-            x = el / EXPIRE_MS
-            self.scale = 0.0 if x >= 1.0 else 1.0 - _out_cubic(x if x > 0.0 else 0.0)
-            self.arrow_deg = self._last_deg
-            self.cone_deg = self._last_cone
-            self.arrow_style = self._last_style
-            return
         cone = CONE_MIN if s < CONE_MIN else CONE_MAX if s > CONE_MAX else s
-        style = tier(s)
-        if style is None:              # display-only widening: never hide
-            style = "outline"
+        style = arrow_style(cone)      # clamped cone: the widening never hides it
         if ph == PH_REVEAL or ph == PH_FACE:
             deg = self.theta
             self.word = self._word0 if ph == PH_REVEAL else W_FACE
         elif ph == PH_TURN:
             deg = self.theta - self.pacer
             self.word = W_TURN_RIGHT if self._dir > 0 else W_TURN_LEFT
-            self.sweep = (wrap360(self.pacer), None, None, False)
+            self.sweep = (wrap360(self.pacer), _NO_BINS, None, False)
         else:
             if ph == PH_LOCK:
                 x = el / LOCK_EASE_MS
@@ -400,10 +362,6 @@ class Arrow:
                 self.top_text = T_WRONG_WAY
             elif style == "outline":
                 self.top_text = T_RESCAN
-        deg = wrap360(deg)
-        self.arrow_deg = deg
+        self.arrow_deg = wrap360(deg)
         self.cone_deg = cone
         self.arrow_style = style
-        self._last_deg = deg
-        self._last_cone = cone
-        self._last_style = style
