@@ -7,7 +7,8 @@ assert on register writes, SPI traffic and radio packets.
 
 ``install_socket()`` swaps in a fake ``socket`` for one test (hal/debuglink's
 UDP sender) and returns the function that puts the old one back: CPython's
-real socket must stay for the other tests.
+real socket must stay for the other tests. ``serial_port.Port`` stands in
+for the USB serial port that hal/debuglink's ``SerialLink`` writes to.
 """
 
 import sys

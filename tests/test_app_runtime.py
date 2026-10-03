@@ -1406,17 +1406,29 @@ def test_stage_sums_stay_small_ints():
 
 # ---- debug mode: the telemetry sink ---------------------------------------------------
 class Sink:
-    """Collects datagrams as hal/debuglink.DebugLink sends them (and when)."""
+    """Collects records as a hal/debuglink link gets them (and when); Wi-Fi's
+    ``rp_ms`` unless given."""
 
-    def __init__(self, clock=None):
+    channel = None
+
+    def __init__(self, clock=None, rp_ms=200):
         self.clock = clock
+        self.rp_ms = rp_ms
         self.sent = []
         self.at = []
+        self.pumps = 0
+        self.drains = 0
 
     def send(self, s):
         self.sent.append(s)
         self.at.append(None if self.clock is None else self.clock.now)
         return True
+
+    def pump(self, now):
+        self.pumps += 1
+
+    def drain(self):
+        self.drains += 1
 
     def stats(self):
         return {"tx": len(self.sent), "tx_err": 0}
@@ -1461,7 +1473,8 @@ def test_debug_sink_sends_state_and_screen_at_5hz():
             assert kinds[i - 1] == "s" and recs[i - 1]["t"] == recs[i]["t"]
             assert recs[i]["on"] is True and recs[i]["bl"] == recs[i - 1]["bl"] > 0
     assert set(sink.at) == set(d["t"] for d in recs if d["ev"] == "s")   # the 5 Hz path only
-    tl.record(clock.now, rt)
+    assert sink.pumps == rt.loops and sink.drains == 1    # once per pass; once at loop exit
+    tl.record(clock.now + tl.period_ms, rt)     # the next state record
     _same_params(json.loads(sink.sent[-1])["p"], rt.params)
     ring = [json.loads(s) for s in tl.lines()]
     assert ring and all(d["ev"] == "s" and d["mac"] == "10000a" for d in ring)
@@ -1592,6 +1605,82 @@ def test_debug_rp_names_the_wifi_channel():
         rt.tele.record(1000, rt)
         rp = json.loads(sink.sent[-1])
         assert rp["ev"] == "rp" and "ch" in rp and rp["ch"] == ch, rp
+
+
+def test_debug_rp_rate_follows_the_link():
+    """``rp`` goes once the sink's ``rp_ms`` has passed: with every 5 Hz state
+    record on Wi-Fi (200) even when one is a few ms late, once a second on
+    USB (1000), and on USB at once when the screen, its sub-state or its
+    power changes."""
+    fakes.install()
+    import json
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    from finder.render_params import make_params, replace
+    clock = Clock(0)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None)
+    rt.begin(0)
+    rt._stage_logic(1000)
+    rt.params = make_params(t_ms=1000, screen="FAR", sub=None)
+    late = [1000 + 200 * i + (3 if i & 1 else 0) for i in range(16)]   # odd ones 3 ms late
+
+    def rp_times(rp_ms, times, change=None):
+        sink = Sink(rp_ms=rp_ms)
+        rt.tele = Telemetry(dev="A", sink=sink)
+        for t in times:
+            if change is not None:
+                change(t)
+            rt.tele.record(t, rt)
+        recs = [json.loads(s) for s in sink.sent]
+        return [d["t"] for d in recs if d["ev"] == "rp"]
+    assert rp_times(200, late) == late
+    assert rp_times(1000, late) == [1000, 2003, 3000, 4003]
+
+    def change(t):
+        if t == 1400:
+            rt.params = replace(rt.params, screen="MENU")
+        elif t == 1800:
+            rt.params = replace(rt.params, sub=1)
+        elif t == 2200:
+            rt.screen_is_on = False
+    assert rp_times(1000, late, change) == [1000, 1400, 1800, 2200, 3203]
+
+
+def test_debug_usb_link_writes_paced_lines_from_the_loop():
+    """The USB link in the loop: each pass's telemetry stage pumps it, no
+    write overfills the UART's FIFO, and the laptop gets whole lines: the
+    5 Hz state records and ``rp`` about once a second. Loop exit writes out
+    what still waits."""
+    fakes.install()
+    import json
+    from tests.fakes.serial_port import Port
+    from hal.radio import SimRadio
+    from hal.debuglink import SerialLink, SERIAL_FIFO, SERIAL_RATE
+    from app.telemetry import Telemetry
+    clock = Clock(0)
+    port = Port(clock)
+    rt = _watch(clock, SimRadio(MAC_A).begin())
+    link = SerialLink("A", port)
+    rt.tele = Telemetry(dev="A", sink=link)
+    rt.begin(0)
+    while clock.now < 5000:                     # Runtime.run's loop, without its exit flush
+        w = rt.step()
+        if w > 0:
+            rt.idle(w)
+    assert port.overfill(SERIAL_FIFO, SERIAL_RATE) is None
+    assert link.drop == 0 and link.queued < 1000
+    rt.tele.flush(force=True)
+    assert link.queued == 0
+    lines = port.data().split(b"\n")
+    assert lines[-1] == b""
+    recs = []
+    for ln in lines[:-1]:
+        assert ln[:1] == b"\x1e" and b'", "' not in ln and b'": ' not in ln, ln   # compact
+        recs.append(json.loads(ln[1:]))
+    kinds = [d["ev"] for d in recs]
+    assert 24 <= kinds.count("s") <= 26 and 5 <= kinds.count("rp") <= 7, kinds
+    assert link.n_tx == len(recs) and rt.stats()["debug_stats"]["tx"] == len(recs)
 
 
 def test_debug_send_errors_never_stop_the_loop():

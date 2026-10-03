@@ -1,22 +1,30 @@
-"""Debug mode link: join the Wi-Fi and send the watch's records to the laptop over UDP.
+"""Debug mode links: send the watch's records to the laptop over USB serial or Wi-Fi.
 
 Debug mode (docs/design/debug-mode.md) shows the real watches in the web sim
 page. ``main.py`` calls ``start()`` before ``Board.init``::
 
     link, msg = debuglink.start()   # (None, None) when /debug is missing
     if msg:
-        print(msg)                  # where it sends, or why debug mode is off
-    board.debug = link              # the radio then runs ESP-NOW on the Wi-Fi's channel
+        print(msg)                  # how the laptop reads it, or why debug mode is off
+    board.debug = link              # a joined Wi-Fi link puts ESP-NOW on its channel
 
-``start`` reads ``/debug`` (``{"dev": "A", "host": "192.168.1.23", "port":
-47268}``, written by ``tools/deploy.py --debug A``) and ``/secrets.py``
-(``WIFI_SSID``, ``WIFI_PASSWORD``), joins the access point (``JOIN_MS`` at
-most) and opens a UDP socket to ``host:port``, or to the subnet broadcast
-address when ``/debug`` has no host (broadcast is unreliable on the ESP32:
-a fallback only). Whatever fails, it returns ``(None, why)`` and the game
-plays normally (main.py also turns any unexpected error from ``start`` into
-such a message). The Wi-Fi name and password are never printed, logged or
-sent, and no reason quotes them.
+``start`` reads ``/debug`` (``{"dev": "A", "link": "usb"}`` or ``{"dev": "A",
+"link": "wifi", "host": "192.168.1.23", "port": 47268}``, written by
+``tools/deploy.py --debug A [--wifi]``; no ``link`` means ``usb``).
+
+USB (``SerialLink``, the default) writes each record as one line on the
+REPL's UART, the port ``tools/debug_server.py --serial`` reads. It reads no
+``/secrets.py``, never touches the Wi-Fi, leaves the radio as in normal
+play (``sta`` is None) and never reads the port, so Ctrl-C still works.
+
+Wi-Fi (``DebugLink``): ``start`` reads ``/secrets.py`` (``WIFI_SSID``,
+``WIFI_PASSWORD``), joins the access point (``JOIN_MS`` at most) and opens a
+UDP socket to ``host:port``, or to the subnet broadcast address when
+``/debug`` has no host (broadcast is unreliable on the ESP32: a fallback
+only). Whatever fails, it returns ``(None, why)`` and the game plays
+normally (main.py also turns any unexpected error from ``start`` into such
+a message). The Wi-Fi name and password are never printed, logged or sent,
+and no reason quotes them.
 
 ESP-NOW and the Wi-Fi connection share one radio, so once joined the access
 point's channel (1-13) is the ESP-NOW channel too: ``Board`` starts
@@ -27,31 +35,47 @@ point's, so the two cannot find each other until both have joined (restart
 the missing one). A mesh or extender network with one name can also put
 them on different channels.
 
-``send(data)`` sends one datagram (app/telemetry.py calls it from its 5 Hz
-path, never from the render loop). Errors are counted in ``tx_err`` and
-never raised. ``network`` and ``socket`` are imported only when used, so
-this file also loads on CPython (tools/fake_watches.py sends through it)
-and in the tests.
+Both links offer what app/telemetry.py and app/runtime.py use: ``dev``,
+``sta`` and ``channel`` (None on USB), ``rp_ms`` (how often the screen
+record goes out), ``send(data)`` (one record, from the 5 Hz path, never
+from the render loop), ``pump(now)`` (once per loop pass), ``drain()``
+(loop exit), ``stats()`` and ``close()``. Send errors are counted in
+``tx_err`` and never raised. ``network`` and ``socket`` are imported only
+when used, so this file also loads on CPython (tools/fake_watches.py sends
+through both links) and in the tests.
 """
 
 import json
+import sys
 
-from finder.compat import sleep_ms as _sleep_ms
+from finder.compat import sleep_ms as _sleep_ms, ticks_diff
 
 CONFIG = "/debug"
 SECRETS = "/secrets.py"
+LINKS = ("usb", "wifi")  # /debug ``link``; the first is the default
 DEBUG_PORT = 47268
 JOIN_MS = 10000          # give up on the Wi-Fi after this and play normally
 JOIN_STEP_MS = 100
 OFF_MSG = "debug mode off: %s. Playing normally."
+USB_MSG = ("debug mode: watch %s sends its records on this USB port "
+           "(on the laptop: python3 tools/debug_server.py --serial)")
+SERIAL_FIFO = 128        # bytes: the UART's transmit FIFO, and the largest piece
+SERIAL_RATE = 11         # bytes per ms the FIFO empties (115200 baud: 11.52)
+SERIAL_QMAX = 4096       # bytes that may wait; a record that would pass it is dropped
+SERIAL_SLOTS = 160       # pieces that may wait: records of 32+ bytes reach SERIAL_QMAX first
+_EMPTY_MS = SERIAL_FIFO // SERIAL_RATE + 1   # the FIFO is empty this long after a write
 
 
 def read_config(path):
-    """``/debug`` -> {dev, host (None: broadcast), port}. OSError when the
-    file is missing, ValueError or TypeError when it is not valid."""
+    """``/debug`` -> {dev, link (one of ``LINKS``), host (None: broadcast),
+    port}. OSError when the file is missing, ValueError or TypeError when
+    it is not valid."""
     with open(path) as f:
         d = json.loads(f.read())
-    return {"dev": str(d.get("dev") or "A"), "host": d.get("host") or None,
+    link = d.get("link") or LINKS[0]
+    if link not in LINKS:
+        raise ValueError("link")
+    return {"dev": str(d.get("dev") or "A"), "link": link, "host": d.get("host") or None,
             "port": int(d.get("port") or DEBUG_PORT)}
 
 
@@ -63,7 +87,8 @@ def read_secrets(path):
         with open(path) as f:
             src = f.read()
     except OSError:
-        raise ValueError("secrets.py is not on the watch (tools/deploy.py --debug copies it)")
+        raise ValueError("secrets.py is not on the watch "
+                         "(tools/deploy.py --debug A --wifi copies it)")
     g = {}
     ok = True
     try:
@@ -89,10 +114,130 @@ def broadcast_addr(ip, mask):
     return ".".join([str(int(a[i]) | (255 ^ int(m[i]))) for i in range(4)])
 
 
+class SerialLink:
+    """USB link: each record is one line on ``out`` (default the REPL's UART,
+    ``sys.stdout.buffer``): the byte 0x1E, the compact JSON, ``\\n``.
+
+    ``send`` (5 Hz) frames a record and queues it, cut once into pieces of at
+    most ``SERIAL_FIFO`` bytes; a record that would leave more than
+    ``SERIAL_QMAX`` bytes waiting is dropped whole (``drop``). ``pump(now)``
+    (once per loop pass) writes whole pieces only while the modelled FIFO has
+    room: it refills at ``SERIAL_RATE`` bytes per ms since the last write, up
+    to ``SERIAL_FIFO``. So a write never waits (``print`` would, while the
+    FIFO is full), and ``pump`` allocates nothing. The cuts fall every
+    ``SERIAL_FIFO`` bytes of the queued stream, not of each record, so a pass
+    that finds the FIFO empty fills all of it. A pass carries at most
+    ``SERIAL_FIFO`` bytes: at ~20 passes a second (one ~40 ms frame each)
+    that is ~2.5 KB/s, just under the ~2.7 KB/s the records need, so a few
+    are dropped while the screen renders (``drop``)."""
+
+    sta = None               # no Wi-Fi: the radio stays as in normal play
+    channel = None
+    rp_ms = 1000             # the screen once a second (and at once when it changes)
+
+    def __init__(self, dev="A", out=None):
+        self.dev = dev
+        self.out = sys.stdout.buffer if out is None else out
+        self.n_tx = 0            # records written out
+        self.drop = 0
+        self.tx_err = 0
+        self.err = None          # the last write error
+        self.queued = 0          # bytes waiting
+        self._q = [None] * SERIAL_SLOTS   # the pieces, a ring from _h
+        self._h = 0
+        self._n = 0
+        self._end = 0                     # bytes queued since it was last empty, mod SERIAL_FIFO
+        self._room = SERIAL_FIFO          # FIFO room right after the last write ...
+        self._t = None                    # ... at this time (None: none yet)
+
+    def send(self, data):
+        """Queue one record (str or UTF-8 bytes of compact JSON); False when it
+        was dropped."""
+        b = data.encode() if isinstance(data, str) else data
+        n = len(b) + 2
+        a = SERIAL_FIFO - self._end           # the first piece fills up the last FIFO load
+        k = 1 if n <= a else 1 + (n - a + SERIAL_FIFO - 1) // SERIAL_FIFO
+        if self.queued + n > SERIAL_QMAX or self._n + k > SERIAL_SLOTS:
+            self.drop += 1
+            return False
+        line = memoryview(b"\x1e" + b + b"\n")
+        q = self._q
+        i = (self._h + self._n) % SERIAL_SLOTS
+        q[i] = line[:a]
+        for c in range(a, n, SERIAL_FIFO):
+            i = (i + 1) % SERIAL_SLOTS
+            q[i] = line[c:c + SERIAL_FIFO]
+        self._n += k
+        self.queued += n
+        self._end = (self._end + n) % SERIAL_FIFO
+        return True
+
+    def pump(self, now):
+        """Write the queued pieces that fit in the FIFO's room at ``now``."""
+        n = self._n
+        if not n:
+            return
+        room = SERIAL_FIFO
+        t = self._t
+        if t is not None:
+            dt = ticks_diff(now, t)
+            if dt < _EMPTY_MS:
+                room = self._room + (SERIAL_RATE * dt if dt > 0 else 0)
+                if room > SERIAL_FIFO:
+                    room = SERIAL_FIFO
+        while self._n:
+            k = len(self._q[self._h])
+            if k > room or not self._write_head():
+                break
+            room -= k
+        if self._n != n:
+            self._room = room
+            self._t = now
+
+    def drain(self):
+        """Write out everything queued, waiting on the port as ``print`` does
+        (loop exit, power off: the last records, such as ``crash``, get out)."""
+        while self._n and self._write_head():
+            pass
+
+    def _write_head(self):
+        """Write the oldest piece and take it off the queue; False (counted in
+        ``tx_err``) when ``out`` refused it, as a closed file on the fake
+        watches can (the watch's UART never does): tried again next pass."""
+        h = self._h
+        p = self._q[h]
+        try:
+            self.out.write(p)
+        except Exception as e:  # noqa: BLE001 - a debug aid never stops the game
+            self.tx_err += 1
+            self.err = e
+            return False
+        self._q[h] = None
+        self._h = (h + 1) % SERIAL_SLOTS
+        self._n -= 1
+        if not self._n:
+            self._end = 0
+        self.queued -= len(p)
+        if p[-1] == 10:          # the line's last piece: the record is out
+            self.n_tx += 1
+        return True
+
+    def stats(self):
+        """Counters for ``Runtime.stats()``, like ``DebugLink.stats``."""
+        return {"dev": self.dev, "link": "usb", "tx": self.n_tx, "drop": self.drop,
+                "queued": self.queued, "tx_err": self.tx_err,
+                "err": None if self.err is None else repr(self.err)}
+
+    def close(self):
+        """Nothing to close: ``out`` is the REPL's port (or the caller's file)."""
+
+
 class DebugLink:
     """UDP sender to the laptop (``tools/debug_server.py``) with counters.
     ``join`` first connects the watch to the access point; the fake watches
     only ``open`` and ``send``."""
+
+    rp_ms = 200              # the screen with every 5 Hz state record
 
     def __init__(self, dev="A", host=None, port=DEBUG_PORT):
         self.dev = dev
@@ -181,6 +326,12 @@ class DebugLink:
         self.n_tx += 1
         return True
 
+    def pump(self, now):
+        """Nothing waits: each datagram left in ``send``."""
+
+    def drain(self):
+        """Nothing waits: each datagram left in ``send``."""
+
     def close(self):
         """Close the socket and leave the access point."""
         s, sta = self._s, self.sta
@@ -198,7 +349,8 @@ class DebugLink:
 
     def stats(self):
         """Counters for ``Runtime.stats()`` (no Wi-Fi name or password)."""
-        return {"dev": self.dev, "dest": None if self.dest is None else "%s:%d" % self.dest,
+        return {"dev": self.dev, "link": "wifi",
+                "dest": None if self.dest is None else "%s:%d" % self.dest,
                 "channel": self.channel, "ip": self.ip, "tx": self.n_tx, "tx_err": self.tx_err,
                 "err": None if self.err is None else repr(self.err)}
 
@@ -224,7 +376,8 @@ def _wifi_error(e):
 def start(config=None, secrets=None, timeout_ms=None, sleep=None):
     """main.py's debug switch -> ``(link, message)``: ``(None, None)``
     without ``/debug``; ``(None, why)`` when debug mode cannot start (the
-    game plays normally); ``(link, where)`` once joined and ready to send.
+    game plays normally); ``(SerialLink, how the laptop reads it)`` for USB;
+    ``(DebugLink, where)`` once joined to the Wi-Fi and ready to send.
     Paths and the timeout default to the module's ``CONFIG``, ``SECRETS``
     and ``JOIN_MS``."""
     try:
@@ -233,6 +386,8 @@ def start(config=None, secrets=None, timeout_ms=None, sleep=None):
         return None, None
     except (TypeError, ValueError, AttributeError):
         return None, OFF_MSG % "/debug is not valid (run tools/deploy.py --debug A again)"
+    if cfg["link"] == "usb":
+        return SerialLink(cfg["dev"]), USB_MSG % cfg["dev"]
     try:
         ssid, password = read_secrets(secrets or SECRETS)
     except ValueError as e:

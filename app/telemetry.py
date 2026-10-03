@@ -11,7 +11,7 @@ Field tests log to flash as they go: ``session("A")`` appends to
 (``tools/deploy.py --tele A``). Pull the files with ``mpremote fs cp
 :/log/0_A.jsonl .``. The RAM ring alone holds ~3 min (900 records at 5 Hz),
 and on battery the hardware WDT reboots the watch ~8 s after Ctrl-C, before
-any REPL dump. A state record is ~470 bytes (~140 KB a minute at 5 Hz), so
+any REPL dump. A state record is ~400 bytes (~120 KB a minute at 5 Hz), so
 check free flash (``os.statvfs("/")``) between sessions; a failed write ends
 the file (``err`` says why) and the ring carries on in RAM.
 
@@ -29,21 +29,26 @@ events; scan and found timing come from the ``ui``/``sub`` changes in the
 5 Hz records. With ``path`` set, new lines are appended to that file every
 ``flush_ms`` (buffered, to limit flash wear); leave it None for RAM only.
 
-Debug mode (docs/design/debug-mode.md) adds a ``sink``: hal/debuglink.py's
-UDP sender to the laptop (main.py sets it when ``/debug`` exists;
-tools/fake_watches.py sends the same records). Then every record also
-carries ``dev`` and ``mac`` (the last 3 bytes of the radio MAC, hex, set by
-the runtime) and goes to the sink as one datagram: at each 5 Hz state record
-the events since the last one, the state record, and an ``rp`` record
-(``{"ev": "rp", "on": screen on, "bl": backlight 0-100, "ch": the sink's
-Wi-Fi channel or null, "p": the RenderParams as JSON}``) that lets the page
-draw the watch's screen. ``rp`` records go only to the sink, never into the
-ring or the file. Nothing is sent from the render loop; a forced ``flush``
-(loop exit, power off) sends what is left. A datagram is UTF-8 bytes (MicroPython's
-``json.dumps`` keeps non-ASCII text as it is); one longer than ``DGRAM_MAX``
-bytes (one Wi-Fi frame) goes without its longest optional fields rather
-than in pieces. Without ``/tele``, main.py keeps only a small ring: it just
-holds what waits for the next send, and the laptop keeps the log.
+Debug mode (docs/design/debug-mode.md) adds a ``sink``: one of
+hal/debuglink.py's links to the laptop, USB serial or Wi-Fi (main.py sets
+it when ``/debug`` exists; tools/fake_watches.py sends the same records).
+Then every record also carries ``dev`` and ``mac`` (the last 3 bytes of the
+radio MAC, hex, set by the runtime) and goes to the sink: at each 5 Hz state
+record the events since the last one, the state record, and an ``rp``
+record (``{"ev": "rp", "on": screen on, "bl": backlight 0-100, "ch": the
+sink's Wi-Fi channel or null, "p": the RenderParams as JSON}``) that lets
+the page draw the watch's screen. ``rp`` goes once the sink's ``rp_ms`` has
+passed since the last one (Wi-Fi 200: with every state record; USB 1000),
+and at once when the screen, its sub-state or its power changes. ``rp``
+records go only to the sink, never into the ring or the file. Nothing is
+sent from the render loop; a forced ``flush`` (loop exit, power off) sends
+what is left and drains the sink (USB: writes out what waits). Records are
+compact JSON (no spaces after ``,`` and ``:``), as UTF-8 bytes
+(MicroPython's ``json.dumps`` keeps non-ASCII text as it is); one longer
+than ``DGRAM_MAX`` bytes (one Wi-Fi frame) goes without its longest
+optional fields rather than in pieces, on both links. Without ``/tele``,
+main.py keeps only a small ring: it just holds what waits for the next
+send, and the laptop keeps the log.
 
 Records allocate (a dict and a string) but only at 5 Hz plus rare events.
 """
@@ -56,6 +61,7 @@ from finder.render_params import to_dict
 ACT_NAMES = ("unknown", "still", "walk", "run")
 DGRAM_MAX = 1400                          # bytes: one Wi-Fi frame, no IP fragments
 DGRAM_KEEP = ("dev", "mac", "t", "ev")    # never dropped to make a datagram fit
+SEP = (",", ":")                          # compact JSON: no spaces after , and :
 
 
 def _r1(v):
@@ -81,13 +87,13 @@ def _fit(s):
         big = None
         n = 0
         for k in d:
-            m = 0 if k in DGRAM_KEEP else len(json.dumps(d[k]).encode())
+            m = 0 if k in DGRAM_KEEP else len(json.dumps(d[k], separators=SEP).encode())
             if m > n:
                 big, n = k, m
         if big is None:
             return None
         del d[big]
-        b = json.dumps(d).encode()
+        b = json.dumps(d, separators=SEP).encode()
     return b
 
 
@@ -128,7 +134,7 @@ class Telemetry:
         self.path = path
         self.flush_ms = flush_ms
         self.beacons = beacons     # also log every received beacon (bcn_rx)
-        self.sink = sink           # debug mode: ``send(bytes)`` per datagram (hal/debuglink.py)
+        self.sink = sink           # debug mode: a hal/debuglink.py link, ``send(bytes)`` per record
         self.mac = None            # datagram ``mac`` (``set_mac``)
         self.err = None            # the OSError that ended writing to ``path``
         self.clear()
@@ -142,6 +148,8 @@ class Telemetry:
         self._next = None
         self._flush_t = None
         self.dropped = 0           # records overwritten before a flush
+        self._rp_t = None          # the last ``rp``: when, and the screen it showed
+        self._rp_scr = self._rp_sub = self._rp_on = None
 
     def set_mac(self, mac):
         """The radio's MAC (6 bytes) -> ``mac``: its last 3 bytes, lowercase hex."""
@@ -153,7 +161,7 @@ class Telemetry:
         if self.sink is not None:
             d["dev"] = self.dev
             d["mac"] = self.mac
-        s = json.dumps(d)
+        s = json.dumps(d, separators=SEP)
         i = self._i
         self._ring[i] = s
         self._i = (i + 1) % self.cap
@@ -216,9 +224,9 @@ class Telemetry:
 
     # ---- debug sink ----
     def send(self):
-        """Hand the records added since the last send to ``sink``, one datagram
-        each (each state record does; so does a forced ``flush``). Returns how
-        many were due."""
+        """Hand the records added since the last send to ``sink`` (a datagram
+        or a line each; each state record does this, and so does a forced
+        ``flush``). Returns how many were due."""
         sk = self.sink
         k = self.n - self._sent
         if sk is None or k <= 0:
@@ -231,18 +239,35 @@ class Telemetry:
         return k
 
     def _send_rp(self, now, rt):
-        """The ``rp`` datagram: the latest RenderParams, the screen's state and
-        the Wi-Fi channel (``ch``: the page tells two watches on different
-        channels apart; null when the sink has none, as on the fake watches)."""
+        """The ``rp`` record, when due (``_rp_due``): the latest RenderParams,
+        the screen's state and the Wi-Fi channel (``ch``: the page tells two
+        watches on different channels apart; null on USB and the fake watches)."""
         p = rt.params
-        if p is None:
+        on = rt.screen_is_on
+        if p is None or not self._rp_due(now, p, on):
             return
         sk = self.sink
         s = _fit(json.dumps({"t": now, "ev": "rp", "dev": self.dev, "mac": self.mac,
-                             "on": rt.screen_is_on, "bl": _pct(rt.bl_level),
-                             "ch": getattr(sk, "channel", None), "p": to_dict(p)}))
+                             "on": on, "bl": _pct(rt.bl_level),
+                             "ch": sk.channel, "p": to_dict(p)}, separators=SEP))
         if s is not None:
             sk.send(s)
+
+    def _rp_due(self, now, p, on):
+        """True when ``rp`` goes with this state record: the sink's ``rp_ms``
+        after the last one, less half a record period (so the record after
+        one a few ms late keeps its ``rp``), or at once when the screen, its
+        sub-state or its power changed."""
+        t = self._rp_t
+        if (t is not None and p.screen == self._rp_scr and p.sub == self._rp_sub
+                and on == self._rp_on
+                and ticks_diff(now, t) < self.sink.rp_ms - self.period_ms // 2):
+            return False
+        self._rp_t = now
+        self._rp_scr = p.screen
+        self._rp_sub = p.sub
+        self._rp_on = on
+        return True
 
     # ---- reading ----
     def lines(self, n=None):
@@ -271,9 +296,11 @@ class Telemetry:
     # ---- flash ----
     def flush(self, now=None, force=False):
         """Append unflushed records to ``path`` (every ``flush_ms`` unless forced).
-        ``force`` (loop exit, power off) also sends what ``sink`` has not had."""
-        if force:
+        ``force`` (loop exit, power off) also sends what ``sink`` has not had
+        and drains it."""
+        if force and self.sink is not None:
             self.send()
+            self.sink.drain()
         if self.path is None:
             return 0
         if not force and now is not None:

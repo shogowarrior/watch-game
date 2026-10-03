@@ -5,9 +5,10 @@
 # key within the first second after boot. Ctrl-C stops the game; then
 # ``import app; app.rt.print_stats()`` shows the loop timing. With /tele
 # (tools/deploy.py --tele A) the game logs telemetry to /log. With /debug
-# (tools/deploy.py --debug A) the watch first joins the Wi-Fi named in
-# secrets.py (up to 10 s, screen dark) and sends its telemetry to the laptop
-# (hal/debuglink.py); when it cannot, it prints why and plays normally. The
+# (tools/deploy.py --debug A) the watch also sends its telemetry to the
+# laptop (hal/debuglink.py): over this USB port, playing exactly as normal,
+# or with --wifi it first joins the Wi-Fi named in /secrets.py (up to 10 s,
+# screen dark); when it cannot, it prints why and plays normally. The
 # watchdog (hal/watchdog.py) is the stoppable soft one while the game has
 # only run on USB, and the ESP32 hardware WDT from the first battery reading
 # off USB. A game started on battery keeps the hardware WDT after USB is
@@ -23,7 +24,7 @@ if why:
 else:
     try:
         from hal import debuglink
-        try:                            # before the radio: ESP-NOW then uses the Wi-Fi's channel
+        try:                            # before the radio: on Wi-Fi, ESP-NOW uses its channel
             link, msg = debuglink.start()
         except Exception as e:  # noqa: BLE001 - debug mode never stops the game
             link, msg = None, debuglink.OFF_MSG % ("it could not start (%s)" % type(e).__name__)

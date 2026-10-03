@@ -59,8 +59,10 @@ touch and radio drivers count their own bus errors (``touch_errors``,
 
 Telemetry (app/telemetry.py) runs after the haptic stage: a state record at
 5 Hz, events as they happen. In debug mode its ``sink`` sends them to the laptop,
-from that 5 Hz record only (never from the render stage); ``begin`` gives it
-the radio's MAC, and ``stats()`` shows the sink's counters (``debug_stats``).
+from that 5 Hz record only (never from the render stage), and the stage calls
+the sink's ``pump`` once per pass (the USB link writes a FIFO's worth of what
+waits, so it never stalls the loop); ``begin`` gives it the radio's MAC, and
+``stats()`` shows the sink's counters (``debug_stats``).
 
 With ``watchdog_ms`` (main.py: 8000) ``run`` feeds hal/watchdog.py once per
 pass: the stoppable soft watchdog while on USB, switched once to the ESP32
@@ -375,6 +377,9 @@ class Runtime:
             if tl.due(now):
                 tl.record(now, self)
             tl.flush(now)
+            sk = tl.sink
+            if sk is not None:
+                sk.pump(now)            # USB: what the UART's FIFO has room for
             a = self._acc(S_TELE, a)
         self._t_input = ticks_add(now, INPUT_MS)
         if ticks_diff(now, self._t_gc) >= GC_PERIOD_MS:
