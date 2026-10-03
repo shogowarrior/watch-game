@@ -57,6 +57,11 @@ part (I2C glitches) are counted in ``io_errors`` and never stop the loop; the
 touch and radio drivers count their own bus errors (``touch_errors``,
 ``radio_stats`` in ``stats()``).
 
+Telemetry (app/telemetry.py) runs after the haptic stage: a state record at
+5 Hz, events as they happen. In debug mode its ``sink`` sends them to the laptop,
+from that 5 Hz record only (never from the render stage); ``begin`` gives it
+the radio's MAC, and ``stats()`` shows the sink's counters (``debug_stats``).
+
 With ``watchdog_ms`` (main.py: 8000) ``run`` feeds hal/watchdog.py once per
 pass: the stoppable soft watchdog while on USB, switched once to the ESP32
 hardware WDT when VBUS goes away (checked with the 10 s battery reading). A
@@ -200,6 +205,8 @@ class Runtime:
             except (ImportError, MemoryError) as e:
                 self.errors["renderer"] = e
         mac = None if self.radio is None else self.radio.mac
+        if mac is not None and self.tele is not None:
+            self.tele.set_mac(mac)            # the datagram ``mac`` (debug mode)
         now = self.clock() if now is None else now
         if self.imu is not None and hasattr(self.imu, "fifo_read_mg"):
             from app.imu_feed import ImuFeed
@@ -761,6 +768,9 @@ class Runtime:
                               round(self.st_max[i] / 1000.0, 2), n)
         if self.radio is not None:
             out["radio_stats"] = self.radio.stats()
+        tl = self.tele
+        if tl is not None and tl.sink is not None:
+            out["debug_stats"] = tl.sink.stats()
         te = 0 if self.touch is None else getattr(self.touch, "errors", 0)
         if te:
             out["touch_errors"] = te
@@ -787,7 +797,7 @@ class Runtime:
             print("%-10s %7.2f  %7.2f  %6d" % (k, v[0], v[1], v[2]))
         g = s["collect"]
         print("gc: %d collects, last %.1f ms, max %.1f ms" % g)
-        for k in ("mem_free", "io_errors", "touch_errors", "radio_stats"):
+        for k in ("mem_free", "io_errors", "touch_errors", "radio_stats", "debug_stats"):
             if k in s:
                 print(k, s[k])
         if self.errors:

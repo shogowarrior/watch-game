@@ -10,7 +10,7 @@ hysteresis and dwell are explained in the
 
 | Layer | Where | Runs on | Depends on |
 |---|---|---|---|
-| Hardware abstraction | `hal/` | watch (and CPython/WASM against `tests/fakes/`) | `machine`, `network`, `espnow`; `finder.compat` (ticks, `const`), `finder.link` (the radio's `TxScheduler`) |
+| Hardware abstraction | `hal/` | watch (and CPython/WASM against `tests/fakes/`) | `machine`, `network`, `espnow`, `socket`; `finder.compat` (ticks, `const`), `finder.link` (the radio's `TxScheduler`) |
 | Game logic | `finder/` | watch, CPython, browser (MicroPython WASM) | nothing hardware-specific; `finder/compat.py` only |
 | Renderer | `ui/` | watch, browser (needs `framebuf`, so MicroPython only) | `finder.tuning`, `finder.compat`; hint strings from `finder.scan`, `finder.pairing` |
 | Watch runtime | `app/`, `main.py`, `boot.py` | watch (tested on CPython with fakes) | `hal.board.Board`, `finder`, `ui` |
@@ -19,7 +19,8 @@ hysteresis and dwell are explained in the
 
 Rules that keep the layers apart:
 
-- Only `hal/` imports `machine`, `network` or `espnow`. `app/runtime.py`
+- Only `hal/` imports `machine`, `network`, `espnow` or `socket` (and the
+  CPython host tools in `tools/`). `app/runtime.py`
   receives hardware through `Board` parts and takes only constants and the
   watchdog from `hal`, so it runs against fakes.
 - `finder/` never reads hardware or the clock by itself: every call takes a
@@ -27,11 +28,13 @@ Rules that keep the layers apart:
   clock drive two games in the simulator and in `tests/test_episode.py`.
 - The renderer reads **only** `RenderParams` (runes, menu rows and sun mode are
   fields too). It never sees estimator internals. `RenderParams` is
-  JSON-serialisable (`to_dict` / `from_dict`), so the stream could be logged and
-  replayed. No replay tool exists yet (R-08, R-14 in
+  JSON-serialisable (`to_dict` / `from_dict`). In debug mode (below) the watch
+  sends it at 5 Hz and the web page draws it with the same renderer. No replay
+  tool exists yet (R-08, R-14 in
   [user-research](research/user-research.md)): `app/telemetry.py` logs a
-  5 Hz state subset, not `RenderParams`, and the web simulator has no replay
-  input.
+  5 Hz state subset to `/log`, not `RenderParams`, and the web simulator has no
+  replay input. The debug bridge's `logs/debug-*.jsonl` sessions hold both, as
+  the input for such a tool.
 - Constants come from `docs/design/tokens.json` through `tools/gen_tuning.py`
   into `finder/tuning.py`, which the logic and the renderer share.
 
@@ -222,3 +225,41 @@ The browser therefore runs the same state machine, constants and renderer as the
 watch. Only the drivers, the runtime loop and the physics differ, plus the
 page's Auto-pair switch (on by default), a demo shortcut: a 5 s split,
 auto-confirm and a 1 m proxy calibration.
+
+## Debug mode: the real watches in the web page
+
+Debug mode ([design/debug-mode.md](design/debug-mode.md)) shows what two real
+watches are doing, live, in the web sim page. The watches never run a server:
+
+```mermaid
+flowchart LR
+  subgraph W["each watch (main.py with /debug)"]
+    T["app/telemetry.py<br>5 Hz: events, state record 's', 'rp' (RenderParams)"] --> L["hal/debuglink.py<br>one JSON object per UDP datagram"]
+  end
+  L -- "UDP, Wi-Fi access point" --> B["tools/debug_server.py<br>UDP 0.0.0.0:47268"]
+  F["tools/fake_watches.py (--demo)"] -. "UDP, localhost" .-> B
+  B -- "logs/debug-*.jsonl" --> G[(log)]
+  B -- "Server-Sent Events /events<br>{src, rx, rec}" --> P["web/sim/index.html, Real watches<br>TwoWatchSim.show_params -> Renderer"]
+```
+
+1. `main.py` finds `/debug` and calls `debuglink.start()` before `board.init()`.
+   The watch joins the access point named in `secrets.py` (10 s at most; on any
+   failure it prints why and plays normally).
+2. `Board` starts `EspNowRadio` in its associated mode: the Wi-Fi connection
+   stays up and ESP-NOW uses the access point's channel. Both watches must join
+   the same access point, or they will be on different channels.
+3. `app/telemetry.py` gets the link as its `sink`. From the 5 Hz state-record
+   path (never the render stage) it sends the events since the last record, the
+   state record and an `rp` record with the frame's `RenderParams`, each as one
+   datagram of at most 1400 bytes. Send errors are counted, never raised.
+4. `tools/debug_server.py` (CPython, standard library only) serves `dist/sim/`
+   on 127.0.0.1, turns every valid datagram into one Server-Sent Event, and
+   appends it to `logs/debug-*.jsonl` (gitignored). `--demo` runs
+   `tools/fake_watches.py` on a thread: the two-watch simulator plus the same
+   `app/telemetry.py` and `hal/debuglink.py` code, sending to localhost.
+5. In Real mode the page stops the simulated world (`TwoWatchSim.real_mode`)
+   and hands each `rp` record to `TwoWatchSim.show_params`, so the screens come
+   from the real renderer, animated between records. The state records fill the
+   readouts and the distance chart. The page offers Real mode only when
+   `./debug/status` answers, so the claude.ai artifact and a page served by a
+   plain `http.server` show it as unavailable.

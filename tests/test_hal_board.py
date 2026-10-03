@@ -285,3 +285,17 @@ def test_safe_boot_bus_error_keeps_press_seen():
         dev.write = write
 
     assert hb.safe_boot(b, window_ms=1000, flag="/nope", sleep=sleep) == "pek"
+
+
+def test_debug_radio_joins_the_access_point_channel():
+    # main.py sets board.debug to the joined hal/debuglink.DebugLink before init.
+    m, dev, hb = _setup(pmu=False)
+    import network
+    from hal.debuglink import DebugLink
+    network.set_ap("made-up-net", "made-up-pass", channel=3)
+    link = DebugLink("A", "192.168.1.23")
+    assert link.join("made-up-net", "made-up-pass", sleep=lambda ms: None)
+    r = hb.Board(cpu_hz=None, channel=11, debug=link).radio
+    assert r.associated and r.channel == 3 and r._sta is link.sta and link.sta.isconnected()
+    r = hb.Board(cpu_hz=None, channel=11).radio      # no debug link: normal play
+    assert not r.associated and r.channel == 11

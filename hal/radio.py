@@ -13,6 +13,12 @@ RX drains ``recvinto(data, 0)`` into one preallocated
 peers_table). ``buf`` handed to the callback is that shared bytearray: copy
 anything you need to keep. Hardware modules are imported in ``begin`` so this
 file (and SimRadio) also loads on CPython and in the tests.
+
+Normal play never joins an access point: ``begin`` drops any connection and
+uses channel 1, 6 or 11. Debug mode (hal/debuglink.py) joins one first, and
+ESP-NOW shares the radio with that connection, so ``begin(sta=link.sta)``
+puts the radio in associated mode for good: the connection is kept and
+ESP-NOW runs on the access point's channel (any of 1-13).
 """
 
 from finder.compat import ticks_diff
@@ -108,7 +114,7 @@ class _Radio:
 
 
 class EspNowRadio(_Radio):
-    """ESP-NOW broadcast on the STA interface (never associated during play)."""
+    """ESP-NOW broadcast on the STA interface (associated only in debug mode)."""
 
     def __init__(self, channel=DEFAULT_CHANNEL, txpower=20, rxbuf=2048, seed=None):
         if seed is None:
@@ -119,27 +125,42 @@ class EspNowRadio(_Radio):
         self.txpower = txpower
         self.rxbuf = rxbuf
         self.mac = None
+        self.associated = False     # debug mode: the STA stays joined to an access point
         self._sta = None
         self._e = None
 
-    def begin(self, channel=None, txpower=None):
+    def begin(self, channel=None, txpower=None, sta=None):
+        """Start ESP-NOW (again). ``sta``: a STA interface joined to an access
+        point (debug mode): from then on the connection is kept and ESP-NOW
+        uses the access point's channel, 1-13 (``channel`` is ignored).
+        Otherwise any connection is dropped and ``channel`` must be 1, 6 or 11."""
         import network
         import espnow
-        if channel is not None:
-            self.channel = channel
+        if sta is not None:
+            self._sta = sta
+            self.associated = True
         if txpower is not None:
             self.txpower = txpower
-        if self.channel not in CHANNELS:
-            raise ValueError("channel must be 1, 6 or 11")
+        if not self.associated:
+            if channel is not None:
+                self.channel = channel
+            if self.channel not in CHANNELS:
+                raise ValueError("channel must be 1, 6 or 11")
         sta = self._sta or network.WLAN(network.STA_IF)   # one STA (one MAC) per radio, like self._e
         sta.active(True)
-        try:
-            sta.disconnect()      # a notebook may have joined an AP (that pins the channel)
-        except OSError:
-            pass
-        sta.config(channel=self.channel)
+        if self.associated:
+            ch = sta.config("channel")    # the AP's; changing it would break the connection
+            if not 1 <= ch <= 13:
+                raise ValueError("access point channel %d: ESP-NOW needs 1-13" % ch)
+            self.channel = ch
+        else:
+            try:
+                sta.disconnect()      # a notebook may have joined an AP (that pins the channel)
+            except OSError:
+                pass
+            sta.config(channel=self.channel)
         sta.config(txpower=self.txpower)
-        sta.config(pm=sta.PM_NONE)
+        sta.config(pm=sta.PM_NONE)      # no modem sleep (associated, it would miss ESP-NOW frames)
         self.mac = sta.config("mac")
         # mix our MAC into the jitter PRNG so two watches never beat in lock-step
         m = self.mac

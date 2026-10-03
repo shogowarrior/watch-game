@@ -1,0 +1,405 @@
+"""hal/debuglink.py on the fake ``network`` and ``socket``, and main.py's
+debug switch (/debug present, secrets.py missing, a failed join: the game
+then plays normally). No test uses real Wi-Fi; the Wi-Fi name and password
+here are made up."""
+
+import sys
+
+from tests import Skip, fakes
+
+fakes.install()
+from hal import debuglink as dl  # noqa: E402  (import failure must FAIL, not skip)
+
+SSID = "made-up-net"
+PW = "made-up-pass-123"
+
+
+def _tmpdir():
+    try:
+        import tempfile
+        return tempfile.mkdtemp()          # CPython
+    except ImportError:
+        return "."                         # MicroPython: in-memory filesystem
+
+
+def _write(path, text):
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def _rm(*paths):
+    import os
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def _files(d, config=None, secrets=None):
+    """``d``/_debug and ``d``/_secrets.py (None: not written) -> their paths."""
+    c, s = d + "/_debug", d + "/_secrets.py"
+    _rm(c, s)
+    if config is not None:
+        _write(c, config)
+    if secrets is not None:
+        _write(s, secrets)
+    return c, s
+
+
+def _clean(d):
+    """Remove ``_files``' files and the temporary directory."""
+    _rm(d + "/_debug", d + "/_secrets.py")
+    if d != ".":
+        import os
+        os.rmdir(d)
+
+
+def _secrets(ssid=SSID, pw=PW):
+    return "WIFI_SSID = %r\nWIFI_PASSWORD = %r\n" % (ssid, pw)
+
+
+def _ap(channel=13, polls=3, **kw):
+    fakes.install()
+    import network
+    network.set_ap(SSID, PW, channel=channel, polls=polls, **kw)
+    return network
+
+
+def _wlans(network):
+    """Keep every WLAN made from now on (the fake makes a new device each
+    time) -> (list, restore)."""
+    made = []
+    real = network.WLAN
+
+    def wlan(iface=network.STA_IF):
+        made.append(real(iface))
+        return made[-1]
+    network.WLAN = wlan
+
+    def restore():
+        network.WLAN = real
+    return made, restore
+
+
+# ---- files ---------------------------------------------------------------------------
+def test_read_config_defaults_and_errors():
+    d = _tmpdir()
+    c, _ = _files(d, '{"dev": "B", "host": "192.168.1.23", "port": 5000}')
+    try:
+        assert dl.read_config(c) == {"dev": "B", "host": "192.168.1.23", "port": 5000}
+        _write(c, '{"dev": "A"}')
+        assert dl.read_config(c) == {"dev": "A", "host": None, "port": dl.DEBUG_PORT}
+        _write(c, "dev=A")
+        try:
+            dl.read_config(c)
+            assert False, "not JSON accepted"
+        except ValueError:
+            pass
+        _rm(c)
+        try:
+            dl.read_config(c)
+            assert False, "missing file accepted"
+        except OSError:
+            pass
+    finally:
+        _clean(d)
+
+
+def test_read_secrets_never_quotes_the_file():
+    d = _tmpdir()
+    _, s = _files(d, secrets=_secrets())
+    try:
+        assert dl.read_secrets(s) == (SSID, PW)
+        for bad in ("WIFI_SSID = %r\nWIFI_PASSWORD = %r +\n" % (SSID, PW),   # syntax error
+                    "WIFI_PASSWORD = %r\n" % PW,                              # no name
+                    "WIFI_SSID = ''\nWIFI_PASSWORD = %r\n" % PW):            # empty name
+            _write(s, bad)
+            try:
+                dl.read_secrets(s)
+                assert False, bad
+            except ValueError as e:
+                m = str(e)
+                assert PW not in m and SSID not in m and "secrets.example.py" in m, m
+        _rm(s)
+        try:
+            dl.read_secrets(s)
+            assert False, "missing secrets accepted"
+        except ValueError as e:
+            assert "deploy.py --debug" in str(e)
+    finally:
+        _clean(d)
+
+
+def test_broadcast_addr():
+    assert dl.broadcast_addr("192.168.1.40", "255.255.255.0") == "192.168.1.255"
+    assert dl.broadcast_addr("10.1.2.40", "255.255.252.0") == "10.1.3.255"
+
+
+# ---- join ----------------------------------------------------------------------------
+def test_join_reads_channel_address_and_broadcast():
+    _ap(channel=13, ip="10.1.2.40", mask="255.255.252.0")
+    slept = []
+    link = dl.DebugLink("B", None)
+    assert link.join(SSID, PW, sleep=slept.append)
+    assert link.sta.isconnected() and link.sta.active()
+    assert (link.channel, link.ip, link.bcast) == (13, "10.1.2.40", "10.1.3.255")
+    assert slept == [dl.JOIN_STEP_MS] * 2        # connected on the 3rd poll
+    assert link.why is None
+
+
+def test_join_wrong_password_disconnects_and_says_why():
+    network = _ap()
+    made, restore = _wlans(network)
+    slept = []
+    try:
+        link = dl.DebugLink("A", "192.168.1.23")
+        assert not link.join(SSID, "wrong-pass", timeout_ms=1000, sleep=slept.append)
+    finally:
+        restore()
+    assert link.sta is None and link.channel is None
+    assert "password" in link.why and "wrong-pass" not in link.why
+    assert len(slept) == 1000 // dl.JOIN_STEP_MS
+    assert made[0].status() == network.STAT_IDLE   # disconnected: it stops trying
+
+
+def test_join_unknown_network_times_out_and_stops_trying():
+    network = _ap()
+    made, restore = _wlans(network)
+    try:
+        link = dl.DebugLink("A", "192.168.1.23")
+        assert not link.join("other-net", PW, timeout_ms=2000, sleep=lambda ms: None)
+    finally:
+        restore()
+    assert "could not join the Wi-Fi in 2 s" in link.why and "2.4 GHz" in link.why
+    assert "other-net" not in link.why
+    assert made[0].status() == network.STAT_IDLE   # no channel hopping under ESP-NOW
+
+
+def test_join_wifi_error_is_a_reason_not_a_crash():
+    network = _ap()
+    real = network.WLAN.connect
+
+    def boom(self, ssid=None, key=None):
+        raise OSError("Wifi Internal Error")
+    network.WLAN.connect = boom
+    try:
+        link = dl.DebugLink()
+        assert not link.join(SSID, PW, sleep=lambda ms: None)
+    finally:
+        network.WLAN.connect = real
+    assert link.why.startswith("Wi-Fi error")
+
+
+# ---- UDP -----------------------------------------------------------------------------
+def test_send_to_the_laptop_counts_errors_and_never_raises():
+    restore = fakes.install_socket()
+    try:
+        import socket
+        link = dl.DebugLink("A", "192.168.1.23", 47000)
+        assert not link.send("early")              # no socket yet: counted
+        assert link.tx_err == 1
+        assert link.open()
+        s = socket.sockets[-1]
+        assert link.dest == ("192.168.1.23", 47000) and not s.blocking
+        assert (socket.SOL_SOCKET, socket.SO_BROADCAST) not in s.opts
+        assert link.send('{"ev": "s"}') and link.send(b"raw")
+        to = ("192.168.1.23", 47000)
+        assert s.sent == [(b'{"ev": "s"}', to), (b"raw", to)]
+        socket.fail[0] = 12                        # ENOMEM: no buffer for the frame
+        assert link.send("x") is False
+        assert link.n_tx == 2 and link.tx_err == 2 and isinstance(link.err, OSError)
+        st = link.stats()
+        assert st["tx"] == 2 and st["tx_err"] == 2 and st["dest"] == "192.168.1.23:47000"
+        link.close()
+        assert s.closed and link.send("y") is False and link.tx_err == 3
+    finally:
+        restore()
+
+
+def test_no_host_broadcasts_on_the_subnet():
+    _ap(channel=6)
+    restore = fakes.install_socket()
+    try:
+        import socket
+        link = dl.DebugLink("A", None, 47268)
+        assert not link.open()                     # not joined: nowhere to send
+        assert "no laptop address" in link.why
+        assert link.join(SSID, PW, sleep=lambda ms: None) and link.open()
+        assert link.dest == ("192.168.1.255", 47268)
+        assert socket.sockets[-1].opts[(socket.SOL_SOCKET, socket.SO_BROADCAST)] == 1
+    finally:
+        restore()
+
+
+def _hide_socket():
+    """``import socket`` fails until restore() (CPython: a None entry; the
+    MicroPython test port has no socket module) -> restore."""
+    old = sys.modules.get("socket")
+    if sys.implementation.name == "micropython":
+        sys.modules.pop("socket", None)
+    else:
+        sys.modules["socket"] = None
+
+    def restore():
+        if old is None:
+            sys.modules.pop("socket", None)
+        else:
+            sys.modules["socket"] = old
+    return restore
+
+
+def test_no_socket_module_is_a_reason():
+    restore = _hide_socket()
+    try:
+        link = dl.DebugLink("A", "192.168.1.23")
+        assert not link.open() and link.why.startswith("no UDP socket")
+    finally:
+        restore()
+
+
+# ---- start (main.py) -----------------------------------------------------------------
+def test_start_without_debug_file_is_silent():
+    d = _tmpdir()
+    c, s = _files(d)
+    try:
+        assert dl.start(c, s) == (None, None)
+    finally:
+        _clean(d)
+
+
+def test_start_paths_say_why_and_never_show_the_secrets():
+    d = _tmpdir()
+    restore = fakes.install_socket()
+    nap = lambda ms: None
+    try:
+        _ap(channel=11)
+        c, s = _files(d, '{"dev": "B", "host": "192.168.1.23", "port": 47268}')
+        link, msg = dl.start(c, s, sleep=nap)                     # no secrets.py
+        assert link is None and "secrets.py is not on the watch" in msg
+        assert msg.endswith("Playing normally.")
+        _write(s, _secrets(pw="wrong-pass-456"))
+        link, msg = dl.start(c, s, 500, nap)                      # the AP refuses the password
+        assert link is None and "password" in msg and "Playing normally" in msg
+        assert "wrong-pass-456" not in msg and SSID not in msg
+        _write(c, "[1, 2]")
+        link, msg = dl.start(c, s, sleep=nap)
+        assert link is None and "/debug is not valid" in msg
+        _write(c, '{"dev": "B", "host": "192.168.1.23"}')
+        _write(s, _secrets())
+        link, msg = dl.start(c, s, sleep=nap)
+        assert link is not None and link.dev == "B" and link.channel == 11
+        assert link.dest == ("192.168.1.23", dl.DEBUG_PORT)
+        assert msg == ("debug mode: watch B sends to 192.168.1.23:47268 on Wi-Fi channel 11 "
+                       "(both watches must join the same Wi-Fi)")
+        assert PW not in msg and SSID not in msg
+    finally:
+        restore()
+        _clean(d)
+
+
+def test_start_open_failure_leaves_the_wifi():
+    d = _tmpdir()
+    c, s = _files(d, '{"dev": "A", "host": "192.168.1.23"}', _secrets())
+    _ap()
+    unhide = _hide_socket()
+    import network
+    made, restore = _wlans(network)
+    try:
+        link, msg = dl.start(c, s, sleep=lambda ms: None)
+        restore()
+        assert link is None and "no UDP socket" in msg
+        assert not made[0].isconnected()           # joined, then left again
+    finally:
+        restore()
+        unhide()
+        _clean(d)
+
+
+# ---- main.py -------------------------------------------------------------------------
+class _StandIn:
+    """The ``app`` package as main.py sees it: ``run`` records its arguments."""
+
+
+def _run_main(config, secrets, ap_key=PW):
+    """Run main.py on the fakes with a stand-in ``app`` -> (board, run kwargs, printed)."""
+    try:
+        import io
+        with open("main.py") as f:
+            src = f.read()
+    except (ImportError, OSError):
+        raise Skip("no main.py next to the tests")
+    import app.telemetry  # noqa: F401  (main.py imports it through the stand-in)
+    fakes.install()
+    import network
+    network.set_ap(SSID, ap_key, channel=13)
+    d = _tmpdir()
+    c, s = _files(d, config, secrets)
+    calls = []
+    fake_app = _StandIn()                      # MicroPython cannot make module objects
+    fake_app.__path__ = sys.modules["app"].__path__
+    fake_app.run = lambda board, **kw: calls.append((board, kw))
+    out = io.StringIO()
+
+    def _print(*a, **k):                       # main.py's own prints (MicroPython has no
+        k["file"] = out                        # settable sys.stdout)
+        print(*a, **k)
+    stdout = getattr(sys, "stdout", None)      # CPython: also anything the modules print
+    saved = (sys.modules["app"], dl.CONFIG, dl.SECRETS, dl._sleep_ms)
+    restore = fakes.install_socket()
+    sys.modules["app"] = fake_app
+    dl.CONFIG, dl.SECRETS, dl._sleep_ms = c, s, lambda ms: None
+    try:
+        try:
+            sys.stdout = out
+        except AttributeError:
+            pass
+        exec(compile(src, "main.py", "exec"), {"__name__": "__main__", "print": _print})
+    finally:
+        try:
+            sys.stdout = stdout
+        except AttributeError:
+            pass
+        sys.modules["app"], dl.CONFIG, dl.SECRETS, dl._sleep_ms = saved
+        restore()
+        _clean(d)
+    assert len(calls) == 1, out.getvalue()
+    board, kw = calls[0]
+    assert kw.pop("watchdog_ms") == 8000
+    return board, kw, out.getvalue()
+
+
+def test_main_debug_mode_joins_first_and_sends_telemetry():
+    board, kw, out = _run_main('{"dev": "B", "host": "192.168.1.23", "port": 47268}',
+                               _secrets())
+    link = board.debug
+    assert link is not None and link.dev == "B"
+    assert "debug mode: watch B sends to 192.168.1.23:47268 on Wi-Fi channel 13" in out
+    r = board.radio                                # ESP-NOW joined the access point's channel
+    assert r.associated and r.channel == 13 and r._sta is link.sta and link.sta.isconnected()
+    tl = kw["telemetry"]
+    assert tl.sink is link and tl.dev == "B" and tl.path is None
+    assert PW not in out and SSID not in out
+
+
+def test_main_without_secrets_plays_normally():
+    board, kw, out = _run_main('{"dev": "A", "host": "192.168.1.23"}', None)
+    assert "debug mode off: secrets.py is not on the watch" in out and "Playing normally." in out
+    assert board.debug is None and kw == {}
+    r = board.radio
+    assert not r.associated and r.channel == 6 and r._e.active()
+
+
+def test_main_failed_join_plays_normally():
+    board, kw, out = _run_main('{"dev": "A", "host": "192.168.1.23"}', _secrets(),
+                               ap_key="the-real-one")
+    assert "debug mode off: the Wi-Fi refused the password" in out and "Playing normally." in out
+    assert PW not in out and "the-real-one" not in out
+    assert board.debug is None and kw == {}
+    r = board.radio
+    assert not r.associated and r.channel == 6 and r._e.active()
+
+
+def test_main_without_debug_file_says_nothing():
+    board, kw, out = _run_main(None, _secrets())
+    assert "debug" not in out and board.debug is None and kw == {}

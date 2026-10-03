@@ -3,11 +3,13 @@
 The episode test drags A towards B, walks it the rest of the way with
 ``walk_to`` and bumps until both watches show FOUND, all within 120 s of sim
 time. Frames are only drawn under MicroPython (framebuf); on CPython the
-logic, telemetry and controls are checked.
+logic, telemetry and controls are checked. The real-mode tests feed
+``show_params`` the JSON a real watch's ``rp`` record carries.
 """
 
 import json
 import math
+import os
 import sys
 
 from sim.webhost import TwoWatchSim, heading_to_world, heading_to_page, AUTO_SPLIT_S, TILT_TILTED
@@ -16,6 +18,7 @@ from finder import arrow as A
 from finder import scan as S
 from finder import tuning as T
 from finder.haptic_patterns import TOTAL_MS, HB_RESUME_MS
+from finder.render_params import from_dict, to_dict
 from tests import Skip
 
 MPY = sys.implementation.name == "micropython"
@@ -471,3 +474,118 @@ def test_dark_screen_draws_nothing_and_a_tap_wakes_it():
         assert False
     except ValueError:
         pass
+
+
+# ---- real watches (debug mode) ------------------------------------------------------
+
+def _rp_json(s, i):
+    """Watch i's current params as an ``rp`` record's ``p`` (JSON text)."""
+    return json.dumps(to_dict(s._params[i], True))
+
+
+def _blank(buf):
+    for k in range(0, len(buf), 4800):
+        if buf[k:k + 4800] != bytes(len(buf[k:k + 4800])):
+            return False
+    return True
+
+
+def test_real_mode_stops_the_world_and_resumes_it():
+    s = TwoWatchSim()
+    assert _run_until(s, _hunting, 30000)
+    s.walk_to(0, 30.0, 8.0)
+    s.step(500)
+    t0 = s.t_ms
+    a = (s.world.a.x, s.world.a.y)
+    params = list(s._params)
+    s.real_mode(True)
+    for _ in range(40):
+        s.step(50)
+    assert s.t_ms == t0 and s.real_ms == 2000, (s.t_ms, s.real_ms)
+    assert (s.world.a.x, s.world.a.y) == a                 # no physics
+    assert s._params[0] is params[0] and s._params[1] is params[1]     # no logic ticks
+    s.real_mode(True)                                      # again: no change
+    assert s.real_ms == 2000
+    s.real_mode(False)
+    s.step(500)
+    assert s.t_ms == t0 + 500 and (s.world.a.x, s.world.a.y) != a     # resumes where it stopped
+    assert s._params[0] is not params[0]
+    assert s.games[0].mode == "HUNT"                       # no catch-up gap: the link held
+
+
+def test_show_params_takes_valid_params_only():
+    s = TwoWatchSim()
+    assert _run_until(s, _hunting, 30000)
+    js = _rp_json(s, 0)
+    try:
+        s.show_params(0, js)
+        assert False, "show_params outside real mode"
+    except ValueError:
+        pass
+    s.real_mode(True)
+    assert s._shown == [None, None]
+    s.show_params(1, js)
+    assert s._shown[1] == from_dict(json.loads(js)) and s._shown[0] is None
+    d = json.loads(js)
+    d["added_later"] = 1                   # a field from a newer watch build is ignored
+    s.show_params(0, json.dumps(d))
+    assert s._shown[0] == s._shown[1]
+    kept = s._shown[0]
+    for bad in ("{", "[1, 2]", '{"screen": "NOPE"}', '{"screen": ["WARM"]}',
+                '{"intensity": "high"}', '{"screen": "WARM"}'):
+        try:
+            s.show_params(0, bad)
+            assert False, bad
+        except ValueError as e:
+            assert str(e).startswith("params: "), (bad, e)
+        assert s._shown[0] is kept, bad    # a bad record keeps the last good screen
+    s.real_mode(False)
+    assert s._shown == [None, None]        # back in the sim: its own screens again
+
+
+def test_show_params_draws_what_the_renderer_draws():
+    if not MPY:
+        raise Skip("framebuf: frames only under MicroPython")
+    from ui.renderer import Renderer, FrameCapture
+    s = TwoWatchSim()
+    assert _run_until(s, _hunting, 30000)
+    assert not _blank(s.frame_bytes(0))
+    js = _rp_json(s, 0)
+    s.real_mode(True)
+    assert _blank(s.frame_bytes(0)) and _blank(s.frame_bytes(1))     # no sim screen left over
+    n = list(s.frames)
+    s.step(200)
+    assert s.frames == n                   # nothing to draw until a record arrives
+    s.show_params(0, js)
+    p = from_dict(json.loads(js))
+    per = 1000 // p.fps_cap                # one frame per step
+    r = Renderer()
+    cap = FrameCapture()
+    t = s.real_ms
+    for _ in range(30):
+        s.step(per)
+        t += per
+        r.frame(p, cap, t)
+    assert s.frames[0] == n[0] + 30 and s.frames[1] == n[1]
+    assert bytes(s.frame_bytes(0)) == bytes(cap.buf)      # the same frame, ring for ring
+    assert _blank(s.frame_bytes(1))
+    s.real_mode(False)
+    assert _blank(s.frame_bytes(0))
+    s.step(100)
+    assert not _blank(s.frame_bytes(0)) and not _blank(s.frame_bytes(1))
+
+
+def test_page_follows_the_debug_contract():
+    """web/sim/index.html asks the bridge's endpoints and calls the host's real-mode methods."""
+    if MPY:
+        raise Skip("reads web/sim/index.html and tools/debug_server.py (CPython)")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    with open(os.path.join(root, "tools", "debug_server.py"), encoding="utf-8") as f:
+        server = f.read()
+    for path in ("/debug/status", "/events"):
+        assert ("'.%s'" % path) in page and ('"%s"' % path) in server, path
+    for name in ("real_mode", "show_params"):
+        assert ("call('%s'" % name in page or "SIM.%s(" % name in page), name
+        assert callable(getattr(TwoWatchSim, name)), name

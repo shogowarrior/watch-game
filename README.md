@@ -14,7 +14,7 @@ The code has been tested on the computer and in a two-watch simulator, but
 ## How it works
 
 - **Radio.** Each watch broadcasts a small ESP-NOW packet 5 to 20 times a
-  second (no Wi-Fi network needed). The receiving watch measures the signal
+  second (no Wi-Fi network needed; only debug mode joins one). The receiving watch measures the signal
   strength (RSSI). A stronger signal usually means closer, but RSSI is noisy:
   bodies, walls and reflections can move it by 10 dB or more.
 - **Filtering.** A two-state Kalman filter smooths the RSSI and its rate of
@@ -101,10 +101,18 @@ node tools/mpy/run.mjs tests/runner.py      # the same tests on real MicroPython
 ```
 
 - **Browser simulator:** `python3 tools/build_sim.py`, then
-  `python3 -m http.server 8765 --directory dist/sim` and open
+  `python3 tools/debug_server.py` and open
   `http://localhost:8765/local.html`. It runs the real game and screen code for
   two watches in your browser. You can drag the watches around a field and see
   both screens react.
+- **Debug mode (the real watches in that page):** load each watch with
+  `python3 tools/deploy.py --debug A` (and `--debug B`), after putting your
+  Wi-Fi name and password in `secrets.py` (from `secrets.example.py`; it is
+  never committed). The watches join your Wi-Fi and send their screens and
+  readings to the laptop. Flip the page's toggle to **Real watches** to see
+  both screens live, with a distance chart and the raw messages. `--demo` on
+  the bridge tries it with two pretend watches. Steps and troubleshooting:
+  [docs/hardware-setup.md](docs/hardware-setup.md) section 7.
 - **Estimator experiments:** `python3 tools/bakeoff.py --quick`
   ([docs/estimation/bakeoff.md](docs/estimation/bakeoff.md)).
 - **Screen snapshots:** `python3 tools/render_snapshots.py` renders every screen
@@ -120,7 +128,7 @@ node tools/mpy/run.mjs tests/runner.py      # the same tests on real MicroPython
 | Doc | Contents |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Layers, data flow per tick, timing |
-| [docs/hardware-setup.md](docs/hardware-setup.md) | Identifying the watch, flashing, deploying, first-boot checks |
+| [docs/hardware-setup.md](docs/hardware-setup.md) | Identifying the watch, flashing, deploying, first-boot checks, debug mode |
 | [hal/README.md](hal/README.md) | Drivers and hardware gotchas |
 | [docs/design/ui-spec.md](docs/design/ui-spec.md) | Every screen, haptic and interaction (behaviour source of truth) |
 | [docs/design/design-system.md](docs/design/design-system.md) | Colours, type, motion, components ([tokens.json](docs/design/tokens.json)) |

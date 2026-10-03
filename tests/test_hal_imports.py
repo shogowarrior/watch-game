@@ -19,6 +19,8 @@ API = {
     "haptics": ("Motor",),
     "radio": ("EspNowRadio", "SimRadio", "BCAST", "CHANNELS"),
     "board": ("Board", "safe_boot", "ORDER"),
+    "debuglink": ("DebugLink", "start", "read_config", "read_secrets", "broadcast_addr",
+                  "DEBUG_PORT"),
 }
 
 

@@ -70,6 +70,12 @@ JSON: `{"dev": "A", "host": "192.168.1.23", "port": 47268}`
   the UDP-connect trick; `--debug-host` overrides it. If `host` is missing, the
   watch sends to the subnet broadcast address computed from `ifconfig`.
 - `port` defaults to 47268 (`DEBUG_PORT`).
+- `deploy.py --debug` takes `A` or `B` only. When it cannot find the laptop's
+  address and no `--debug-host` is given, it writes `/debug` without `host`
+  (the watch then broadcasts) and says so.
+- On boot the watch tries to join for at most 10 s (`JOIN_MS`), and the screen
+  stays dark meanwhile. A failed join leaves the Wi-Fi disconnected, so it
+  cannot pull ESP-NOW off its channel.
 
 ### A datagram (watch -> laptop)
 
@@ -94,6 +100,14 @@ The kinds are:
 
 Send errors are counted (`tx_err`) and never raised into the game loop.
 
+- A datagram that is still too long after dropping every optional field is
+  not sent.
+- `rp` records are sent but never stored in the watch's telemetry ring or its
+  `/log` file.
+- `t` is the sender's own clock: each real watch counts from its boot, and the
+  fake watches share one clock that starts at 0. Never compare it across
+  watches or with the laptop's time.
+
 ### `tools/debug_server.py` (CPython, standard library only)
 
 ```
@@ -115,12 +129,31 @@ python3 tools/debug_server.py [--http-port 8765] [--udp-port 47268] [--root dist
   with no watches.
 - `.claude/launch.json` `web-sim` runs this server instead of `http.server`.
 
+Details the parts rely on:
+
+- `rx` is the laptop's wall clock in ms since 1970 (`Date.now()` on the page),
+  never the watch's ticks.
+- `/debug/status` `log` is a path relative to the repo, such as
+  `logs/debug-20261003-210553.jsonl`, or null. The log is created with the first
+  record. Each of its lines is exactly one `/events` payload
+  (`{"src", "rx", "rec"}`), ready to replay.
+- The `/events` stream starts with `retry: 2000`, so the page's `EventSource`
+  reconnects within 2 s after the bridge restarts. A comment line every 10 s
+  finds closed tabs.
+
 ### `tools/fake_watches.py` (CPython)
 
 `run(host="127.0.0.1", port=47268, seconds=None, speed=1.0, stop=None)` runs
 the two-watch simulator: `sim/` plus `finder.game.Game`, with no renderer. It
 sends the same datagrams real watches send, built by the same `app/telemetry.py`
 code; there is no second copy of the record format.
+
+- `stop` is a `threading.Event`: `run` loops while it is not set and paces
+  itself with `stop.wait`, so it returns within one 50 ms step once it is set.
+  `debug_server.py --demo` passes the Event it sets on shutdown and runs `run`
+  on a daemon thread.
+- The two watches are `A` and `B`, with different `mac` values. Their `rp`
+  records hold `finder.render_params.to_dict(params)`.
 
 ### Page side (`sim/webhost.py`, `web/sim/index.html`)
 
@@ -145,6 +178,18 @@ The page in Real mode:
 
 The choice is remembered in localStorage. The page must work at 375 px and in
 both themes, and `window.fieldSim` must keep working.
+
+How the page reads the records:
+
+- Only `dev` `A` and `B` map to the two screens. Records with other labels are
+  counted and kept in the raw log only.
+- Two different `mac` values under one label within 3 s are flagged as two
+  watches with the same name. The same MAC on both watches is fine.
+- "Last heard" counts from the bridge's `rx`, not from the record's `t`.
+- An `rp` record without `p` keeps the last screen. A `mac` of null (a watch
+  whose radio failed to start) is accepted.
+- `window.fieldSim` also has `mode`, `setMode('sim'|'real')` (it resolves to the
+  mode in effect) and `real` (a summary of what each watch sent).
 
 ## Tests (both runners where they apply)
 

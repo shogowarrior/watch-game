@@ -16,21 +16,24 @@ pure `.py`, no custom C modules.
 
 Status: every layer is written and tested on CPython, on MicroPython
 (WebAssembly) and in a two-watch simulator. **It has not yet run on real
-watches.** Every threshold is a starting value to calibrate.
+watches.** Every threshold is a starting value to calibrate. Debug mode
+(`docs/design/debug-mode.md`) shows the real watches live in the web sim page
+over Wi-Fi.
 
 ## Repo map
 
 | Path | What |
 |---|---|
 | `boot.py` | Minimal: silences IDF logs. No Wi-Fi, no webrepl, no app code. |
-| `main.py` | Safe-boot check (`/noapp` or side-key double press / hold), `Board().init()`, then `app.run(board, watchdog_ms=8000)`. |
+| `main.py` | Safe-boot check (`/noapp` or side-key double press / hold), debug mode (`/debug`: `hal.debuglink.start()` joins the Wi-Fi first), `Board().init()`, then `app.run(board, watchdog_ms=8000)`. |
 | `app/runtime.py` | The watch main loop `Runtime.step(now)`: radio, touch, imu, button, logic (10 Hz), render, tx, haptic, gc. |
 | `app/imu_feed.py` | BMA423 FIFO (100 Hz mg) -> `MotionTracker` at 25 Hz in g, plus the bump spike detector. |
-| `app/telemetry.py` | JSONL telemetry for field tests (`session()`; main.py turns it on when `/tele` exists). |
+| `app/telemetry.py` | JSONL telemetry for field tests (`session()`; main.py turns it on when `/tele` exists). In debug mode its `sink` sends each record, plus a 5 Hz `rp` record (the `RenderParams`), as one UDP datagram. |
 | `hal/` | The only code that touches hardware. See `hal/README.md` (drivers, gotchas, bench tools). |
 | `hal/pins.py` | GPIO map, bus ids, addresses, clock limits. V1 only. |
 | `hal/st7789.py` `axp202.py` `bma423.py` `ft6336.py` `haptics.py` `radio.py` `watchdog.py` | Display, PMU + side key, accelerometer, touch, motor, ESP-NOW (`EspNowRadio` / `SimRadio`), loop watchdog. |
-| `hal/board.py` | `Board` (lazy parts, one shared I2C0), `safe_boot`. |
+| `hal/board.py` | `Board` (lazy parts, one shared I2C0), `safe_boot`. `board.debug` set: the radio starts in its associated mode. |
+| `hal/debuglink.py` | Debug mode: reads `/debug` and `/secrets.py`, joins the Wi-Fi (10 s at most), `DebugLink` sends UDP datagrams to the laptop and counts errors (`tx_err`). |
 | `finder/` | Pure game logic. No hardware imports. |
 | `finder/compat.py` | Tick helpers and MicroPython portability rules. |
 | `finder/tuning.py` | **Generated** from `docs/design/tokens.json`. Never hand-edit. |
@@ -50,10 +53,14 @@ watches.** Every threshold is a starting value to calibrate.
 | `ui/` | Strip renderer: `renderer.py` (10 strips of 240x24), `field.py` (ripple palette), `glyphs.py`, `text.py`, `font.py`. Colours in `ui/__init__.py` are byte-swapped RGB565. |
 | `sim/` | Two-watch simulator: `world.py`, `radio.py` (RSSI profiles clean/typical/harsh/indoor, per-watch beacon period), `imu.py`, `accel_synth.py`, `scenarios.py`, `rng.py`, `link.py` (`GameLink`: beacon hand-off between two Games), `Sim`; `webhost.py` drives the browser sim. |
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). |
-| `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`), `est_helpers.py` (shared estimator fixtures), `test_deploy.py` (`tools/deploy.py`, CPython only). |
+| `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`, and `socket.py`, a fake UDP `socket` installed by `fakes.install_socket()`), `est_helpers.py` (shared estimator fixtures), `test_deploy.py` (`tools/deploy.py`, CPython only). |
+| `tests/test_debuglink.py` `test_debug_server.py` `test_fake_watches.py` `test_secrets_guard.py` | Debug mode: the watch side and `main.py` wiring on fakes; the bridge's UDP-to-SSE relay and log over real localhost sockets (CPython only); the fake watches; no tracked file holds a value from a local `secrets.py`. |
 | `tools/` | Host and on-watch scripts (see Commands). `tools/mpy/run.mjs` runs Python under MicroPython WebAssembly; `tools/cli.py` is the shared `--key value` parser. |
+| `tools/debug_server.py` | Debug bridge (CPython, stdlib only): serves `dist/sim/` on 127.0.0.1, relays the watches' UDP datagrams to the page as Server-Sent Events (`/events`), answers `/debug/status`, logs to `logs/`. |
+| `tools/fake_watches.py` | Two simulated watches that send real debug-mode datagrams (same `app/telemetry.py` and `hal/debuglink.py` code); `debug_server.py --demo` runs it. |
+| `logs/` | Gitignored. `debug-*.jsonl` sessions from the bridge: each line is one `/events` payload `{"src", "rx", "rec"}`, ready to replay. |
 | `docs/project/` | `handoff.md` (current state, open questions, next steps: read first); the Claude Project's `goal.md`, `instructions.md` and `setup.md` (how to create it). |
-| `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`, `debug-mode.md` (the next feature, specified, not built). |
+| `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`, `debug-mode.md` (debug mode: decisions and the contract between watch, bridge and page). |
 | `docs/estimation/` | `bakeoff.md` (why kalman2), `imu-drift.md` (why no dead reckoning). |
 | `docs/research/user-research.md` | Personas, field-test plan, requirements R-01..R-15. |
 | `docs/architecture.md` `docs/hardware-setup.md` | Layers and data flow; bring-up on real watches. |
@@ -105,7 +112,9 @@ sets it as CPython would.
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |
-| `python3 tools/deploy.py [--port P] [-n] [--noapp\|--app] [--tele DEV\|--no-tele]` | Hard-reset the watch, copy `app/`, `finder/`, `hal/`, `ui/` (+ `bma423conf.bin`) and last `boot.py`, `main.py` with mpremote, then hard-reset again so `main.py` starts the game. `--tele DEV` makes the game log to `/log/<n>_DEV.jsonl`. |
+| `python3 tools/deploy.py [--port P] [-n] [--noapp\|--app] [--tele DEV\|--no-tele] [--debug A\|B [--debug-host IP]\|--no-debug]` | Hard-reset the watch, copy `app/`, `finder/`, `hal/`, `ui/` (+ `bma423conf.bin`) and last `boot.py`, `main.py` with mpremote, then hard-reset again so `main.py` starts the game. `--tele DEV` makes the game log to `/log/<n>_DEV.jsonl`. `--debug A` copies `secrets.py` and writes `/debug` (the laptop's address, found by itself or `--debug-host`); `--no-debug` removes both. |
+| `python3 tools/debug_server.py [--http-port 8765] [--udp-port 47268] [--root dist/sim] [--no-log] [--demo]` | Debug bridge: open `http://localhost:8765/local.html` and pick Real watches. `--demo` adds two fake watches. Needs `python3 tools/build_sim.py` first. |
+| `python3 tools/fake_watches.py [--host 127.0.0.1] [--port 47268] [--seconds N] [--speed 1.0]` | Two simulated watches sending debug-mode datagrams to a bridge. |
 
 Agents: do not flash, erase or deploy to a watch, and do not download
 firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
@@ -163,8 +172,11 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
     bands (`<3`, `~5`, `~10`, `~20`, `~40`, `60+`); zones are felt through tempo
     and haptics, thermal words are for the trend only (ui-spec §12). RSSI cannot
     support precise numbers, and false precision was the top usability risk.
-12. **Only `hal/` imports `machine`, `network`, `espnow`.** `finder/` stays pure
-    so it runs in tests and the browser; `app/` gets hardware through `Board`.
+12. **Only `hal/` imports `machine`, `network`, `espnow`, `socket`.** `finder/`
+    stays pure so it runs in tests and the browser; `app/` gets hardware through
+    `Board` (and debug mode's link through `main.py`). CPython host tools in
+    `tools/` may use `socket` (`deploy.py` for the laptop's address,
+    `debug_server.py`).
 13. Other ui-spec §12 "don'ts" hold everywhere: no haptic pulse under 60 ms, no
     new patterns beyond the 9, no full-screen flashes, no Nintendo assets or
     "Sheikah" on screen, nothing mapped near the AXP202 power-off hold.
@@ -197,7 +209,7 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
 - Users, field-test protocol, requirements R-xx: `docs/research/user-research.md`.
 - Driver facts and hardware gotchas: `hal/README.md`.
 - System structure and per-tick data flow: `docs/architecture.md`.
-- Debug mode (Real watches in the web page over Wi-Fi), the next feature: `docs/design/debug-mode.md`.
+- Debug mode (Real watches in the web page over Wi-Fi): `docs/design/debug-mode.md`; how to use it: `docs/hardware-setup.md` section 7.
 
 ## Adding a range estimator
 
@@ -232,21 +244,36 @@ WebAssembly and a bundle of `finder/`, `ui/`, `sim/`.
 ```sh
 (cd tools/mpy && npm install)       # once
 python3 tools/build_sim.py          # -> dist/sim/ (index.html, local.html, py/bundle.json, mpy/)
-python3 -m http.server 8765 --directory dist/sim   # open http://localhost:8765/local.html
+python3 tools/debug_server.py       # open http://localhost:8765/local.html (--demo: two fake watches)
 ```
 
-`.claude/launch.json` has the same server as `web-sim`; its preview opens `/`
-(`index.html`, quirks mode), so navigate to `/local.html` to see the page as a
-full document. Rebuild after any change to `finder/`, `ui/` or `sim/`.
-`dist/sim/index.html` is the page body (artifact format) after a leading
-`<meta charset="utf-8">`; `local.html` wraps it in a full document.
+`.claude/launch.json` `web-sim` runs `python3 tools/debug_server.py --http-port
+8765` (still build first); its preview opens `/` (`index.html`, quirks mode),
+so navigate to `/local.html` to see the page as a full document. Rebuild after
+any change to `finder/`, `ui/` or `sim/`. `dist/sim/index.html` is the page
+body (artifact format) after a leading `<meta charset="utf-8">`; `local.html`
+wraps it in a full document.
+
+The **Simulator | Real watches** toggle at the top switches the page to debug
+mode (`docs/design/debug-mode.md`): `TwoWatchSim.real_mode(True)` stops the
+world and `show_params(i, json)` draws each watch's latest `rp` record. Real
+mode is available only when `./debug/status` answers, so the claude.ai
+artifact and a plain `http.server` show it as unavailable with one plain
+sentence. The choice is kept in localStorage. `window.fieldSim` (the headless
+test hook: `advance`, `call`, `telemetry`) also has `mode`,
+`setMode('sim'|'real')` (resolves to the mode in effect) and `real` (a summary
+of what each watch sent).
 
 ## Security
 
 - `secrets.py` (Wi-Fi credentials) is gitignored; `secrets.example.py` is the
-  template. The game never joins Wi-Fi, and `deploy.py` copies `secrets.py` only
-  with `--secrets`. Never commit credentials, tokens or `webrepl_cfg.py`, and
-  never paste them into notebook outputs, docs or tests.
+  template. The game joins Wi-Fi only in debug mode (`/debug` on the watch),
+  with that gitignored `secrets.py`; `deploy.py` copies it only with `--debug`
+  (or `--secrets`), and `--no-debug` removes it. Its values are read only on
+  the watch (`hal/debuglink.py`) and never printed, logged or sent.
+  `tests/test_secrets_guard.py` checks that no file git would commit contains
+  them. Never commit credentials, tokens or `webrepl_cfg.py`, and never paste
+  them into notebook outputs, docs or tests.
 - The first commit (`c79530c`) leaked the Wi-Fi password and the WebREPL
   password (in `boot.py` and `webrepl_cfg.py`). They must be **rotated**.
   Rewriting history needs the user's explicit OK; agents must not do it.

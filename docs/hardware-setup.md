@@ -88,7 +88,8 @@ which cannot be stopped and would reboot the watch in the middle of the copy.
 After the reset the game starts on USB with the stoppable one. The entry
 points go last, so an interrupted copy keeps the old ones. The new
 `boot.py` replaces any old one that joined Wi-Fi or started WebREPL. The game
-never joins Wi-Fi, and `secrets.py` is only copied with `--secrets`. Deploy the
+joins Wi-Fi only in debug mode (section 7), and `secrets.py` is only copied
+with `--debug` (or `--secrets`). Deploy the
 same build to both watches: a watch drops beacons with another protocol version
 (`finder/proto.py` `VERSION`).
 
@@ -103,6 +104,8 @@ same build to both watches: a watch drops beacons with another protocol version
   `mpremote connect <port> fs ls :/log`, then
   `mpremote connect <port> fs cp :/log/<n>_A.jsonl .`. Check free flash with
   `import os; os.statvfs("/")`.
+- `--debug A` / `--debug B` and `--no-debug` switch debug mode on and off
+  (section 7).
 - Safe boot without a computer: double-press, or hold for about 1.5 s, the side
   button within the first second after power-on.
 
@@ -211,3 +214,87 @@ Record the results, and move any calibrated value into `docs/design/tokens.json`
 (then run `python3 tools/gen_tuning.py`), or into the driver defaults in `hal/`.
 `docs/estimation/bakeoff.md` ("What to measure on real watches") lists the radio
 measurements needed to recalibrate the simulator.
+
+## 7. Debug mode: watch the real watches on your laptop
+
+Debug mode shows what both watches are doing, live, in the web sim page on your
+laptop: their screens (drawn by the same screen code), the distance each one
+guesses, signal strength, steps, battery and missed signals, plus a chart and
+the raw messages. Each watch joins your home Wi-Fi and sends this to the laptop
+5 times a second; the game itself plays exactly as usual. The design is in
+[design/debug-mode.md](design/debug-mode.md).
+
+You need both watches, the laptop on a **2.4 GHz** Wi-Fi network, and the page
+built once (`python3 tools/build_sim.py`, which needs the one-time
+`cd tools/mpy && npm install`).
+
+1. **Your Wi-Fi name and password.** Copy `secrets.example.py` to `secrets.py`
+   in the project folder and fill in `WIFI_SSID` and `WIFI_PASSWORD`.
+   `secrets.py` is ignored by git, so it is never committed. It is copied only
+   to the watches, and nothing ever prints or sends it.
+2. **Load each watch in debug mode** (one watch per USB port):
+   ```sh
+   python3 tools/deploy.py --port /dev/cu.usbserial-A --debug A
+   python3 tools/deploy.py --port /dev/cu.usbserial-B --debug B
+   ```
+   This copies the game and `secrets.py`, and writes `/debug` with the name the
+   page shows (A or B) and this laptop's address, which it finds by itself and
+   prints. If it cannot find one, it says so and the watch broadcasts to the
+   whole network instead, which is less reliable: give the address with
+   `--debug-host 192.168.1.23` (on macOS, `ipconfig getifaddr en0` prints it).
+   Use A for one watch and B for the other.
+3. **Start the bridge** on the laptop and open the page:
+   ```sh
+   python3 tools/debug_server.py
+   ```
+   Open http://localhost:8765/local.html and pick **Real watches** at the top.
+   If macOS (or another firewall) asks whether Python may accept incoming
+   connections, allow it: that is how the watches reach the laptop.
+4. **Switch the watches on** (or let them restart after the deploy). Each one
+   tries to join the Wi-Fi for up to 10 s before the game starts, with the
+   screen dark meanwhile. A few seconds later its screen shows up on the page.
+
+**Both watches must join the same Wi-Fi network.** The watches talk to each
+other on the Wi-Fi's channel while they are joined, so two different networks
+(or a 2.4 GHz and a 5 GHz name of the same router, if your router splits them)
+put them on different channels, and they will not hear each other.
+
+If a watch does not show up:
+
+- The page's "Last heard" under each screen says when it last heard that watch.
+  The bridge also prints "Heard watch A" the first time.
+- A watch that cannot join plays normally without sending. To see why, plug it
+  in, run `mpremote connect <port> repl`, press Ctrl-C (stops the game), then
+  type `import machine; machine.reset()` and press Enter. The watch restarts in
+  the same window, and its first lines say where it sends, or why debug mode is
+  off (no `secrets.py`, a wrong password, no network in range).
+- If two different watches both say A (or B), the page says so: load one of
+  them again with the other letter.
+
+**Logs.** The bridge saves everything the watches send to
+`logs/debug-YYYYmmdd-HHMMSS.jsonl` in the project folder (ignored by git; the
+bridge prints the file's name when it starts and when it stops). Each line is one
+message as the page received it: `{"src": watch address, "rx": laptop time in
+ms, "rec": what the watch sent}`. These sessions are real radio data to
+calibrate the estimators with later (`docs/estimation/bakeoff.md`). Pass
+`--no-log` to save nothing.
+
+**Try it without watches:** `python3 tools/debug_server.py --demo` runs two
+pretend watches on the laptop that send the same messages. One walks away to
+about 40 m and back while the other stands still.
+
+**Turn it off:** `python3 tools/deploy.py --port <port> --no-debug` removes
+`/debug` and `secrets.py` from the watch. From then on it plays normally and
+never joins the Wi-Fi.
+
+Notes:
+
+- If the Wi-Fi drops in the middle of a game, the watch keeps trying to
+  reconnect, which can disturb the signal between the watches for a while. Use
+  debug mode at home and for field tests near the access point; turn it off for
+  normal play.
+- Real mode works only in the page served by `tools/debug_server.py`. The
+  claude.ai artifact and a page served by a plain `http.server` show it as
+  unavailable, with the command to run.
+- `--debug` works together with `--tele A`: the watch then also keeps its own
+  log in `/log`.

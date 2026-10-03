@@ -27,6 +27,10 @@ within the first second after boot. Holding the key to power on and letting go
 never counts.
 
 Pass ``factories={"imu": fn}`` (fn(board) -> driver) to override any part.
+
+Debug mode (hal/debuglink.py): set ``board.debug`` to the joined
+``DebugLink`` before the radio is made, and the radio starts in its
+associated mode on the access point's channel (``channel`` is then unused).
 """
 
 import machine
@@ -44,13 +48,14 @@ class Board:
     # touch_rotation 0: raw FT6336 coords already match MADCTL 0xC0 (LilyGO
     # TTGO.h getTouch, TFT rotation 2 -> x = __x, y = __y on the 2020 V1).
     def __init__(self, cpu_hz=pins.CPU_HZ, fast_spi=False, touch_rotation=0,
-                 brightness=0.6, channel=None, factories=None):
+                 brightness=0.6, channel=None, factories=None, debug=None):
         if cpu_hz:
             machine.freq(cpu_hz)
         self.fast_spi = fast_spi
         self.touch_rotation = touch_rotation
         self.default_brightness = brightness
         self.channel = channel
+        self.debug = debug        # a joined hal.debuglink.DebugLink: radio on its Wi-Fi channel
         self.factories = factories or {}
         self.errors = {}
         self._i2c0 = None
@@ -152,6 +157,8 @@ class Board:
     def _make_radio(self):
         from hal.radio import EspNowRadio, DEFAULT_CHANNEL
         # STA up, channel/txpower/pm set, ESP-NOW active
+        if self.debug is not None:          # keep the Wi-Fi connection, use its channel
+            return EspNowRadio().begin(sta=self.debug.sta)
         return EspNowRadio(channel=self.channel or DEFAULT_CHANNEL).begin()
 
     # -- helpers ----------------------------------------------------------------

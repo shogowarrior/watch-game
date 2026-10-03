@@ -1402,3 +1402,175 @@ def test_stage_sums_stay_small_ints():
     assert rt.st_us[S_RENDER] <= ACC_LIMIT_US < 2 ** 30
     s = rt.stats(reset=False)
     assert s["render"][0] == 40.0 and s["render"][1] == 40.0
+
+
+# ---- debug mode: the telemetry sink ---------------------------------------------------
+class Sink:
+    """Collects datagrams as hal/debuglink.DebugLink sends them (and when)."""
+
+    def __init__(self, clock=None):
+        self.clock = clock
+        self.sent = []
+        self.at = []
+
+    def send(self, s):
+        self.sent.append(s)
+        self.at.append(None if self.clock is None else self.clock.now)
+        return True
+
+    def stats(self):
+        return {"tx": len(self.sent), "tx_err": 0}
+
+
+def _same_params(d, p):
+    """``d`` (an rp record's ``p``) holds RenderParams ``p`` (floats to 1e-6)."""
+    from finder.render_params import FIELDS, from_dict, to_dict
+    q = to_dict(from_dict(d))
+    w = to_dict(p)
+    for k in FIELDS:
+        a, b = q[k], w[k]
+        if isinstance(b, float):
+            assert abs(a - b) < 1e-6, (k, a, b)
+        else:
+            assert a == b, (k, a, b)
+
+
+def test_debug_sink_sends_state_and_screen_at_5hz():
+    """Every datagram carries dev, mac, t and ev and fits one Wi-Fi frame; each
+    5 Hz state record is followed by an ``rp`` with the frame's params, and
+    nothing is sent between records. ``rp`` never goes into the ring."""
+    fakes.install()
+    import json
+    from hal.radio import SimRadio
+    from app.telemetry import Telemetry, DGRAM_MAX
+    clock = Clock(0)
+    rt = _watch(clock, SimRadio(MAC_A).begin())
+    sink = Sink(clock)
+    tl = Telemetry(dev="A", sink=sink)
+    rt.tele = tl
+    rt.run(max_ms=3000)
+    recs = [json.loads(s) for s in sink.sent]
+    for s, d in zip(sink.sent, recs):
+        assert len(s) <= DGRAM_MAX, len(s)
+        assert d["dev"] == "A" and d["mac"] == "10000a" and isinstance(d["t"], int), d
+    kinds = [d["ev"] for d in recs]
+    n = kinds.count("s")
+    assert 14 <= n <= 16 and kinds.count("rp") == n and set(kinds) == {"s", "rp"}, kinds
+    for i in range(len(recs)):
+        if kinds[i] == "rp":            # right after its state record, same time
+            assert kinds[i - 1] == "s" and recs[i - 1]["t"] == recs[i]["t"]
+            assert recs[i]["on"] is True and recs[i]["bl"] == recs[i - 1]["bl"] > 0
+    assert set(sink.at) == set(d["t"] for d in recs if d["ev"] == "s")   # the 5 Hz path only
+    tl.record(clock.now, rt)
+    _same_params(json.loads(sink.sent[-1])["p"], rt.params)
+    ring = [json.loads(s) for s in tl.lines()]
+    assert ring and all(d["ev"] == "s" and d["mac"] == "10000a" for d in ring)
+    assert rt.stats()["debug_stats"]["tx"] == len(sink.sent)
+
+
+def test_debug_events_wait_for_the_state_record():
+    """A haptic event logged in the render stage is sent with the next 5 Hz
+    record, before it: never from the render loop."""
+    fakes.install()
+    import json
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    from finder.render_params import make_params
+    clock = Clock(0)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None)
+    rt.begin(0)
+    sink = Sink()
+    rt.tele = Telemetry(dev="B", sink=sink)
+    rt.params = make_params(t_ms=1000, haptic="CLOSER")
+    rt._fresh = True
+    rt._stage_render(1000)
+    assert sink.sent == [] and rt.tele.n == 1
+    rt._stage_logic(1100)
+    rt.tele.record(1100, rt)
+    recs = [json.loads(s) for s in sink.sent]
+    assert [d["ev"] for d in recs] == ["haptic", "s", "rp"], recs
+    assert recs[0]["pattern"] == "CLOSER" and recs[0]["dev"] == "B"
+    assert rt.tele.send() == 0                  # nothing left over
+
+
+def test_debug_crash_is_sent_on_the_way_out():
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    import json
+    clock = Clock(0)
+    sink = Sink()
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None, telemetry=Telemetry(dev="A", sink=sink))
+    rt.begin(0)
+    tick = rt.game.tick
+
+    def bad_tick(t):
+        if t >= 1500:
+            raise ValueError("boom")
+        return tick(t)
+    rt.game.tick = bad_tick
+    try:
+        rt.run(max_ms=5000)
+        assert False, "no crash"
+    except ValueError:
+        pass
+    d = json.loads(sink.sent[-1])
+    assert d["ev"] == "crash" and "boom" in d["e"] and d["dev"] == "A"
+
+
+def test_debug_power_off_is_sent():
+    fakes.install()
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    import json
+    clock = Clock(0)
+    sink = Sink()
+    rt = Runtime(Board(pmu=FakePMU(clock)), clock=clock, sleep_ms=clock.sleep,
+                 renderer=StubRenderer(), gc_collect=lambda: None,
+                 telemetry=Telemetry(dev="A", sink=sink))
+    rt.begin(0)
+    rt._power_off(500)
+    assert json.loads(sink.sent[-1])["ev"] == "pwr" and rt.pmu.off
+
+
+def test_debug_datagram_drops_optional_fields_to_fit():
+    import json
+    from app.telemetry import Telemetry, DGRAM_MAX
+    sink = Sink()
+    tl = Telemetry(dev="A", sink=sink)
+    tl.set_mac(MAC_A)
+    tl.event(7, "crash", ("e", "x" * 3000), ("where", "loop"))
+    assert tl.send() == 1
+    s = sink.sent[0]
+    assert len(s) <= DGRAM_MAX
+    assert json.loads(s) == {"t": 7, "ev": "crash", "where": "loop", "dev": "A", "mac": "10000a"}
+    assert "x" * 3000 in tl.lines(1)[0]         # the ring (and the file) keep it whole
+    tl.dev = "D" * 2000                         # even the required fields are too long
+    tl.event(8, "btn")
+    assert tl.send() == 1 and len(sink.sent) == 1
+
+
+def test_debug_send_errors_never_stop_the_loop():
+    fakes.install()
+    restore = fakes.install_socket()
+    try:
+        import socket
+        from hal.debuglink import DebugLink
+        from hal.radio import SimRadio
+        from app.telemetry import Telemetry
+        link = DebugLink("A", "192.168.1.23")
+        assert link.open()
+        socket.fail[0] = 113                    # EHOSTUNREACH: the Wi-Fi dropped
+        clock = Clock(0)
+        rt = _watch(clock, SimRadio(MAC_A).begin())
+        rt.tele = Telemetry(dev="A", sink=link)
+        rt.run(max_ms=2000)
+        assert rt.frames >= 35 and link.n_tx == 0 and link.tx_err >= 20, (rt.frames, link.tx_err)
+        socket.fail[0] = None                   # back on the Wi-Fi
+        rt.run(max_ms=1000)
+        assert link.n_tx >= 10
+        assert rt.stats()["debug_stats"]["tx_err"] == link.tx_err
+        assert not any(rt.io_errors)
+    finally:
+        restore()
