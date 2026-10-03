@@ -1451,7 +1451,7 @@ def test_debug_sink_sends_state_and_screen_at_5hz():
     rt.run(max_ms=3000)
     recs = [json.loads(s) for s in sink.sent]
     for s, d in zip(sink.sent, recs):
-        assert len(s) <= DGRAM_MAX, len(s)
+        assert isinstance(s, bytes) and len(s) <= DGRAM_MAX, len(s)   # UTF-8, as sent
         assert d["dev"] == "A" and d["mac"] == "10000a" and isinstance(d["t"], int), d
     kinds = [d["ev"] for d in recs]
     n = kinds.count("s")
@@ -1549,6 +1549,49 @@ def test_debug_datagram_drops_optional_fields_to_fit():
     tl.dev = "D" * 2000                         # even the required fields are too long
     tl.event(8, "btn")
     assert tl.send() == 1 and len(sink.sent) == 1
+
+
+def test_debug_datagram_counts_bytes_not_characters():
+    """MicroPython's json.dumps keeps non-ASCII text as UTF-8 (CPython escapes
+    it), so the limit is on the bytes that go out: a crash text of 600 three-
+    byte characters is dropped, a short one goes whole, on both runtimes."""
+    import json
+    from app.telemetry import Telemetry, DGRAM_MAX
+    sink = Sink()
+    tl = Telemetry(dev="A", sink=sink)
+    tl.set_mac(MAC_A)
+    tl.event(7, "crash", ("e", "\u20ac" * 600), ("where", "loop"))
+    tl.event(8, "crash", ("e", "\u00e9" * 100))
+    assert tl.send() == 2 and len(sink.sent) == 2
+    for b in sink.sent:
+        assert isinstance(b, bytes) and len(b) <= DGRAM_MAX, len(b)
+    a, b = [json.loads(x) for x in sink.sent]
+    assert "e" not in a and a["where"] == "loop" and a["ev"] == "crash" and a["dev"] == "A"
+    assert b["e"] == "\u00e9" * 100
+
+
+def test_debug_rp_names_the_wifi_channel():
+    """``rp`` carries the sink's Wi-Fi channel (``ch``), so the page can tell
+    two watches on different channels apart; null when the sink has none."""
+    fakes.install()
+    import json
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    from finder.render_params import make_params
+    clock = Clock(0)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None)
+    rt.begin(0)
+    rt._stage_logic(1000)
+    rt.params = make_params(t_ms=1000)
+    for ch in (11, None):
+        sink = Sink()
+        if ch is not None:
+            sink.channel = ch                  # DebugLink.channel: the access point's
+        rt.tele = Telemetry(dev="A", sink=sink)
+        rt.tele.record(1000, rt)
+        rp = json.loads(sink.sent[-1])
+        assert rp["ev"] == "rp" and "ch" in rp and rp["ch"] == ch, rp
 
 
 def test_debug_send_errors_never_stop_the_loop():

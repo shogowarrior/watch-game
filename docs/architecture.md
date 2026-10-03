@@ -247,11 +247,14 @@ flowchart LR
    failure it prints why and plays normally).
 2. `Board` starts `EspNowRadio` in its associated mode: the Wi-Fi connection
    stays up and ESP-NOW uses the access point's channel. Both watches must join
-   the same access point, or they will be on different channels.
+   the same access point, or they will be on different channels (a watch whose
+   join failed stays on its usual channel 6).
 3. `app/telemetry.py` gets the link as its `sink`. From the 5 Hz state-record
    path (never the render stage) it sends the events since the last record, the
-   state record and an `rp` record with the frame's `RenderParams`, each as one
-   datagram of at most 1400 bytes. Send errors are counted, never raised.
+   state record and an `rp` record with the frame's `RenderParams` and `ch`,
+   the watch's Wi-Fi channel. Each is one datagram of UTF-8 bytes no longer
+   than `DGRAM_MAX` (1400, one Wi-Fi frame). Send errors are counted, never
+   raised.
 4. `tools/debug_server.py` (CPython, standard library only) serves `dist/sim/`
    on 127.0.0.1, turns every valid datagram into one Server-Sent Event, and
    appends it to `logs/debug-*.jsonl` (gitignored). `--demo` runs
@@ -260,6 +263,7 @@ flowchart LR
 5. In Real mode the page stops the simulated world (`TwoWatchSim.real_mode`)
    and hands each `rp` record to `TwoWatchSim.show_params`, so the screens come
    from the real renderer, animated between records. The state records fill the
-   readouts and the distance chart. The page offers Real mode only when
+   readouts and the distance chart, and two live watches whose `rp` records
+   name different channels are flagged. The page offers Real mode only when
    `./debug/status` answers, so the claude.ai artifact and a page served by a
    plain `http.server` show it as unavailable.

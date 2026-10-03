@@ -190,11 +190,15 @@ on CPython.
   non-blocking UDP socket to `host:port`, or to the subnet broadcast address
   when `/debug` has no `host` (broadcast is unreliable on the ESP32: a
   fallback only).
-- Whatever fails (no `secrets.py`, a wrong password, no access point in
-  range), it returns `(None, why)`: `main.py` prints the reason and the game
-  plays normally. A failed join is disconnected again, so the STA cannot pull
-  ESP-NOW off its channel. The Wi-Fi name and password are never printed,
-  logged or sent.
+- Whatever fails (no `secrets.py`, a name or password not in quotes, a wrong
+  password, no access point in range), it returns `(None, why)`: `main.py`
+  prints the reason and the game plays normally. A wrong password and an
+  unknown or out-of-range network give the same message after 10 s (the
+  ESP32 keeps retrying both, so the watch cannot tell them apart). `main.py`
+  also turns any unexpected error from `start()` into `debug mode off: it
+  could not start (<type>). Playing normally.` A failed join is disconnected
+  again, so the STA cannot pull ESP-NOW off its channel. The Wi-Fi name and
+  password are never printed, logged or sent.
 - On success `main.py` sets `board.debug = link`. `Board._make_radio` then
   starts `EspNowRadio` in its associated mode on `link.sta`, and
   `app/telemetry.py` sends its records through `link.send()` from its 5 Hz path
@@ -205,10 +209,16 @@ Gotchas:
 
 - ESP-NOW and the Wi-Fi association share one radio, so **both watches must
   join the same access point**: the access point picks the channel, and two
-  watches on different channels never hear each other.
+  watches on different channels never hear each other. A watch whose join
+  failed stays on channel 6 while a joined partner uses the access point's
+  channel, so the pair cannot find each other until both have joined. A mesh
+  or extender network (one name, several access points) can split two
+  watches the same way. Each `rp` record carries the channel (`ch`), so the
+  page can say when the two watches differ.
 - If the Wi-Fi drops in the middle of a game, the ESP32 keeps trying to
-  reconnect. That can make it scan other channels and disturb ESP-NOW for a
-  while. Debug mode is for the desk and the field test, not for normal play.
+  reconnect. That can make it scan other channels and disturb ESP-NOW until
+  the access point is back in reach. Debug mode is for the desk and the field
+  test, not for normal play.
 - `network` and `socket` are imported only when used, so the module also loads
   on CPython: `tools/fake_watches.py` sends through `DebugLink.open()` and
   `send()`.

@@ -221,8 +221,8 @@ Debug mode shows what both watches are doing, live, in the web sim page on your
 laptop: their screens (drawn by the same screen code), the distance each one
 guesses, signal strength, steps, battery and missed signals, plus a chart and
 the raw messages. Each watch joins your home Wi-Fi and sends this to the laptop
-5 times a second; the game itself plays exactly as usual. The design is in
-[design/debug-mode.md](design/debug-mode.md).
+5 times a second; the game plays as usual while both watches are within reach
+of the Wi-Fi. The design is in [design/debug-mode.md](design/debug-mode.md).
 
 You need both watches, the laptop on a **2.4 GHz** Wi-Fi network, and the page
 built once (`python3 tools/build_sim.py`, which needs the one-time
@@ -230,6 +230,7 @@ built once (`python3 tools/build_sim.py`, which needs the one-time
 
 1. **Your Wi-Fi name and password.** Copy `secrets.example.py` to `secrets.py`
    in the project folder and fill in `WIFI_SSID` and `WIFI_PASSWORD`.
+   Keep the quotes around both, even when the password is all digits.
    `secrets.py` is ignored by git, so it is never committed. It is copied only
    to the watches, and nothing ever prints or sends it.
 2. **Load each watch in debug mode** (one watch per USB port):
@@ -257,7 +258,12 @@ built once (`python3 tools/build_sim.py`, which needs the one-time
 **Both watches must join the same Wi-Fi network.** The watches talk to each
 other on the Wi-Fi's channel while they are joined, so two different networks
 (or a 2.4 GHz and a 5 GHz name of the same router, if your router splits them)
-put them on different channels, and they will not hear each other.
+put them on different channels, and they will not hear each other. A mesh
+system or a range extender can also put the two watches on different channels
+even though the network has one name; if both watches show up here but never
+find each other on the page, use a network with a single access point (when
+the two watches report different channels, the page says so under both
+screens).
 
 If a watch does not show up:
 
@@ -267,7 +273,13 @@ If a watch does not show up:
   in, run `mpremote connect <port> repl`, press Ctrl-C (stops the game), then
   type `import machine; machine.reset()` and press Enter. The watch restarts in
   the same window, and its first lines say where it sends, or why debug mode is
-  off (no `secrets.py`, a wrong password, no network in range).
+  off (no `secrets.py`, a Wi-Fi name or password without quotes, a wrong
+  password, no network in range). A wrong password and a network out of reach
+  give the same message, after 10 s: the watch cannot tell them apart.
+- A watch that cannot join plays on its usual radio channel, but a watch that
+  did join talks on the Wi-Fi's channel, so the two cannot find each other
+  until both show up on the page. Restart the missing watch (or turn debug mode
+  off on both with `--no-debug`).
 - If two different watches both say A (or B), the page says so: load one of
   them again with the other letter.
 
@@ -276,8 +288,10 @@ If a watch does not show up:
 bridge prints the file's name when it starts and when it stops). Each line is one
 message as the page received it: `{"src": watch address, "rx": laptop time in
 ms, "rec": what the watch sent}`. These sessions are real radio data to
-calibrate the estimators with later (`docs/estimation/bakeoff.md`). Pass
-`--no-log` to save nothing.
+calibrate the estimators with later (`docs/estimation/bakeoff.md`). No tool
+replays them yet: a replay input for the bake-off is a planned next step
+([project/handoff.md](project/handoff.md)), and the files are already in the
+form it will read. Pass `--no-log` to save nothing.
 
 **Try it without watches:** `python3 tools/debug_server.py --demo` runs two
 pretend watches on the laptop that send the same messages. One walks away to
@@ -290,9 +304,9 @@ never joins the Wi-Fi.
 Notes:
 
 - If the Wi-Fi drops in the middle of a game, the watch keeps trying to
-  reconnect, which can disturb the signal between the watches for a while. Use
-  debug mode at home and for field tests near the access point; turn it off for
-  normal play.
+  reconnect, and until it is back within reach of the access point the watches
+  can lose each other. Use debug mode at home and for field tests near the
+  access point; turn it off for normal play.
 - Real mode works only in the page served by `tools/debug_server.py`. The
   claude.ai artifact and a page served by a plain `http.server` show it as
   unavailable, with the command to run.

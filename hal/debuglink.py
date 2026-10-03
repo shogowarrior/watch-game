@@ -185,13 +185,16 @@ class DebugLink:
         """Close the socket and leave the access point."""
         s, sta = self._s, self.sta
         self._s = self.sta = None
-        try:
-            if s is not None:
+        if s is not None:
+            try:
                 s.close()
-            if sta is not None:
+            except Exception:  # noqa: BLE001 - already closed
+                pass
+        if sta is not None:            # even when the socket would not close
+            try:
                 sta.disconnect()
-        except Exception:  # noqa: BLE001 - already closed or down
-            pass
+            except Exception:  # noqa: BLE001 - already down
+                pass
 
     def stats(self):
         """Counters for ``Runtime.stats()`` (no Wi-Fi name or password)."""

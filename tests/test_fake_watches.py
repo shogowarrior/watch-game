@@ -49,6 +49,7 @@ def test_fake_watches_send_what_real_watches_send():
     for r in recs:
         if r["ev"] == "rp":
             assert not validate(from_dict(r["p"])) and r["on"] in (True, False)
+            assert "ch" in r and r["ch"] is None           # no Wi-Fi channel on the fakes
     s = [r for r in recs if r["ev"] == "s"]
     for k in ("rssi", "rssi_f", "d_est", "d_lo", "d_hi", "zone", "trend", "steps", "act",
               "ui", "sub", "batt_pct", "seq", "peer_seq", "rx", "loss"):

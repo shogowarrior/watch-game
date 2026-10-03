@@ -14,8 +14,8 @@ The code has been tested on the computer and in a two-watch simulator, but
 ## How it works
 
 - **Radio.** Each watch broadcasts a small ESP-NOW packet 5 to 20 times a
-  second (no Wi-Fi network needed; only debug mode joins one). The receiving watch measures the signal
-  strength (RSSI). A stronger signal usually means closer, but RSSI is noisy:
+  second (no Wi-Fi network needed; only debug mode joins one). The receiving
+  watch measures the signal strength (RSSI). A stronger signal usually means closer, but RSSI is noisy:
   bodies, walls and reflections can move it by 10 dB or more.
 - **Filtering.** A two-state Kalman filter smooths the RSSI and its rate of
   change. The accelerometer doesn't give position (it drifts far too quickly),

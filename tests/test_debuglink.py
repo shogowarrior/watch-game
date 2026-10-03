@@ -48,10 +48,20 @@ def _files(d, config=None, secrets=None):
 
 
 def _clean(d):
-    """Remove ``_files``' files and the temporary directory."""
-    _rm(d + "/_debug", d + "/_secrets.py")
+    """Remove ``_files``' files, ``_run_main``'s /tele and log directory, and
+    the temporary directory."""
+    import os
+    _rm(d + "/_debug", d + "/_secrets.py", d + "/_tele")
+    log = d + "/_log"
+    try:
+        names = os.listdir(log)
+    except OSError:
+        names = None
+    if names is not None:
+        for n in names:
+            _rm(log + "/" + n)
+        os.rmdir(log)
     if d != ".":
-        import os
         os.rmdir(d)
 
 
@@ -131,6 +141,33 @@ def test_read_secrets_never_quotes_the_file():
         _clean(d)
 
 
+def test_read_secrets_wants_text_in_quotes():
+    """A name or password that is not text (an all-digit password typed
+    without quotes) would make WLAN.connect raise TypeError on the watch:
+    it is a plain reason instead, which never shows the value."""
+    d = _tmpdir()
+    _, s = _files(d, secrets=_secrets())
+    try:
+        for bad in ("WIFI_SSID = %r\nWIFI_PASSWORD = 12345678\n" % SSID,
+                    "WIFI_SSID = 24680\nWIFI_PASSWORD = %r\n" % PW,
+                    "WIFI_SSID = %r\nWIFI_PASSWORD = 0\n" % SSID):     # falsy, still not text
+            _write(s, bad)
+            try:
+                dl.read_secrets(s)
+                assert False, bad
+            except ValueError as e:
+                m = str(e)
+                assert "quotes" in m and "secrets.example.py" in m, m
+                for v in ("12345678", "24680", SSID, PW):
+                    assert v not in m, m
+        _write(s, "WIFI_SSID = %r\n" % SSID)                          # an open network
+        assert dl.read_secrets(s) == (SSID, "")
+        _write(s, "WIFI_SSID = %r\nWIFI_PASSWORD = None\n" % SSID)
+        assert dl.read_secrets(s) == (SSID, "")
+    finally:
+        _clean(d)
+
+
 def test_broadcast_addr():
     assert dl.broadcast_addr("192.168.1.40", "255.255.255.0") == "192.168.1.255"
     assert dl.broadcast_addr("10.1.2.40", "255.255.252.0") == "10.1.3.255"
@@ -149,16 +186,25 @@ def test_join_reads_channel_address_and_broadcast():
 
 
 def test_join_wrong_password_disconnects_and_says_why():
+    """The ESP32 keeps retrying a wrong password (``STAT_CONNECTING``), so the
+    join times out with the message that names both the name and password."""
     network = _ap()
     made, restore = _wlans(network)
     slept = []
+    statuses = []
     try:
         link = dl.DebugLink("A", "192.168.1.23")
-        assert not link.join(SSID, "wrong-pass", timeout_ms=1000, sleep=slept.append)
+
+        def nap(ms):
+            slept.append(ms)
+            statuses.append(made[0].status())
+        assert not link.join(SSID, "wrong-pass", timeout_ms=1000, sleep=nap)
     finally:
         restore()
     assert link.sta is None and link.channel is None
-    assert "password" in link.why and "wrong-pass" not in link.why
+    assert set(statuses) == {network.STAT_CONNECTING}   # what a real watch reports
+    assert "could not join the Wi-Fi in 1 s" in link.why and "password" in link.why
+    assert "wrong-pass" not in link.why and SSID not in link.why
     assert len(slept) == 1000 // dl.JOIN_STEP_MS
     assert made[0].status() == network.STAT_IDLE   # disconnected: it stops trying
 
@@ -177,18 +223,55 @@ def test_join_unknown_network_times_out_and_stops_trying():
 
 
 def test_join_wifi_error_is_a_reason_not_a_crash():
+    """OSError, the port's RuntimeError('Wifi Unknown Error 0x..') and any
+    other error all end in ``why`` with the STA disconnected. Only the port's
+    fixed texts are quoted; anything else shows just its type."""
     network = _ap()
     real = network.WLAN.connect
+    for err, want in ((OSError("Wifi Internal Error"), "Wi-Fi error (Wifi Internal Error)"),
+                      (RuntimeError("Wifi Unknown Error 0x0102"),
+                       "Wi-Fi error (Wifi Unknown Error 0x0102)"),
+                      (TypeError("not " + PW), "Wi-Fi error (TypeError)")):
+        def boom(self, ssid=None, key=None, err=err):
+            real(self, ssid, key)                  # it had started trying
+            raise err
+        network.WLAN.connect = boom
+        made, restore = _wlans(network)
+        try:
+            link = dl.DebugLink()
+            assert not link.join(SSID, PW, sleep=lambda ms: None)
+        finally:
+            restore()
+            network.WLAN.connect = real
+        assert link.why == want and link.sta is None, link.why
+        assert made[0].status() == network.STAT_IDLE, err    # not left connecting
+    made, restore = _wlans(network)
+    try:                                           # the watch's own TypeError: a number
+        link = dl.DebugLink()
+        assert not link.join(SSID, 12345678, sleep=lambda ms: None)
+    finally:
+        restore()
+    assert link.why == "Wi-Fi error (TypeError)" and made[0].status() == network.STAT_IDLE
 
-    def boom(self, ssid=None, key=None):
-        raise OSError("Wifi Internal Error")
-    network.WLAN.connect = boom
+
+def test_join_ctrl_c_stops_trying_and_goes_on_up():
+    """Ctrl-C (mpremote, deploy.py) during the join disconnects the STA, so it
+    does not keep scanning channels, and still reaches main.py."""
+    network = _ap()
+    made, restore = _wlans(network)
+
+    def ctrl_c(ms):
+        raise KeyboardInterrupt
     try:
         link = dl.DebugLink()
-        assert not link.join(SSID, PW, sleep=lambda ms: None)
+        try:
+            link.join("other-net", PW, sleep=ctrl_c)
+            assert False, "Ctrl-C swallowed"
+        except KeyboardInterrupt:
+            pass
     finally:
-        network.WLAN.connect = real
-    assert link.why.startswith("Wi-Fi error")
+        restore()
+    assert link.sta is None and made[0].status() == network.STAT_IDLE
 
 
 # ---- UDP -----------------------------------------------------------------------------
@@ -228,6 +311,23 @@ def test_no_host_broadcasts_on_the_subnet():
         assert link.join(SSID, PW, sleep=lambda ms: None) and link.open()
         assert link.dest == ("192.168.1.255", 47268)
         assert socket.sockets[-1].opts[(socket.SOL_SOCKET, socket.SO_BROADCAST)] == 1
+    finally:
+        restore()
+
+
+def test_close_leaves_the_wifi_even_when_the_socket_will_not_close():
+    _ap(channel=6)
+    restore = fakes.install_socket()
+    try:
+        link = dl.DebugLink("A", "192.168.1.23")
+        assert link.join(SSID, PW, sleep=lambda ms: None) and link.open()
+        sta = link.sta
+
+        def stuck():
+            raise OSError(9)                       # EBADF
+        link._s.close = stuck
+        link.close()
+        assert not sta.isconnected() and link.sta is None and link._s is None
     finally:
         restore()
 
@@ -282,6 +382,10 @@ def test_start_paths_say_why_and_never_show_the_secrets():
         link, msg = dl.start(c, s, 500, nap)                      # the AP refuses the password
         assert link is None and "password" in msg and "Playing normally" in msg
         assert "wrong-pass-456" not in msg and SSID not in msg
+        _write(s, "WIFI_SSID = %r\nWIFI_PASSWORD = 12345678\n" % SSID)   # no quotes
+        link, msg = dl.start(c, s, 500, nap)
+        assert link is None and "quotes" in msg and msg.endswith("Playing normally."), msg
+        assert "12345678" not in msg and SSID not in msg
         _write(c, "[1, 2]")
         link, msg = dl.start(c, s, sleep=nap)
         assert link is None and "/debug is not valid" in msg
@@ -291,7 +395,8 @@ def test_start_paths_say_why_and_never_show_the_secrets():
         assert link is not None and link.dev == "B" and link.channel == 11
         assert link.dest == ("192.168.1.23", dl.DEBUG_PORT)
         assert msg == ("debug mode: watch B sends to 192.168.1.23:47268 on Wi-Fi channel 11 "
-                       "(both watches must join the same Wi-Fi)")
+                       "(both watches must join the same access point; a mesh or extender "
+                       "network can put them on different channels)")
         assert PW not in msg and SSID not in msg
     finally:
         restore()
@@ -321,20 +426,31 @@ class _StandIn:
     """The ``app`` package as main.py sees it: ``run`` records its arguments."""
 
 
-def _run_main(config, secrets, ap_key=PW):
-    """Run main.py on the fakes with a stand-in ``app`` -> (board, run kwargs, printed)."""
+def _run_main(config, secrets, ap_key=PW, tele=None, start=None):
+    """Run main.py on the fakes with a stand-in ``app`` -> (board, run kwargs,
+    printed). ``tele``: the text of its /tele (None: none); ``start``: stands
+    in for ``debuglink.start``. /tele and the /log directory are the test's."""
     try:
         import io
         with open("main.py") as f:
             src = f.read()
     except (ImportError, OSError):
         raise Skip("no main.py next to the tests")
-    import app.telemetry  # noqa: F401  (main.py imports it through the stand-in)
+    import app.telemetry as tm  # main.py imports it through the stand-in
     fakes.install()
     import network
     network.set_ap(SSID, ap_key, channel=13)
     d = _tmpdir()
     c, s = _files(d, config, secrets)
+    t = d + "/_tele"
+    _rm(t)
+    if tele is not None:
+        _write(t, tele)
+    real_open = open
+    real_session = tm.session
+
+    def _open(path, *a, **k):                  # main.py's /tele is the test's file
+        return real_open(t if path == "/tele" else path, *a, **k)
     calls = []
     fake_app = _StandIn()                      # MicroPython cannot make module objects
     fake_app.__path__ = sys.modules["app"].__path__
@@ -345,22 +461,26 @@ def _run_main(config, secrets, ap_key=PW):
         k["file"] = out                        # settable sys.stdout)
         print(*a, **k)
     stdout = getattr(sys, "stdout", None)      # CPython: also anything the modules print
-    saved = (sys.modules["app"], dl.CONFIG, dl.SECRETS, dl._sleep_ms)
+    saved = (sys.modules["app"], dl.CONFIG, dl.SECRETS, dl._sleep_ms, dl.start)
     restore = fakes.install_socket()
     sys.modules["app"] = fake_app
     dl.CONFIG, dl.SECRETS, dl._sleep_ms = c, s, lambda ms: None
+    dl.start = start or dl.start
+    tm.session = lambda dev: real_session(dev, d + "/_log")
     try:
         try:
             sys.stdout = out
         except AttributeError:
             pass
-        exec(compile(src, "main.py", "exec"), {"__name__": "__main__", "print": _print})
+        exec(compile(src, "main.py", "exec"),
+             {"__name__": "__main__", "print": _print, "open": _open})
     finally:
         try:
             sys.stdout = stdout
         except AttributeError:
             pass
-        sys.modules["app"], dl.CONFIG, dl.SECRETS, dl._sleep_ms = saved
+        sys.modules["app"], dl.CONFIG, dl.SECRETS, dl._sleep_ms, dl.start = saved
+        tm.session = real_session
         restore()
         _clean(d)
     assert len(calls) == 1, out.getvalue()
@@ -379,6 +499,7 @@ def test_main_debug_mode_joins_first_and_sends_telemetry():
     assert r.associated and r.channel == 13 and r._sta is link.sta and link.sta.isconnected()
     tl = kw["telemetry"]
     assert tl.sink is link and tl.dev == "B" and tl.path is None
+    assert tl.cap <= 64            # no /tele: a small ring, not 900 records for GC to scan
     assert PW not in out and SSID not in out
 
 
@@ -393,7 +514,7 @@ def test_main_without_secrets_plays_normally():
 def test_main_failed_join_plays_normally():
     board, kw, out = _run_main('{"dev": "A", "host": "192.168.1.23"}', _secrets(),
                                ap_key="the-real-one")
-    assert "debug mode off: the Wi-Fi refused the password" in out and "Playing normally." in out
+    assert "debug mode off: could not join the Wi-Fi in" in out and "Playing normally." in out
     assert PW not in out and "the-real-one" not in out
     assert board.debug is None and kw == {}
     r = board.radio
@@ -403,3 +524,43 @@ def test_main_failed_join_plays_normally():
 def test_main_without_debug_file_says_nothing():
     board, kw, out = _run_main(None, _secrets())
     assert "debug" not in out and board.debug is None and kw == {}
+
+
+def test_main_unquoted_password_plays_normally():
+    """``WIFI_PASSWORD = 12345678`` (no quotes) once made WLAN.connect raise
+    TypeError past main.py's debug switch, and the game never started."""
+    board, kw, out = _run_main('{"dev": "A", "host": "192.168.1.23"}',
+                               "WIFI_SSID = %r\nWIFI_PASSWORD = 12345678\n" % SSID)
+    assert "debug mode off: put the Wi-Fi name and password in quotes" in out, out
+    assert "Playing normally." in out and "12345678" not in out and "crashed" not in out
+    assert board.debug is None and kw == {}
+    r = board.radio
+    assert not r.associated and r.channel == 6 and r._e.active()
+
+
+def test_main_unexpected_debug_error_plays_normally():
+    """Whatever ``debuglink.start`` raises, the game starts (only the error's
+    type is printed, never its text)."""
+    def start():
+        raise RuntimeError("Wifi Unknown Error 0x3001 " + PW)
+    board, kw, out = _run_main('{"dev": "A", "host": "192.168.1.23"}', _secrets(), start=start)
+    assert "debug mode off: it could not start (RuntimeError). Playing normally." in out, out
+    assert PW not in out and "crashed" not in out
+    assert board.debug is None and kw == {}
+    r = board.radio
+    assert not r.associated and r.channel == 6 and r._e.active()
+
+
+def test_main_tele_and_debug_log_under_one_name():
+    """/tele (an older ``--tele A``) and /debug (``--debug B``) disagree: the
+    file name and every record use the /debug name, and it says so."""
+    board, kw, out = _run_main('{"dev": "B", "host": "192.168.1.23"}', _secrets(), tele="A")
+    tl = kw["telemetry"]
+    assert tl.path.endswith("_B.jsonl") and tl.dev == "B" and tl.sink is board.debug, tl.path
+    assert "telemetry: /tele says A but /debug says B; logging as B" in out, out
+    board, kw, out = _run_main('{"dev": "B", "host": "192.168.1.23"}', _secrets(), tele="B")
+    assert kw["telemetry"].path.endswith("_B.jsonl") and "telemetry:" not in out
+    board, kw, out = _run_main(None, None, tele="A")        # field test only: as before
+    tl = kw["telemetry"]
+    assert tl.path.endswith("0_A.jsonl") and tl.sink is None and tl.cap == 900
+    assert "telemetry:" not in out and "debug" not in out

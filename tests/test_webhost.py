@@ -589,3 +589,108 @@ def test_page_follows_the_debug_contract():
     for name in ("real_mode", "show_params"):
         assert ("call('%s'" % name in page or "SIM.%s(" % name in page), name
         assert callable(getattr(TwoWatchSim, name)), name
+
+
+def _page_js(page, names):
+    """The page's top-level ``function NAME(`` blocks (one line, or to the first ``}`` at
+    column 0) and ``const NAME = ...;`` lines, in the order given."""
+    out = []
+    for name in names:
+        k = page.find("\nfunction %s(" % name)
+        if k >= 0:
+            line = page[k + 1:page.index("\n", k + 1)]
+            one = line.count("{") == line.count("}")
+            out.append(line if one else page[k + 1:page.index("\n}\n", k) + 2])
+            continue
+        k = page.find("\nconst %s = " % name)
+        assert k >= 0, name
+        out.append(page[k + 1:page.index("\n", k + 1)])
+    return "\n".join(out)
+
+
+def test_page_real_mode_shows_a_failed_start():
+    """A MicroPython or bundle failure while Real watches is shown: #boot (in the Simulator
+    card) is hidden, so the watch cards must not keep saying Live or 'next message'."""
+    if MPY:
+        raise Skip("runs the page's own functions in node (CPython)")
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        raise Skip("needs node")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    assert "\nlet pageError = null;\n" in page
+    stubs = (
+        "let pageError = null; const SILENT_MS = 3000, CLASH_MS = 10000;\n"
+        "function setStatus() {}\n"
+        "const boot = { hidden: true, innerHTML: '', appendChild() {} };\n"
+        "const document = { createElement: () => ({ appendChild() {} }) };\n")
+    script = stubs + _page_js(page, ("fail", "num", "real", "realSilent", "ago", "heardAgo",
+                                     "chSplit", "realWhy", "waitText")) + """
+const w = { heard: 0, clash: null, bad: null, rp: null, shown: false };
+const out = { before: [realWhy(0, w, 400, true), waitText(0, w)] };
+w.shown = true; out.drawn = waitText(0, w); w.shown = false;
+fail('Could not load the watch code bundle (py/bundle.json).', 'HTTP 404');
+out.err = pageError;
+out.after = [realWhy(0, w, 400, true), waitText(0, w)];
+w.shown = true; out.drawnAfter = waitText(1, w);
+out.waiting = [realWhy(1, { heard: null }, 400, true), waitText(1, { heard: null, shown: false })];
+out.silent = realWhy(0, w, 5000, true);
+console.log(JSON.stringify(out));
+"""
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["before"] == ["Live: last heard just now.", "The screen comes with its next message"], out
+    assert out["drawn"] is None
+    assert out["err"] == "Could not load the watch code bundle (py/bundle.json)."
+    why, wait = out["after"]
+    assert not why.startswith("Live") and "could not run its screen code" in why, why
+    assert out["err"] in why and "Reload the page" in why, why
+    assert wait == "This page could not run its screen code", wait
+    assert out["drawnAfter"] == wait                     # a screen drawn before no longer follows
+    assert out["waiting"][0].startswith("Waiting for watch B") and out["waiting"][1] == wait, out
+    assert out["silent"].startswith("Last heard 5.0 s ago. Is the watch on"), out["silent"]
+
+
+def test_page_real_mode_names_a_channel_split():
+    """Both watches live on different Wi-Fi channels (rp.ch; a mesh or an extender can do it)
+    cannot hear each other: both cards say why. Equal channels, a null ch (the fake watches,
+    older records) or a silent watch say nothing about it."""
+    if MPY:
+        raise Skip("runs the page's own functions in node (CPython)")
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        raise Skip("needs node")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    stubs = "let pageError = null; const SILENT_MS = 3000, CLASH_MS = 10000;\n"
+    script = stubs + _page_js(page, ("num", "real", "realSilent", "ago", "heardAgo",
+                                     "chSplit", "realWhy")) + """
+const why = () => [realWhy(0, real[0], 400, true), realWhy(1, real[1], 400, true)];
+Object.assign(real[0], { heard: 0, rp: { ev: 'rp', ch: 1 } });
+Object.assign(real[1], { heard: 100, rp: { ev: 'rp', ch: 6 } });
+const out = { split: why() };
+real[1].rp.ch = 1; out.same = why();
+real[1].rp.ch = null; out.fake = why();
+delete real[1].rp.ch; out.old = why();
+real[1].rp.ch = 6; out.splitAgain = why();
+real[0].heard = -5000; out.silent = why();
+real[0].heard = 0; real[1].rp = null; out.noRp = why();
+console.log(JSON.stringify(out));
+"""
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    msg = ("The two watches joined different parts of your Wi-Fi (different channels), so they "
+           "cannot hear each other. Use a network with one access point.")
+    assert out["split"] == [msg, msg] and out["splitAgain"] == [msg, msg], out
+    for k in ("same", "fake", "old", "noRp"):
+        assert [w.startswith("Live") for w in out[k]] == [True, True], (k, out[k])
+    assert out["silent"][0].startswith("Last heard 5.4 s ago. Is the watch on"), out["silent"]
+    assert out["silent"][1].startswith("Live"), out["silent"]

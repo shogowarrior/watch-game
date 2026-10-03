@@ -29,6 +29,13 @@ in one message with the current default marked. Don't build on an assumption.
 6. **Simulator artifact.** Keep publishing a simulator-only claude.ai artifact
    next to the local page? Real-watch mode can only work locally (see
    docs/design/debug-mode.md). Default: keep it as a shareable demo.
+7. **Debug mode when one watch cannot join the Wi-Fi.** Today a watch whose
+   debug-mode join failed plays on its usual radio channel (6), while a watch
+   that did join talks on the access point's channel, so the pair cannot find
+   each other until both have joined (docs/hardware-setup.md §7 tells the
+   owner to restart the missing watch). Should a watch whose join failed
+   remember or scan for the access point's channel, or retry the join, so it
+   can still find a partner that did join? Default: leave it as it is.
 
 ## Where things stand
 
@@ -58,13 +65,13 @@ in one message with the current default marked. Don't build on an assumption.
 
 ## Next steps, in order
 
-1. **Debug mode** (Simulator | Real watches toggle). It is fully specified in
-   [docs/design/debug-mode.md](../design/debug-mode.md), including the formats
-   between the parts. Run the workflow `debug-mode-build`
-   (`.claude/workflows/debug-mode-build.js`). It builds the watch side, the
-   laptop bridge and the page in parallel, then reviews, fixes and checks it
-   end to end with `tools/debug_server.py --demo`. Afterwards, run one
-   `review-fix-round` with `changed` set to the files it touched.
+1. **Debug mode (Simulator | Real watches toggle): done** (2026-10-03). Built
+   by the workflow `debug-mode-build` to
+   [docs/design/debug-mode.md](../design/debug-mode.md), reviewed, fixed and
+   checked end to end with `tools/debug_server.py --demo`. How to use it:
+   [docs/hardware-setup.md](../hardware-setup.md) §7. Still to do: one
+   `review-fix-round` with `changed` set to the files it touched, and question
+   7 above.
 2. **Design canvas sync.** The "Sheikah Finder watch UI" canvas
    (https://claude.ai/artifact/EnemW5QZy7BkxYyQ4SyfFn) predates these visual
    changes. The snapshots in docs/design/snapshots/ are current:
@@ -112,12 +119,14 @@ in one message with the current default marked. Don't build on an assumption.
 - **`.claude/workflows/review-fix-round.js`:** a whole-repo review and fix
   round. The header comment lists its args. Use `changed` and `lenses` to keep
   later rounds cheap.
-- **`.claude/workflows/debug-mode-build.js`:** builds the debug mode (step 1).
+- **`.claude/workflows/debug-mode-build.js`:** built the debug mode (step 1).
 - **`window.fieldSim`** on the web sim page drives the simulator from a script:
   - `advance(ms)` runs the simulator forward;
   - `call(name, ...args)` calls a `TwoWatchSim` method;
   - `telemetry` holds the latest state.
-- **Dev server:** `.claude/launch.json` `web-sim` serves `dist/sim` on port 8765.
+- **Dev server:** `.claude/launch.json` `web-sim` runs `tools/debug_server.py`
+  on port 8765: it serves `dist/sim` (build it first) and is the bridge for the
+  page's Real watches mode.
 
 ## How this project has been run (owner's standing preferences)
 

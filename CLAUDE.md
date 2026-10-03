@@ -23,7 +23,10 @@ decisions to ask the owner about before starting and the next steps in order.
   (`python3 tools/render_snapshots.py`) and the Design canvas mockups
   ("Sheikah Finder watch UI", linked from `web/sim/index.html`) so they still
   match the spec. Rebuild the web sim (`python3 tools/build_sim.py`) if
-  `finder/`, `ui/` or `sim/` changed.
+  `finder/`, `ui/`, `sim/` or `web/sim/` changed.
+- The `web-sim` preview (`.claude/launch.json`) runs `tools/debug_server.py`,
+  the debug-mode bridge, which serves `dist/sim/` (build it first) and listens
+  for watches on UDP 47268. Stop any server you start before you finish.
 - Never flash, erase or deploy to a watch, and never download firmware or touch
   `firmware/`, unless the user asks in chat. Never read out or commit the
   contents of `secrets.py`.

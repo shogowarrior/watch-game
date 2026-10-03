@@ -10,7 +10,7 @@
     python3 tools/deploy.py --debug A          # debug mode: watch A shows up on this laptop
     python3 tools/deploy.py --debug B --debug-host 192.168.1.23   # ... at this address
     python3 tools/deploy.py --no-debug         # debug mode off (removes /debug, secrets.py)
-    python3 tools/deploy.py --secrets          # ALSO copy secrets.py (WiFi creds)
+    python3 tools/deploy.py --secrets          # ALSO copy secrets.py (Wi-Fi name and password)
 
 Copies app/, finder/, hal/, ui/, bma423conf.bin (optional, BMA423
 feature-engine blob) and then boot.py and main.py into the watch root
@@ -58,9 +58,9 @@ from hal.debuglink import DEBUG_PORT  # noqa: E402  (after the path fix: run as 
 FILES = ("boot.py", "main.py")
 DIRS = ("app", "finder", "hal", "ui")
 OPTIONAL = ("bma423conf.bin",)
-SECRETS = "secrets.py"           # WiFi credentials: opt-in only (--secrets)
+SECRETS = "secrets.py"           # Wi-Fi credentials: copied only with --debug or --secrets
 EXTS = (".py", ".json", ".bin")
-RESET_WAIT_S = 3                 # safe-boot window (1 s) + Board init, then the game runs
+RESET_WAIT_S = 3                 # safe-boot window (1 s) + Board init; with /debug the watch may still be joining the Wi-Fi, which mpremote's Ctrl-C stops safely
 
 
 def collect(root=ROOT, secrets=False, debug=False):

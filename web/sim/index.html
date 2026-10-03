@@ -221,7 +221,7 @@ dl.rtele dd { white-space: normal; }
         <ol>
           <li>Copy <code class="cmd">secrets.example.py</code> to <code class="cmd">secrets.py</code> and put your Wi-Fi name and password in it. It stays on this computer and the watches.</li>
           <li>Load each watch in debug mode: <code class="cmd">python3 tools/deploy.py --debug A</code> for one and <code class="cmd">python3 tools/deploy.py --debug B</code> for the other.</li>
-          <li>Both watches must use the same Wi-Fi as this computer. Each screen shows up here a few seconds after its watch starts. If the computer asks whether Python may accept incoming connections, allow it.</li>
+          <li>Both watches must use the same Wi-Fi as this computer. A mesh system or a range extender can put the two watches on different channels even though the network has one name, so if both show up here but never find each other, use a network with a single access point. Each screen shows up here a few seconds after its watch starts. If the computer asks whether Python may accept incoming connections, allow it.</li>
         </ol>
         <p>No watches at hand? Stop the bridge (Ctrl-C) and start it again with <code class="cmd">python3 tools/debug_server.py --demo</code> to see two pretend watches play.</p>
       </div>
@@ -290,7 +290,11 @@ dl.rtele dd { white-space: normal; }
 const $ = (id) => document.getElementById(id);
 const statusEl = $('status'), statusText = $('status-text'), boot = $('boot');
 function setStatus(kind, text) { statusEl.className = 'status' + (kind ? ' ' + kind : ''); statusText.textContent = text; }
+// The message shown in #boot. #boot sits in the Simulator card, which Real watches hides, so
+// the Real watch cards show it too (realWhy, waitText): their screens cannot be drawn without it.
+let pageError = null;
 function fail(msg, detail) {
+  pageError = msg;
   setStatus('err', 'Stopped');
   boot.hidden = false;
   boot.innerHTML = '';
@@ -759,6 +763,12 @@ function zoneText(z) {
   const e = K.enter_m;
   return ZONE_WORDS[z] + ' (' + [`${e[0]} m or more`, `${e[1]}–${e[0]} m`, `${e[2]}–${e[1]} m`, `under ${e[2]} m`][z] + ')';
 }
+// Both watches live, and their latest rp records name different Wi-Fi channels (rp.ch: the access
+// point's; null on the fake watches): ESP-NOW follows the channel, so they cannot hear each other.
+function chSplit(now) {
+  const ch = real.map((w) => (w.heard != null && !realSilent(w, now) && w.rp ? num(w.rp.ch) : null));
+  return ch[0] != null && ch[1] != null && ch[0] !== ch[1];
+}
 function realWhy(i, w, now, linked) {
   const L = 'AB'[i];
   if (w.heard == null) return `Waiting for watch ${L}: nothing has arrived from it yet.`;
@@ -766,9 +776,16 @@ function realWhy(i, w, now, linked) {
   if (w.clash != null && now - w.clash < CLASH_MS) return `Two different watches both call themselves ${L}. Load one of them again with --debug ${'BA'[i]}.`;
   if (age >= SILENT_MS) return linked ? `Last heard ${heardAgo(age)}. Is the watch on, and on the same Wi-Fi as this computer?`
     : `Last heard ${heardAgo(age)}, before the page lost the bridge (see above).`;
+  if (chSplit(now)) return 'The two watches joined different parts of your Wi-Fi (different channels), so they cannot hear each other. Use a network with one access point.';
+  if (pageError) return `Last heard ${heardAgo(age)}, but this page could not run its screen code: ${pageError} Reload the page; the readings below still update.`;
   if (w.bad) return `Last heard ${heardAgo(age)}, but its screen could not be drawn (${w.bad}). The readings below still update.`;
   if (w.rp && w.rp.on === false) return `Last heard ${heardAgo(age)}. Its screen is off (wrist down or timed out), so it is dark here too.`;
   return `Live: last heard ${heardAgo(age)}.`;
+}
+function waitText(i, w) {                              // over the screen, or null when it shows the watch
+  if (pageError) return 'This page could not run its screen code';   // a drawn screen stopped following too
+  if (w.shown) return null;
+  return w.heard == null ? `Waiting for watch ${'AB'[i]}` : w.bad ? 'This screen could not be drawn' : 'The screen comes with its next message';
 }
 function renderRealWatch(i, now, linked) {
   const w = real[i], s = w.s || {}, p = (w.rp && w.rp.p) || {};
@@ -776,9 +793,9 @@ function renderRealWatch(i, now, linked) {
   const sub = scr === p.screen ? p.sub : s.sub;
   setText('name-' + i, scr ? scr + (typeof sub === 'string' && sub ? ' · ' + sub : '') : '–');
   setText('why-' + i, realWhy(i, w, now, linked));
-  const wait = $('wait-' + i);
-  wait.hidden = w.shown;
-  if (!w.shown) setText('wait-' + i, w.heard == null ? `Waiting for watch ${'AB'[i]}` : w.bad ? 'This screen could not be drawn' : 'The screen comes with its next message');
+  const wait = $('wait-' + i), wt = waitText(i, w);
+  wait.hidden = wt == null;
+  if (wt != null) setText('wait-' + i, wt);
   const trend = s.trend > 0 ? '<span class="good">getting warmer</span>' : s.trend < 0 ? '<span class="warnc">getting colder</span>' : s.trend === 0 ? 'steady' : '–';
   const lo = num(s.d_lo), hi = num(s.d_hi);
   const guess = num(s.d_est) == null ? 'none yet' : fmt(s.d_est, 1, ' m') + (lo != null && hi != null ? `, likely <span class="nw">${fmt(lo, 1)}–${fmt(hi, 1)}</span>` : '');

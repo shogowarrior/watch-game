@@ -1,8 +1,8 @@
 # Debug mode: watch the real watches in the web sim page
 
-Status: **specified, not built.** This is the next feature (docs/project/handoff.md).
-`.claude/workflows/debug-mode-build.js` builds it in three parallel tracks,
-then reviews and verifies it end to end.
+Status: **built.** `.claude/workflows/debug-mode-build.js` built it in three
+parallel tracks, then reviewed and verified it end to end. How to use it:
+[docs/hardware-setup.md](../hardware-setup.md) section 7.
 
 ## What the owner asked for
 
@@ -76,12 +76,17 @@ JSON: `{"dev": "A", "host": "192.168.1.23", "port": 47268}`
 - On boot the watch tries to join for at most 10 s (`JOIN_MS`), and the screen
   stays dark meanwhile. A failed join leaves the Wi-Fi disconnected, so it
   cannot pull ESP-NOW off its channel.
+- A watch that cannot join plays on its usual channel (6), while a joined
+  watch uses the Wi-Fi's channel, so the two cannot find each other until both
+  have joined. Restart the missing one (or turn debug mode off on both with
+  `--no-debug`).
 
 ### A datagram (watch -> laptop)
 
 One UTF-8 JSON object per UDP packet, at most about 1400 bytes (one Wi-Fi
-frame). If a record would be larger, the watch drops optional fields rather
-than fragmenting it.
+frame; `DGRAM_MAX` in `app/telemetry.py`, counted in UTF-8 bytes, not
+characters). If a record would be larger, the watch drops optional fields
+rather than fragmenting it.
 
 Every datagram carries:
 
@@ -94,7 +99,10 @@ The kinds are:
 
 - `"s"`: the existing state record, with unchanged fields.
 - `"rp"`: `p` holds `finder.render_params.to_dict(params, json_ready=True)`;
-  `on` is whether the screen is on; `bl` is the backlight from 0 to 100.
+  `on` is whether the screen is on; `bl` is the backlight from 0 to 100; `ch`
+  is the watch's Wi-Fi channel (the access point's), or null on the fake
+  watches or when unknown. The page compares the two watches' `ch` to explain
+  a channel split.
 - The other telemetry events (`btn`, `tap`, `haptic`, `pwr`, `crash`, ...), as
   they happen.
 
@@ -115,10 +123,16 @@ python3 tools/debug_server.py [--http-port 8765] [--udp-port 47268] [--root dist
 ```
 
 - It serves `--root` over HTTP on 127.0.0.1, with no-store cache headers.
-- It listens for UDP on 0.0.0.0:udp-port. Each valid datagram becomes one SSE
-  message on `GET /events`:
+- It listens for UDP on 0.0.0.0:udp-port. `--udp-port` defaults to
+  `DEBUG_PORT` (47268), where the watches always send, so another value only
+  works with `--demo` or `tools/fake_watches.py --port`; the bridge warns when
+  it differs.
+- Each valid datagram (a UTF-8 JSON object with non-empty string `dev` and
+  `ev`) becomes one SSE message on `GET /events`:
   `data: {"src": "<sender ip>", "rx": <server ms>, "rec": <the object>}`.
-  Invalid datagrams are counted and dropped.
+  Invalid datagrams are counted in `bad` and dropped. A datagram holding NaN,
+  Infinity or a number too large to store (such as `1e400`) counts as bad, so
+  every `/events` payload and log line is strict JSON.
 - `GET /debug/status` returns
   `{"ok": true, "udp_port": N, "clients": N, "packets": N, "bad": N, "log": path|null, "watches": {"<dev>": {"src": ip, "last_rx": ms, "n": N}}}`.
   The page checks this to decide whether Real mode is available.
@@ -207,14 +221,14 @@ How the page reads the records:
 
 No test uses real Wi-Fi.
 
-## Docs to update when it lands
+## Docs that describe it (updated when it landed)
 
-- `docs/hardware-setup.md`: a "Debug mode" section with the exact commands.
+- `docs/hardware-setup.md` section 7: how to use it, with the exact commands.
 - `AGENTS.md`:
   - the repo map;
   - the commands;
   - Security: the game joins Wi-Fi only in debug mode;
-  - rule 12, which should name `socket`.
+  - rule 12, which names `socket`.
 - `README.md`: one paragraph.
 - `docs/architecture.md`: the debug data path.
 - `hal/README.md`: `debuglink` and the associated radio mode.

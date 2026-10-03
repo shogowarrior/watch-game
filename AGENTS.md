@@ -52,18 +52,19 @@ over Wi-Fi.
 | `finder/render_params.py` | `RenderParams`, the only thing the renderer reads (ui-spec §3). |
 | `ui/` | Strip renderer: `renderer.py` (10 strips of 240x24), `field.py` (ripple palette), `glyphs.py`, `text.py`, `font.py`. Colours in `ui/__init__.py` are byte-swapped RGB565. |
 | `sim/` | Two-watch simulator: `world.py`, `radio.py` (RSSI profiles clean/typical/harsh/indoor, per-watch beacon period), `imu.py`, `accel_synth.py`, `scenarios.py`, `rng.py`, `link.py` (`GameLink`: beacon hand-off between two Games), `Sim`; `webhost.py` drives the browser sim. |
-| `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). |
+| `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). Its **Simulator \| Real watches** toggle shows the real watches in debug mode. |
 | `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`, and `socket.py`, a fake UDP `socket` installed by `fakes.install_socket()`), `est_helpers.py` (shared estimator fixtures), `test_deploy.py` (`tools/deploy.py`, CPython only). |
 | `tests/test_debuglink.py` `test_debug_server.py` `test_fake_watches.py` `test_secrets_guard.py` | Debug mode: the watch side and `main.py` wiring on fakes; the bridge's UDP-to-SSE relay and log over real localhost sockets (CPython only); the fake watches; no tracked file holds a value from a local `secrets.py`. |
 | `tools/` | Host and on-watch scripts (see Commands). `tools/mpy/run.mjs` runs Python under MicroPython WebAssembly; `tools/cli.py` is the shared `--key value` parser. |
 | `tools/debug_server.py` | Debug bridge (CPython, stdlib only): serves `dist/sim/` on 127.0.0.1, relays the watches' UDP datagrams to the page as Server-Sent Events (`/events`), answers `/debug/status`, logs to `logs/`. |
 | `tools/fake_watches.py` | Two simulated watches that send real debug-mode datagrams (same `app/telemetry.py` and `hal/debuglink.py` code); `debug_server.py --demo` runs it. |
+| `secrets.example.py` | Template for the gitignored `secrets.py` (`WIFI_SSID`, `WIFI_PASSWORD`), which only debug mode uses. Agents never read out or commit `secrets.py`. |
 | `logs/` | Gitignored. `debug-*.jsonl` sessions from the bridge: each line is one `/events` payload `{"src", "rx", "rec"}`, ready to replay. |
 | `docs/project/` | `handoff.md` (current state, open questions, next steps: read first); the Claude Project's `goal.md`, `instructions.md` and `setup.md` (how to create it). |
 | `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`, `debug-mode.md` (debug mode: decisions and the contract between watch, bridge and page). |
 | `docs/estimation/` | `bakeoff.md` (why kalman2), `imu-drift.md` (why no dead reckoning). |
 | `docs/research/user-research.md` | Personas, field-test plan, requirements R-01..R-15. |
-| `docs/architecture.md` `docs/hardware-setup.md` | Layers and data flow; bring-up on real watches. |
+| `docs/architecture.md` `docs/hardware-setup.md` | Layers and data flow (with the debug data path); bring-up on real watches and how to use debug mode (§7). |
 | `notebooks/` | Jupyter "MicroPython - USB" notebooks. `finder_dev.ipynb` is the current one. `watch.ipynb` and `tools.ipynb` are legacy (old custom firmware) and do not run on stock v1.29. |
 | `firmware/` | Old firmware images. **Do not touch.** |
 | `.claude/settings.json` `.claude/hooks/cloud-setup.sh` | SessionStart hook: in cloud sessions only, installs the `tools/mpy` package. |
@@ -113,7 +114,7 @@ sets it as CPython would.
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |
 | `python3 tools/deploy.py [--port P] [-n] [--noapp\|--app] [--tele DEV\|--no-tele] [--debug A\|B [--debug-host IP]\|--no-debug]` | Hard-reset the watch, copy `app/`, `finder/`, `hal/`, `ui/` (+ `bma423conf.bin`) and last `boot.py`, `main.py` with mpremote, then hard-reset again so `main.py` starts the game. `--tele DEV` makes the game log to `/log/<n>_DEV.jsonl`. `--debug A` copies `secrets.py` and writes `/debug` (the laptop's address, found by itself or `--debug-host`); `--no-debug` removes both. |
-| `python3 tools/debug_server.py [--http-port 8765] [--udp-port 47268] [--root dist/sim] [--no-log] [--demo]` | Debug bridge: open `http://localhost:8765/local.html` and pick Real watches. `--demo` adds two fake watches. Needs `python3 tools/build_sim.py` first. |
+| `python3 tools/debug_server.py [--http-port 8765] [--udp-port 47268] [--root dist/sim] [--no-log] [--demo]` | Debug bridge: open `http://localhost:8765/local.html` and pick Real watches. `--demo` adds two fake watches (`--udp-port` only with `--demo`: the watches always send to 47268). Needs `python3 tools/build_sim.py` first. |
 | `python3 tools/fake_watches.py [--host 127.0.0.1] [--port 47268] [--seconds N] [--speed 1.0]` | Two simulated watches sending debug-mode datagrams to a bridge. |
 
 Agents: do not flash, erase or deploy to a watch, and do not download
