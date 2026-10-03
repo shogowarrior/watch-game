@@ -52,7 +52,7 @@ watches.** Every threshold is a starting value to calibrate.
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). |
 | `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`), `est_helpers.py` (shared estimator fixtures), `test_deploy.py` (`tools/deploy.py`, CPython only). |
 | `tools/` | Host and on-watch scripts (see Commands). `tools/mpy/run.mjs` runs Python under MicroPython WebAssembly; `tools/cli.py` is the shared `--key value` parser. |
-| `docs/handoff.md` `docs/project.md` | Current state, open questions and next steps (read first); the Project's goal and instructions. |
+| `docs/project/` | `handoff.md` (current state, open questions, next steps: read first); the Claude Project's `goal.md`, `instructions.md`, `environment.sh` (cloud setup script) and `setup.md` (how to create it). |
 | `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`, `debug-mode.md` (the next feature, specified, not built). |
 | `docs/estimation/` | `bakeoff.md` (why kalman2), `imu-drift.md` (why no dead reckoning). |
 | `docs/research/user-research.md` | Personas, field-test plan, requirements R-01..R-15. |

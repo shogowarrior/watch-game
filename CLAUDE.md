@@ -1,6 +1,6 @@
 @AGENTS.md
 
-**Work in progress: read [docs/handoff.md](docs/handoff.md) first.** It lists the
+**Work in progress: read [docs/project/handoff.md](docs/project/handoff.md) first.** It lists the
 decisions to ask the owner about before starting and the next steps in order.
 
 ## Claude Code notes

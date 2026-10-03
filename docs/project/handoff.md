@@ -2,8 +2,8 @@
 
 Read this first. It covers the current state, the decisions waiting on the
 owner, and the order to do things in. CLAUDE.md and AGENTS.md still govern how
-to work. The Project's goal and instructions are copied in
-[docs/project.md](project.md).
+to work. The Project's goal, instructions and cloud setup script are in this
+folder ([setup.md](setup.md) says which goes where).
 
 ## Before doing anything: ask the owner
 
@@ -59,7 +59,7 @@ in one message with the current default marked. Don't build on an assumption.
 ## Next steps, in order
 
 1. **Debug mode** (Simulator | Real watches toggle). It is fully specified in
-   [docs/design/debug-mode.md](design/debug-mode.md), including the formats
+   [docs/design/debug-mode.md](../design/debug-mode.md), including the formats
    between the parts. Run the workflow `debug-mode-build`
    (`.claude/workflows/debug-mode-build.js`). It builds the watch side, the
    laptop bridge and the page in parallel, then reviews, fixes and checks it

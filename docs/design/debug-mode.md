@@ -1,6 +1,6 @@
 # Debug mode: watch the real watches in the web sim page
 
-Status: **specified, not built.** This is the next feature (docs/handoff.md).
+Status: **specified, not built.** This is the next feature (docs/project/handoff.md).
 `.claude/workflows/debug-mode-build.js` builds it in three parallel tracks,
 then reviews and verifies it end to end.
 
