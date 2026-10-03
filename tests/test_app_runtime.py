@@ -33,31 +33,42 @@ class Clock:
 
 
 class FakeIMU:
-    """100 Hz FIFO in milli-g: face-up gravity plus scripted spikes."""
+    """BMA423-like FIFO in milli-g at 100 Hz (or the ``set_odr`` rate):
+    face-up gravity plus scripted spikes."""
 
     def __init__(self, clock, spikes=()):
         self.clock = clock
-        self.last = clock.now
         self.fifo_mg = array("h", [0] * (170 * 3))
         self.spikes = list(spikes)     # (t_ms, samples wide, extra mg on z)
+        self.odr = 100
+        self.odrs = []                 # set_odr calls
+        self.t0 = clock.now            # sample k (from 1) is taken k / odr s after t0
+        self.k = 0                     # samples read
+
+    def set_odr(self, hz):
+        self.odr = hz
+        self.odrs.append(hz)
+        self.t0 = self.clock.now       # FIFO emptied
+        self.k = 0
 
     def fifo_read_mg(self):
-        now = self.clock.now
-        n = (now - self.last) // 10
-        if n > 170:
-            self.last += (n - 170) * 10
+        hz = self.odr
+        k1 = (self.clock.now - self.t0) * hz // 1000
+        n = k1 - self.k
+        if n > 170:                    # stream mode: the newest 170 stay
+            self.k = k1 - 170
             n = 170
         a = self.fifo_mg
         for i in range(n):
-            t = self.last + (i + 1) * 10
+            t_us = self.t0 * 1000 + (self.k + i + 1) * 1000000 // hz
             z = 1000 + (3 if i & 1 else -3)
             for t0, w, mg in self.spikes:
-                if t0 <= t < t0 + w * 10:
+                if t0 * 1000 <= t_us < t0 * 1000 + w * 1000000 // hz:
                     z += mg
             a[3 * i] = 5
             a[3 * i + 1] = -4
             a[3 * i + 2] = z if z < 4000 else 3999
-        self.last += n * 10
+        self.k = k1
         return n
 
 
@@ -250,7 +261,7 @@ def test_two_watches_one_minute():
     ra = SimRadio(MAC_A, seed=11).begin()
     rb = SimRadio(MAC_B, seed=22).begin()
     ra.connect(rb, rssi=-50)
-    a = _watch(clock, ra, imu_spikes=((20000, 2, 3000), (22000, 6, 3000)),
+    a = _watch(clock, ra, imu_spikes=((1000, 2, 3000), (1500, 6, 3000), (20000, 2, 3000)),
                buttons=((2000, EV_SHORT),))
     y_buzz = T.MENU_ROWS_Y[2] + T.MENU_ROW_H // 2       # row 2: BUZZ
     y_resume = T.MENU_ROWS_Y[0] + T.MENU_ROW_H // 2     # row 0: RESUME
@@ -305,10 +316,13 @@ def test_two_watches_one_minute():
         assert rt.game.mode != M_PAIRING, (rt.game.mode, rt.game.pair.sub)
     assert a.game.pair.runes == b.game.pair.runes
 
-    # bump spikes: 20 ms accepted, 60 ms (a shake) rejected
+    # bump spikes, sampled fast only in PAIRING seen / confirmed: 2.5 ms
+    # accepted, 7.5 ms (a shake) rejected; the split's 100 Hz sees none
+    assert a.board.imu.odrs[:2] == [T.BUMP_ODR_HZ, 100], a.board.imu.odrs
+    assert a.feed.fast == a.game.bump_armed()
     assert a.feed.n_taps == 1, (a.feed.n_taps, a.feed.n_rejected)
-    assert abs(a.feed.last_tap - 20000) <= 20, a.feed.last_tap
-    assert a.feed.n_rejected >= 1
+    assert abs(a.feed.last_tap - 1000) <= 2, a.feed.last_tap
+    assert a.feed.n_rejected == 1
     assert a.feed.n_samples >= 5900
 
     # haptics: the motor was driven; buzz OFF (via the menu) silenced watch B
@@ -400,12 +414,13 @@ def test_no_renderer_uses_metronome():
 
 
 def test_imu_feed_spikes_blanking_and_rate():
-    from app.imu_feed import ImuFeed
+    from app.imu_feed import ImuFeed, FAST_HZ
     clock = Clock(0)
-    imu = FakeIMU(clock, spikes=((1000, 1, 3000), (1500, 2, 3000), (2000, 3, 3000),
-                                 (2600, 2, 3000), (2700, 2, 3000)))
+    imu = FakeIMU(clock, spikes=((1000, 1, 3000), (1500, 4, 3000), (2000, 8, 3000),
+                                 (2600, 2, 3000), (2700, 2, 3000), (4500, 2, 3000)))
     taps = []
     f = ImuFeed(imu, on_tap=taps.append)
+    f.set_fast(True)                       # 800 Hz: 1.25 ms a sample
     f.motor(3000, 1.0)
     f.motor(3060, 0.0)
     imu.spikes.append((3150, 2, 3000))     # 90 ms after the pulse: blanked
@@ -415,12 +430,18 @@ def test_imu_feed_spikes_blanking_and_rate():
         f.poll(clock.now)
     assert taps == [1000, 1500, 2600, 3300], taps
     assert f.n_blanked == 1
-    assert f.n_rejected == 3               # 30 ms wide, refractory, blanked
+    assert f.n_rejected == 3               # 10 ms wide, refractory, blanked
     assert f.tracker.face_up
     assert abs(f.tracker.gz - 1.0) < 0.1
-    assert f.n_samples == clock.now // 10
+    assert f.dec == FAST_HZ // 50 and f.n_samples == clock.now * FAST_HZ // 1000
     assert f.blanked(3000) and f.blanked(3200) and not f.blanked(3210)
     assert not f.blanked(2999)
+    f.set_fast(False)                      # 100 Hz: knocks are not looked for
+    while clock.now < 5000:
+        clock.sleep(30)
+        f.poll(clock.now)
+    assert len(taps) == 4 and f.n_rejected == 3
+    assert imu.odrs == [FAST_HZ, 100] and f.dec == 2 and f.tracker.face_up
 
 
 def test_telemetry_ring_and_state_record():
@@ -458,7 +479,7 @@ def test_real_board_drivers_short_run():
     imu = m.add_i2c_device(0, 0x19, {0x00: 0x13})
     tp = m.add_i2c_device(1, 0x38, {0xA3: 0x64})
     clock = Clock(5000)
-    frame = bytes((0, 0, 0, 0, 0x00, 0x20))       # z = +1 g at +-4 g
+    frame = bytes((0, 0, 0, 0, 0x00, 0xE0))       # face-up: z = -1 g (hal/pins.py BMA423_Z_SIGN)
 
     def imu_read(reg, n, _r=imu.read):
         if reg == B.REG_FIFO_LENGTH_0:
@@ -910,7 +931,7 @@ def test_touch_down_spike_is_not_a_bump():
                 imu_spikes=((4990, 2, 3000), (5250, 2, 3000), (7000, 2, 3000)),
                 touches=((5050, 5350, 120, 120), (8000, 8100, 120, 120)))
     rt.tele = Telemetry(cap=200, hz=0)
-    rt.begin(0)
+    _arm(rt)
     _run(rt, clock, 6000)
     ev = [json.loads(s) for s in rt.tele.lines()]
     taps = [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"]
@@ -923,6 +944,12 @@ def test_touch_down_spike_is_not_a_bump():
     n = rt.tele.n
     _run(rt, clock, 1000)
     assert not [s for s in rt.tele.lines(rt.tele.n - n) if '"touch"' in s]
+
+
+def _arm(rt):
+    """Begin with the game always taking bump spikes, so the IMU runs fast."""
+    rt.begin(0)
+    rt.game.bump_armed = lambda: True
 
 
 def _touch_downs(rt):
@@ -965,7 +992,7 @@ def test_finger_spike_after_a_mid_frame_touch_down():
                 touches=((5020, 5150, 120, 120),))
     rt.board.display = SlowDisplay(clock)
     rt.tele = Telemetry(cap=200, hz=0)
-    rt.begin(0)
+    _arm(rt)
     _run(rt, clock, 6000)
     ev = [json.loads(s) for s in rt.tele.lines()]
     assert [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"] == [(5030, False)], ev

@@ -91,6 +91,9 @@ class _Batch:
     def fifo_read_mg(self):
         return self.n
 
+    def set_odr(self, hz):
+        pass
+
 
 def bench_imu(i2c):
     print("imu  Hz   us/sample: i2c  decode  feed   ms per s")
@@ -98,6 +101,8 @@ def bench_imu(i2c):
         imu = BMA423(i2c, odr=hz)
         batch = _Batch(imu.fifo_mg)
         feed = ImuFeed(batch, out_hz=25)
+        if hz > 100 and hasattr(feed, "set_fast"):
+            feed.set_fast(True)             # spike detection runs at the fast rates
         n_all = t_i2c = t_dec = t_feed = 0
         for _ in range(5):
             imu.fifo_flush()

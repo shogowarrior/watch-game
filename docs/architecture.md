@@ -99,17 +99,19 @@ stages in order:
    feeds pairing/calibration, calls `est.update(t, rssi, peer_rssi, my_motion,
    peer_motion)` and, while scanning, `scan.on_packet` with the raw RSSI.
 2. **touch**: `FT6336.read()` -> `GestureRecognizer` (multi-touch ignored).
-   Touch is also sampled after every 2nd strip while a frame renders (about
-   8 ms apart, so a 60 ms tap measures right); what those samples find waits
+   Touch is also sampled after every 2nd strip pushed while a frame renders
+   (so a 60 ms tap measures right); what those samples find waits
    for this stage: `game.on_touch_down` when a finger landed
    (`GestureRecognizer.began`) and `game.on_gesture`, in time order: a press
    lands before its gesture; when a gesture ends on the sample where a new
    finger lands, the gesture goes first. It runs before imu, so the finger's
    own spike is guarded.
-3. **imu**: `ImuFeed.poll` drains the BMA423 FIFO, averages each block of 4
+3. **imu**: `ImuFeed.poll` drains the BMA423 FIFO, averages each block of
    samples into one 25 Hz sample for `MotionTracker.add_sample` (steps,
-   activity, stillness, tilt, face-up) and runs the bump spike detector on
-   every 100 Hz sample (-> `game.on_accel_tap`), ignoring samples inside haptic
+   activity, stillness, tilt, face-up) and, while `game.bump_armed()` (HOT,
+   PAIRING seen / confirmed; the logic stage sets it each tick), samples at
+   800 Hz and runs the bump spike detector on every sample
+   (-> `game.on_accel_tap`), ignoring samples inside haptic
    blanking (the motor shakes the accelerometer, so samples from the start of a
    buzz until 150 ms after it are ignored). There are two blanking windows:
    ImuFeed's own, from the actual motor edges (`ImuFeed.blanked`, which the
@@ -133,7 +135,9 @@ stages in order:
    composes each 240x24 strip off-screen (a map of each pixel's ring number,
    coloured through a 256-entry palette of byte-swapped RGB565, then glyph and
    text overlays) and
-   pushes it with `display.push_strip`. With the screen off it runs with
+   pushes it with `display.push_strip`. Strips go in mirrored pairs (0 and 9,
+   1 and 8, ...): the bottom strip copies the top one's field rows in reverse
+   instead of a second palette blit. With the screen off it runs with
    `display=None`, so ring and heartbeat timing continue. It returns only the
    heartbeat names, locked to ring spawns.
 7. **tx**: when due, `game.fill_beacon` fills the 16-byte beacon (seq, own and
@@ -184,10 +188,10 @@ fallback is both short presses within 3 s in HOT.
 | Game logic (`Game.tick`) | 10 Hz (100 ms) | `finder.tuning.LOGIC_MS` |
 | Render | 20 fps (15 in saver / low battery); a frame is about 40 ms on the watch, about 35 ms of it SPI at 26.67 MHz | `params.fps_cap`, `tuning.FPS_TARGET`, `tuning.SAVER_FPS` |
 | Beacons | 10 Hz normal, 20 Hz in HOT and while scanning, 5 Hz in saver | `game.beacon_hz`, `tuning.BEACON_HZ_*` |
-| BMA423 FIFO | 100 Hz, drained every loop (holds 1.7 s) | `app.imu_feed` |
+| BMA423 FIFO | 100 Hz (holds 1.7 s), 800 Hz while a bump can count (holds 212 ms); drained every loop | `app.imu_feed` |
 | Motion tracker | 25 Hz | `app.runtime.IMU_OUT_HZ` |
 | Feature engine poll | 1 Hz | `app.runtime.CHIP_MS` |
-| Touch / button poll | touch: every loop and after every 2nd display strip (about 8 ms apart while a frame renders); button: every loop, at least every 20 ms | `app.runtime.INPUT_MS` |
+| Touch / button poll | touch: every loop and after every 2nd display strip pushed while a frame renders; button: every loop, at least every 20 ms | `app.runtime.INPUT_MS` |
 | Battery | every 10 s; a falling reading at or under 20 % must repeat 3 times, 1 s apart; on USB a shutdown-level reading never reaches the game | `BATTERY_MS`, `BATT_LOW_READS` |
 | Haptics | pulses and gaps >= 60 ms; motor serviced every strip and every 1 ms while a pattern plays | `finder.haptic_patterns` |
 | Link loss | 5 s with no packet after a fix -> LINK_LOST | `finder.game`, ui-spec §6 |

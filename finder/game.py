@@ -16,6 +16,7 @@ Pure logic: no hardware. The main loop (or the simulator) feeds it
     g.on_gesture(t, code, x, y, t_down)    # finder.gestures codes
     g.on_button(t, long=False)
     g.on_accel_tap(t)                      # accelerometer bump spike (app/imu_feed.py)
+    g.bump_armed()                         # True while a spike can count: sample fast
     g.on_wake(t)                           # wrist raise
     g.set_battery(t, pct)
     p = g.tick(t)                          # 10 Hz -> RenderParams (ui-spec §3)
@@ -301,6 +302,14 @@ class Game:
         self.taps = (self.taps + 1) & 7
         self._tap_hot = self.mode == M_HUNT and self.px.zone == HOT
         return True
+
+    def bump_armed(self):
+        """True while a bump spike can count: HOT (FOUND, §6) and PAIRING
+        seen / confirmed (a matched bump confirms both). The IMU samples fast
+        enough to see a knock only then (app/imu_feed.py)."""
+        if self.mode == M_HUNT:
+            return self.px.zone == HOT
+        return self.mode == M_PAIRING and self.pair.sub in (P.SEEN, P.CONFIRMED)
 
     def _tap(self, t_ms):
         """``bump_t`` once a touch-down can no longer withdraw it (ui-spec §6: the

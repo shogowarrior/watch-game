@@ -131,6 +131,21 @@ def test_init_options():
         assert False, kw
 
 
+def test_set_odr_rewrites_rate_and_flushes_fifo():
+    m, dev, b, imu = _imu()
+    assert imu.z_sign == 1                # the chip's frame unless the board says
+    del dev.writes[:]
+    imu.set_odr(800)
+    assert [r for (r, d) in dev.writes] == [0x40, 0x7E]
+    assert dev.regs[0x40] == 0xAB and _w(dev, 0x7E) == [0xB0] and imu.odr == 800
+    try:
+        imu.set_odr(700)
+    except ValueError:
+        assert imu.odr == 800
+        return
+    assert False, "odr 700 accepted"
+
+
 def test_nonblocking_reset_polls_chip_id():
     m, dev, b, imu = _imu(start=False)
     dev.boot_nacks = 2

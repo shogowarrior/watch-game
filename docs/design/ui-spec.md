@@ -424,7 +424,7 @@ The field table in each screen uses: ramp | I | speed | period | λ | glow_r | n
 **Bump rule (R-10):**
 
 - Both watches are in HOT, and each made its spike in HOT (the beacon's `ST_TAP_HOT` bit says so for the partner's).
-- Both watches see an accelerometer bump spike within 400 ms of each other. A spike is the gravity-removed |a| above 2.5 g for 10–20 ms in the 100 Hz FIFO, with 200 ms refractory time (`app/imu_feed.py`). Each beacon carries `bump_ago_ms` (time since the sender's last spike), so the receiver places the partner's spike on its own clock as t_rx − `bump_ago_ms` − air time (`finder/session.py`). No clock offset is needed.
+- Both watches see an accelerometer bump spike within 400 ms of each other. A spike is the gravity-removed |a| above 2.0 g for at most 6 ms, with 200 ms refractory time (`app/imu_feed.py`). The accelerometer samples at 800 Hz while a spike can count (HOT, PAIRING `seen` and `confirmed`) and at 100 Hz otherwise: its filter passes about 0.4× the rate, so at 100 Hz a 1–3 ms knock is smeared to about 1 g, while at 800 Hz it keeps most of its 3–8 g peak. Each beacon carries `bump_ago_ms` (time since the sender's last spike), so the receiver places the partner's spike on its own clock as t_rx − `bump_ago_ms` − air time (`finder/session.py`). No clock offset is needed.
 - No spike counts from 100 ms before a screen touch-down until 300 ms after it (the finger's own spike: one accepted up to 100 ms before the touch-down is withdrawn), or inside the haptic blanking window (§7). So a spike is neither matched nor sent in beacons (`bump_ago_ms`) until it is 100 ms old.
 
 **Fallback:** both players short-press within 3 s while in HOT with band ≤ `~5`. In HOT a short press is this fallback press; a second short press within 1 s (partner not pressing) starts a scan instead.
@@ -646,7 +646,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 | Modal on every glance at low battery (PINPOINT) | 10 % interstitial shown once |
 | Glyph clashes: pause-like "steady", mirrored chevrons (PINPOINT) | No steady glyph; colder chevrons are hollow, blue and move down |
 | Weak simulator radio model (PINPOINT, BLIP HUNT) | The simulator uses `sim/radio.py` and shows a truth overlay |
-| Frame budget assumes PSRAM or 80 MHz (BLIP HUNT) | 20 fps target, 15 floor; strip rendering (10 × 240×24) to bound heap and GC pauses, even on the SPIRAM build; the half ring map is palette-blitted into each strip |
+| Frame budget assumes PSRAM or 80 MHz (BLIP HUNT) | 20 fps target, 15 floor; strip rendering (10 × 240×24) to bound heap and GC pauses, even on the SPIRAM build; the half ring map is palette-blitted into each top strip, and the mirrored bottom strip copies its rows |
 | Trend thresholds below correlated noise (BLIP HUNT) | Gated by `trend_conf`, ≥ 3 dB over 8 s, 2 evaluations and a 5 s flip limit. The < 5 % false-verdict target on tangential walks is not met yet (§5.5) |
 | Scan assumes a perfect turn; partner not asked to stop (BLIP HUNT) | 20° pacing floor, turn error, `HOLD` pattern + peer_motion check |
 | Motor trips the shake guard (BLIP HUNT) | 150 ms blanking |

@@ -338,36 +338,31 @@ def build_map(rows):
 class RingMap:
     """Ring-index map blitted into RGB565 strips through a palette.
 
-    ``full=False`` (default) keeps only the top half (28.8 KB): top strips are
-    one offset blit, bottom strips blit row by row from the mirrored row
-    (y -> 239 - y) into 240x1 row FrameBuffers over the strip. ``full=True``
-    keeps the whole 57.6 KB map and does one offset blit per strip.
+    The map is mirror-symmetric about y = 119.5, so only its top half (28.8 KB)
+    is kept. ``blit`` palette-blits a top strip into ``top`` and copies its rows
+    in reverse order into ``bottom``, the strip that mirrors it.
     """
 
-    def __init__(self, strip_buf, strip_h, full=False):
-        self.full = full
-        rows = 240 if full else 120
-        self.idx = build_map(rows)
+    def __init__(self, top, bottom, strip_h):
+        self.idx = build_map(120)
         self.h = strip_h
         if framebuf is None:
             return
-        self.map_fb = framebuf.FrameBuffer(self.idx, W, rows, framebuf.GS8)
-        self.strip_fb = framebuf.FrameBuffer(strip_buf, W, strip_h, framebuf.RGB565)
-        mv = memoryview(strip_buf)
-        self.rows = [framebuf.FrameBuffer(mv[k * W * 2:(k + 1) * W * 2], W, 1, framebuf.RGB565)
-                     for k in range(strip_h)]
+        self.map_fb = framebuf.FrameBuffer(self.idx, W, 120, framebuf.GS8)
+        self.top_fb = framebuf.FrameBuffer(top, W, strip_h, framebuf.RGB565)
+        n = W * 2
+        a = memoryview(top)
+        b = memoryview(bottom)
+        self.rows = [a[k * n:(k + 1) * n] for k in range(strip_h)]
+        self.mirror = [b[k * n:(k + 1) * n] for k in range(strip_h - 1, -1, -1)]
 
     def blit(self, y0, pal):
-        """Paint strip rows y0..y0+h-1 of the field into the strip buffer."""
-        if self.full or y0 + self.h <= 120:
-            self.strip_fb.blit(self.map_fb, 0, -y0, -1, pal)
-            return
+        """Field rows y0..y0+h-1 (top half) into ``top``, mirrored into ``bottom``."""
+        self.top_fb.blit(self.map_fb, 0, -y0, -1, pal)
         rows = self.rows
-        mfb = self.map_fb
+        mirror = self.mirror
         for k in range(self.h):
-            y = y0 + k
-            src = y if y < 120 else 239 - y
-            rows[k].blit(mfb, 0, -src, -1, pal)
+            mirror[k][:] = rows[k]
 
 
 # ---- screen tables ----------------------------------------------------------

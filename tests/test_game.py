@@ -152,6 +152,20 @@ def hot_rig(d=2.0):
     return r
 
 
+def test_bump_armed_only_where_a_spike_can_count():
+    """The IMU samples fast only in HOT and PAIRING seen / confirmed (§6)."""
+    r = Rig()
+    assert not r.g.bump_armed()                 # looking
+    r.rssi = -50
+    r.run(600)
+    assert r.g.pair.sub == "seen" and r.g.bump_armed()
+    r.g.on_button(r.t)
+    r.run(100)
+    assert r.g.pair.sub == "confirmed" and r.g.bump_armed()
+    assert not warm_rig().g.bump_armed()
+    assert hot_rig().g.bump_armed()
+
+
 def _found_by_press(r):
     """Both fallback presses in HOT: FOUND."""
     r.g.on_button(r.t)

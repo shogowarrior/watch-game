@@ -98,8 +98,12 @@ and then call `begin()` and poll `ready()`.
 - Reading: `fifo_read_mg()` drains the FIFO with one `readfrom_mem_into` into a
   preallocated buffer, decodes it into `self.fifo_mg` (x, y, z milli-g
   interleaved, `array('h')`) and returns the sample count. Call it every frame.
-  The FIFO holds 170 frames, which is 1.7 s at 100 Hz. `read_xyz_mg()` reads
-  one sample from DATA_8..13.
+  The FIFO holds 170 frames, which is 1.7 s at 100 Hz (212 ms at 800 Hz).
+  `set_odr(hz)` changes the rate while running and empties the FIFO.
+  `read_xyz_mg()` reads one sample from DATA_8..13.
+- `z_sign` records how the board mounts the chip (`hal/board.py` passes
+  `pins.BMA423_Z_SIGN`, -1 on the V1: face-up reads z = -1 g). Samples stay in
+  the chip's frame; `app/imu_feed.py` applies it.
 - Interrupts are **polled, never IRQ-driven**, so no Python IRQ handler ever
   touches the shared I2C bus. `map_interrupts(int1=EV_*...)` routes events to a
   pin (feature events need latched mode). `poll_events()` reads and clears

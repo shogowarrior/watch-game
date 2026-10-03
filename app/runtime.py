@@ -18,7 +18,8 @@ One ``step(now)`` does, in order:
           before the imu stage, so the finger's own spike is guarded), in
           time order: a press lands before its gesture; on one sample the
           gesture goes first (it ended the previous press)
-  imu     BMA423 FIFO -> MotionTracker (25 Hz, g) + bump spikes -> ``on_accel_tap``;
+  imu     BMA423 FIFO -> MotionTracker (25 Hz, g) + bump spikes -> ``on_accel_tap``
+          (the FIFO runs fast only while ``game.bump_armed()``, set each tick);
           once a second the feature engine (if ``bma423conf.bin`` loaded):
           chip steps/activity -> tracker, wrist-wear -> ``game.on_wake`` (only
           when the screen is off: polled up to 1 s late, face_up has usually
@@ -111,19 +112,21 @@ _NO_EVENTS = ()
 
 class _HapticDisplay:
     """Display proxy for the renderer: services the motor after each strip,
-    so pulse edges stay within one strip (~4 ms) of schedule mid-frame, and
-    samples touch after every 2nd strip (~8 ms apart)."""
+    so pulse edges stay within one strip of schedule mid-frame, and samples
+    touch after every 2nd strip pushed."""
 
     def __init__(self, rt, display):
         self.rt = rt
         self.d = display
+        self.odd = False
 
     def push_strip(self, y0, h, buf):
         self.d.push_strip(y0, h, buf)
         rt = self.rt
         t = rt.clock()
         rt._stage_haptic(t)
-        if y0 // h & 1 and rt.touch is not None:
+        self.odd = not self.odd
+        if not self.odd and rt.touch is not None:
             rt._sample_touch(t)
 
 
@@ -131,7 +134,7 @@ class Runtime:
     """One watch: owns the Game, renderer, haptic player and loop timing."""
 
     def __init__(self, board, parts=PARTS, clock=None, sleep_ms=None, clock_us=None,
-                 renderer=None, telemetry=None, gc_collect=None, z_sign=1, watchdog_ms=None):
+                 renderer=None, telemetry=None, gc_collect=None, z_sign=None, watchdog_ms=None):
         self.board = board
         self.watchdog_ms = watchdog_ms
         self.wd = None
@@ -142,7 +145,7 @@ class Runtime:
         self.renderer = renderer
         self.tele = telemetry
         self.gc_collect = gc_collect or gc.collect
-        self.z_sign = z_sign
+        self.z_sign = z_sign                  # None: the board's (hal/pins.py BMA423_Z_SIGN)
         self.errors = {}
         self.io_errors = [0] * len(STAGES)
         self.started = False
@@ -545,6 +548,11 @@ class Runtime:
         p = g.tick(now)
         self.params = p
         self._fresh = True
+        if self.feed is not None:
+            try:
+                self.feed.set_fast(g.bump_armed())
+            except OSError:
+                self.io_errors[S_IMU] += 1
         self.ticks += 1
         b = g.buzz
         if b != self._buzz:

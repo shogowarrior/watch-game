@@ -263,16 +263,17 @@ def test_core_dot_level_in_frame():
     assert r.field.iris == 0
 
 
-def test_half_and_full_map_frames_identical():
+def test_mirrored_strips_match_the_full_map():
+    """Bottom strips are the top ones' field rows mirrored: a field-only frame
+    equals the full ring map palette-blitted in one go."""
     _need_fb()
-    kw = _warm(glyph="chevrons", trend=-1, trend_strong=True, top_text="TAP TO SCAN")
-    a = Renderer()
-    b = Renderer(full_map=True)
-    ca = FrameCapture()
-    cb = FrameCapture()
-    _run(a, ca, kw, 700)
-    _run(b, cb, kw, 700)
-    assert ca.buf == cb.buf
+    r = Renderer()
+    cap = FrameCapture()
+    _run(r, cap, rs.hunt(2, status=None), 700)
+    ref = bytearray(240 * 240 * 2)
+    full = framebuf.FrameBuffer(fld.build_map(240), 240, 240, framebuf.GS8)
+    framebuf.FrameBuffer(ref, 240, 240, framebuf.RGB565).blit(full, 0, 0, -1, r.field.pal)
+    assert cap.buf == ref
 
 
 def _crest(r):

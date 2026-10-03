@@ -31,6 +31,7 @@ I2C0_FREQ = const(400_000)
 AXP202_ADDR = const(0x35)
 BMA423_ADDR = const(0x19)
 BMA423_ADDR_ALT = const(0x18)
+BMA423_Z_SIGN = const(-1)  # chip z points into the wrist: face-up reads -1 g (bring-up, both watches)
 PCF8563_ADDR = const(0x51)
 
 AXP202_IRQ = const(35)   # input only, active low (also carries the PEK side button)

@@ -213,6 +213,11 @@ def decode_frames(buf, n, out, range_mg=4000, off=0):
     return k
 
 
+def _acc_conf(odr):
+    """ACC_CONF: performance mode, normal filter (-3 dB at about 0.4 x odr)."""
+    return ACC_PERF | ACC_BWP_NORMAL | ODR_CODES[odr]
+
+
 def temperature_c(raw):
     """TEMPERATURE register -> deg C (0x00 = 23 C, 1 K/LSB), None if 0x80."""
     if raw == 0x80:
@@ -228,10 +233,12 @@ class BMA423:
 
     ``start=False`` skips init; then call ``init()`` (blocking, a few ms) or
     ``begin()`` and ``ready()`` from the main loop (non-blocking).
+    ``z_sign`` is how the board mounts the chip (-1: face-up reads z = -1 g);
+    samples stay in the chip's frame, and app/imu_feed.py applies it.
     """
 
     def __init__(self, i2c, addr=None, *, range_g=4, odr=100, fifo=True,
-                 start=True, fifo_frames=FIFO_FRAMES):
+                 start=True, fifo_frames=FIFO_FRAMES, z_sign=1):
         if range_g not in RANGE_CODES:
             raise ValueError("range_g must be 2, 4, 8 or 16")
         if odr not in ODR_CODES:
@@ -242,6 +249,7 @@ class BMA423:
         self.range_mg = range_g * 1000
         self.odr = odr
         self.fifo = fifo
+        self.z_sign = z_sign
         self.feat_state = FEAT_NONE
         self.feat_error = None
         self._feat_on = False         # game features switched on (poll_features)
@@ -354,7 +362,7 @@ class BMA423:
     def _configure(self):
         self._w8(REG_PWR_CONF, 0x00)  # adv_power_save off (on after reset)
         sleep_us(APS_WAIT_US)
-        self._w8(REG_ACC_CONF, ACC_PERF | ACC_BWP_NORMAL | ODR_CODES[self.odr])
+        self._w8(REG_ACC_CONF, _acc_conf(self.odr))
         self._w8(REG_ACC_RANGE, RANGE_CODES[self.range_g])
         self._w8(REG_FIFO_CONFIG_0, 0x00)  # stream mode, no sensortime frame
         self._w8(REG_FIFO_CONFIG_1, FIFO_ACC_EN if self.fifo else 0x00)
@@ -367,6 +375,15 @@ class BMA423:
             # init without reset after a failed engine init: INIT_CTRL spent
             self.feat_state = FEAT_ERROR
             self.feat_error = "internal_status %d (reset to retry)" % msg
+
+    def set_odr(self, odr):
+        """Change the output data rate while running and empty the FIFO (its
+        samples were taken at the old rate)."""
+        if odr not in ODR_CODES:
+            raise ValueError("odr must be one of 25..1600 Hz")
+        self._w8(REG_ACC_CONF, _acc_conf(odr))
+        self.odr = odr
+        self.fifo_flush()
 
     def error(self):
         """ERR_REG (0 = fine)."""
