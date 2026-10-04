@@ -482,3 +482,25 @@ def test_player_drives_motor():
         mo.set(pl.tick(t))
     # 3 beats -> on/off pairs, written only on edges
     assert mo._pwm.history == [65535, 0] * 3
+
+
+def test_heartbeat_handed_ahead_waits_for_its_time():
+    """A heartbeat given a later start waits (``beat_due``), is not ``active``
+    (the loop need not tick the motor every ms), starts on time, and can be
+    cancelled until it starts; an event that starts first replaces it."""
+    pl = HapticPlayer()
+    assert pl.tick(0) == 0
+    assert pl.heartbeat("TICK", 250)
+    assert pl.beat_due == 250 and not pl.active and not pl.beat_playing
+    assert pl.tick(249) == 0 and pl.beat_due == 250
+    assert pl.tick(250) == 1.0 and pl.active and pl.beat_playing and pl.beat_due is None
+    assert not pl.cancel_heartbeat()          # on: plays out
+    assert pl.tick(250 + hp.MIN_PULSE_MS - 1) == 1.0 and pl.tick(250 + hp.MIN_PULSE_MS) == 0
+    assert pl.heartbeat("TICK", 900) and pl.cancel_heartbeat()
+    assert pl.beat_due is None and all(pl.tick(t) == 0 for t in range(400, 1200, 5))
+    assert pl.heartbeat("TICK", 1500)         # first output tick late: a full pulse from it
+    assert pl.tick(1520) == 1.0 and pl.tick(1520 + hp.MIN_PULSE_MS - 1) == 1.0
+    pl = HapticPlayer()
+    pl.tick(0)
+    assert pl.heartbeat("TICK", 250) and pl.play_named("CLOSER", 100)
+    assert pl.beat_due is None and pl.busy

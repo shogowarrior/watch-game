@@ -1,7 +1,7 @@
 {
   "name": "homing-esp32",
   "version": "0.1.0",
-  "description": "Homing ESP32 clock, log, backlight and IMU task (Arduino and ESP-IDF)",
+  "description": "Homing ESP32 clock, log, backlight, IMU task, spi_master LCD bus, ESP-NOW radio, motor and interrupt lines (Arduino and ESP-IDF)",
   "frameworks": ["arduino", "espidf"],
   "platforms": "espressif32",
   "build": {"srcDir": "src", "includeDir": "include"}

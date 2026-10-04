@@ -85,7 +85,7 @@ flowchart LR
   ARROW --> RP
   PAIR --> RP
   MENU --> RP
-  RP --> REND["ui.renderer.Renderer<br/>10 strips of 240x24"]
+  RP --> REND["ui.renderer.Renderer<br/>whole frame, 4 bands of 240x60"]
   REND --> DISP
   REND -->|heartbeats| PLAYER --> MOTOR
   RP -.->|haptic| PLAYER
@@ -120,7 +120,7 @@ stages in order:
    a second the optional feature engine adds chip steps and activity, and
    wrist-wear -> `game.on_wake` (only while the screen is off).
 3. **touch**: `FT6336.read()` -> `GestureRecognizer` (multi-touch ignored).
-   Touch is also sampled after a strip, at least 15 ms apart, while a frame
+   Touch is also sampled between a frame's bands, at least 15 ms apart, while a frame
    renders (so a 60 ms tap measures right); what those samples find waits
    for this stage: `game.on_touch_down` when a finger landed
    (`GestureRecognizer.began`; the rain filter) and `game.on_gesture`, in
@@ -146,11 +146,12 @@ stages in order:
    grid at the fastest of 20, 10, 8, 7, 6, 5 fps at or under `params.fps_cap`
    that the loop's measured cost fits, and `Renderer.frame(params, display,
    slot)` animates to the frame's slot time, so motion steps evenly (ui-spec
-   §4 rule 6). It composes each 240x24 strip off-screen (a map of each pixel's ring number,
-   coloured through a 256-entry palette of byte-swapped RGB565, then glyph and
-   text overlays) and
-   pushes it with `display.push_strip`. Strips go top to bottom, so the panel
-   takes them as one window, all drawn in one buffer. The field is coloured
+   §4 rule 6). It draws the whole frame off-screen in one 240x240 buffer: the
+   ring map (each pixel's ring number) coloured through a 256-entry palette of
+   byte-swapped RGB565 a band of 240x60 at a time, then the glyph and text
+   overlays once over the whole frame. Then it pushes the four bands top to
+   bottom with `display.push_strip`, which the panel takes as one window. The
+   field is coloured
    from a quarter of the ring map, eight pixels a pass mirrored left-right
    and top-bottom (a viper kernel on the watch, checked against the framebuf
    path when the renderer starts; elsewhere a framebuf palette blit). With the screen off it runs with
@@ -165,7 +166,12 @@ stages in order:
    `play_named`; telemetry logs it only if the player accepted it) and the
    renderer's heartbeats (`heartbeat`, one call per beat) go into
    `HapticPlayer`; `tick(now)` gives the motor level, applied by `Motor.set`
-   only on change. The motor is also serviced after every strip, and in
+   only on change. When the renderer announces its next heartbeat spawn
+   (`hb_next_t`), the beat is handed to the player ahead, at the spawn time,
+   so it lands on its ring at any frame lock rate; the loop wakes for it
+   (`player.beat_due`), and the frame that spawns the ring does not start it
+   again. The motor is also serviced after every band the renderer
+   blits or pushes and after its overlays, and in
    `idle` while a pattern plays.
 9. **gc**: `gc.collect()` every 10 s when the next frame is at least 10 ms
    away (forced after 20 s). A collect sweeps the whole 4 MB SPIRAM heap
@@ -209,9 +215,9 @@ fallback is both short presses within 3 s in HOT.
 | BMA423 FIFO | 100 Hz (holds 1.7 s), 800 Hz while a bump can count (holds 212 ms); drained every loop | `app.imu_feed` |
 | Motion tracker | 25 Hz | `app.runtime.IMU_OUT_HZ` |
 | Feature engine poll | 1 Hz | `app.runtime.CHIP_MS` |
-| Touch / button poll | touch: every loop and, while a frame renders, after a strip once 15 ms have passed since the last sample; button: every loop, at least every 20 ms | `app.runtime.INPUT_MS`, `TOUCH_GAP_MS` |
+| Touch / button poll | touch: every loop and, while a frame renders, between bands once 15 ms have passed since the last sample; button: every loop, at least every 20 ms | `app.runtime.INPUT_MS`, `TOUCH_GAP_MS` |
 | Battery | every 10 s; a falling reading at or under 20 % must repeat 3 times, 1 s apart; on USB a shutdown-level reading never reaches the game | `BATTERY_MS`, `BATT_LOW_READS` |
-| Haptics | pulses and gaps >= 60 ms; motor serviced every strip and every 1 ms while a pattern plays | `finder.haptic_patterns` |
+| Haptics | pulses and gaps >= 60 ms; motor serviced after every band (blit or push), after the overlays and every 1 ms while a pattern plays | `finder.haptic_patterns` |
 | Link loss | 5 s with no packet after a fix -> LINK_LOST | `finder.game`, ui-spec §6 |
 
 Budgets: an estimator update should stay well under 2 ms on the ESP32
@@ -283,7 +289,7 @@ flowchart LR
    queues it: the 115200-baud line takes about 11.5 bytes per ms through a
    128-byte FIFO, and a write to a full FIFO would stall the loop. So
    `SerialLink.pump` writes only what the FIFO has room for, once per loop
-   pass and after each strip of a frame (`_HapticDisplay` in
+   pass and at each mid-frame service (`_HapticDisplay.service` in
    `app/runtime.py`), and allocates nothing. `rp` goes about once a second on
    USB (with every state record on Wi-Fi), and at once when the screen, its
    sub-state or its power changes.

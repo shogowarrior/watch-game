@@ -115,12 +115,14 @@ in one message with the current default marked. Don't build on an assumption.
   fix it.
 - **Quick bake-off ranking.** `bakeoff.py --quick` (typical, seeds 0-2) ranks
   kalman1d slightly above kalman2. Only the held-out seeds decide `DEFAULT`.
+- **Arrow clock under a waiting SAVER ON.** The arrow's reveal and turn clock
+  still runs, unseen, on the tick a SAVER ON is waiting to start
+  (`_inter_pending` in `finder/game.py`), and a scan's new arrow is not
+  checked for being hidden on the tick it is born. The fix and its two tests
+  are ready (`git diff c906f1a e007296 -- finder/game.py tests/test_game.py`)
+  and wait for `finder/game.py` to be free (one thread edits it at a time).
 
-Fixed on 2026-10-04: the arrow clock and the chip features after a bad start.
-The one-line arrow fix this list suggested was incomplete: a SAVER ON that is
-waiting to start (`_inter_pending` in `finder/game.py`) also counts as hidden,
-and a scan's new arrow is checked on that tick too, not only a returning one.
-A chip start stopped by a bus error is now started again by the 1 s poll, 5
+Fixed on 2026-10-04: the chip features after a bad start. A chip start stopped by a bus error is now started again by the 1 s poll, 5
 starts in all (`CHIP_TRIES` in `app/runtime.py`), and a start that goes
 through clears the old error.
 

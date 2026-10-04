@@ -36,7 +36,7 @@ over their USB cables or over Wi-Fi.
 | `hal/pins.py` | GPIO map, bus ids, addresses, clock limits. V1 only. |
 | `hal/st7789.py` `axp202.py` `bma423.py` `ft6336.py` `haptics.py` `radio.py` `watchdog.py` | Display, PMU + side key, accelerometer, touch, motor, ESP-NOW (`EspNowRadio` / `SimRadio`), loop watchdog. |
 | `hal/board.py` | `Board` (lazy parts, one shared I2C0), `safe_boot`. `board.debug` set: the radio starts in its associated mode. |
-| `hal/debuglink.py` | Debug mode: reads `/debug`. `SerialLink` (USB, the default) writes each record as a line on the REPL's UART, paced to its 128-byte FIFO (`pump` once per loop pass and after each strip). `DebugLink` (Wi-Fi) reads `/secrets.py`, joins the Wi-Fi (10 s at most) and sends UDP datagrams. Both count errors (`tx_err`). |
+| `hal/debuglink.py` | Debug mode: reads `/debug`. `SerialLink` (USB, the default) writes each record as a line on the REPL's UART, paced to its 128-byte FIFO (`pump` once per loop pass and at each mid-frame service). `DebugLink` (Wi-Fi) reads `/secrets.py`, joins the Wi-Fi (10 s at most) and sends UDP datagrams. Both count errors (`tx_err`). |
 | `finder/` | Pure game logic. No hardware imports. |
 | `finder/compat.py` | Tick helpers and MicroPython portability rules. |
 | `finder/tuning.py` | **Generated** from `docs/design/tokens.json`. Never hand-edit. |
@@ -53,7 +53,7 @@ over their USB cables or over Wi-Fi.
 | `finder/game.py` | `Game`: the state machine. Inputs in, `RenderParams` out (read its docstring). |
 | `finder/menu.py` | `Menu`: the MENU list (rows, scroll, END ROUND confirm, auto-close). |
 | `finder/render_params.py` | `RenderParams`, the only thing the renderer reads (ui-spec §3). |
-| `ui/` | Strip renderer: `renderer.py` (10 strips of 240x24), `field.py` (ripple palette), `glyphs.py`, `text.py`, `font.py`. Colours in `ui/__init__.py` are byte-swapped RGB565. |
+| `ui/` | Frame renderer: `renderer.py` (draws the whole 240x240 frame, pushes it as 4 bands of 240x60), `field.py` (ripple palette), `glyphs.py`, `text.py`, `font.py`. Colours in `ui/__init__.py` are byte-swapped RGB565. |
 | `sim/` | Two-watch simulator: `world.py`, `radio.py` (RSSI profiles clean/typical/harsh/indoor, per-watch beacon period), `imu.py`, `accel_synth.py`, `scenarios.py`, `rng.py`, `link.py` (`GameLink`: beacon hand-off between two Games), `Sim`; `webhost.py` drives the browser sim. |
 | `native/` | Arduino and ESP-IDF ports (PlatformIO), work in progress: a shared C++ core (the ripple field, checked frame by frame against `ui/field.py`; display, PMU and IMU sequences from `hal/`) and the display benchmark both builds run. See `native/README.md`; `tests/test_native.py` runs its host tests. |
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). Its **Simulator \| Real watches** toggle shows the real watches in debug mode. |
@@ -114,9 +114,11 @@ sets it as CPython would.
 | `node tools/mpy/run.mjs tools/bench_webhost.py` | Cost of one browser-sim step. |
 | `python3 tools/drift_demo.py` | Why accelerometer double integration fails. |
 | `python3 tools/build_sim.py` | Build the web simulator into `dist/sim/` (needs `tools/mpy` npm install). |
+| `python3 native/tools/qemu_run.py native/idf` | Check a native build's flash layout and boot it in Espressif's QEMU (`--install` once). Checks boot and crashes, not speed (`native/README.md`). |
 | `mpremote run tools/bench_display.py` | **On the watch**: real SPI clock, push/blit timings, fps. |
-| `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push) and the overlays of each strip, push variants, whether a send thread could overlap the drawing, IMU cost per rate, which kernels run as viper, and 10 s of the game loop (with its serial `fps` lines: frame lock, misses, jitter) with bump sensing off then on. |
+| `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push), push variants, whether a send thread could overlap the drawing, IMU cost per rate, which kernels run as viper, and 10 s of the game loop (with its serial `fps` lines: frame lock, misses, jitter) with bump sensing off then on. |
 | `mpremote run tools/bench_spi_clock.py` | **On the watch**: MicroPython's full-frame push at 26.67, 40 and 80 MHz (pokes the SPI clock register, then puts 26.67 back), with a test card held 5 s per clock to check by eye. |
+| `mpremote run tools/bench_hmlcd.py` | **On the watch, custom firmware** (`native/micropython`, see `native/README.md`): the renderer with the stock push, then with the `hmlcd` C module's push on core 0 at 26.67, 40 and 80 MHz. |
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |

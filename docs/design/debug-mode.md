@@ -48,7 +48,7 @@ laptop, never in a chat.
 
    Records are made in the 5 Hz telemetry path only, never in the render
    loop. Over USB they are written out a little at a time, once per loop pass
-   and after each strip of a frame (see "USB serial" below), so the slow
+   and at each mid-frame service (see "USB serial" below), so the slow
    serial line never stalls the game.
 4. **Radio channel (Wi-Fi link only).** ESP-NOW and a Wi-Fi association share one radio. Once
    the watch joins the access point, the channel is the access point's. In
@@ -188,14 +188,14 @@ has room for.
   never waits, and `pump` allocates nothing.
 - **Where it pumps:** once per loop pass, at the end of `Runtime.step`'s
   telemetry stage (after the record and the flush, with the clock read again),
-  and after each strip of a drawn frame (`_HapticDisplay.push_strip` in
-  `app/runtime.py`, which also services the motor and touch). One pump per
+  and at each mid-frame service of a drawn frame (`_HapticDisplay.service` in
+  `app/runtime.py`, which also services the motor and touch, after each of the
+  renderer's bands is blitted or pushed and after its overlays). One pump per
   pass was not enough: a frame takes about 80 ms, so a pass that draws one
   carried at most 128 bytes (under 1.6 KB/s), less than the ~2.7 KB/s the
-  records need, and the queue filled up. Pumped after every strip (about
-  8-9 ms), a full FIFO load goes out at least every second strip, about 5 per
-  frame (about 7-8 KB/s). Since `pump` allocates nothing, the render loop
-  stays allocation-free (AGENTS rule 2).
+  records need, and the queue filled up. At every service (about 5-15 ms
+  apart) the FIFO refills nearly whole, several times per frame. Since `pump`
+  allocates nothing, the render loop stays allocation-free (AGENTS rule 2).
 - **Loop exit and power off:** a forced telemetry flush sends what is left and
   calls `drain()`, which writes out everything queued, waiting on the port as
   `print` does, so the last records (such as `crash` or `pwr`) get out.

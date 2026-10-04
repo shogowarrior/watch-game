@@ -28,6 +28,7 @@ make_params = rs.make_params
 
 if HAVE_FB:
     from ui.renderer import FrameCapture, Renderer
+    from ui import renderer as R
     from ui import text as tx
     from ui import font
 
@@ -233,7 +234,7 @@ def test_renderer_tables_match_tuning():
     assert (R.W_FOUND, R.W_BUMP) == (game.W_FOUND, game.W_BUMP)
 
 
-def test_frame_pushes_ten_strips_and_colours():
+def test_frame_pushes_four_bands_and_colours():
     _need_fb()
     r = Renderer()
     cap = FrameCapture()
@@ -241,7 +242,7 @@ def test_frame_pushes_ten_strips_and_colours():
     n0 = cap.pushes
     _fr(r, make_params(t_ms=T0 + 550, **_warm(glyph="arrow", arrow_deg=0, cone_deg=31,
                                                 arrow_style="solid_b")), cap)
-    assert cap.pushes - n0 == 10
+    assert cap.pushes - n0 == R.NB == 4
     assert _px(cap.buf, 160, 160) == BG_IRIS            # inside iris r 64, off the dart
     assert _px(cap.buf, 120, 90) == PROX[6]             # solid_b dart body
     assert _px(cap.buf, 139, 68) == PROX[3]             # solid_b beam, beside the tip
@@ -263,9 +264,9 @@ def test_core_dot_level_in_frame():
     assert r.field.iris == 0
 
 
-def test_field_strips_match_the_full_map():
-    """A field-only frame, drawn strip by strip from both buffers in turn,
-    equals the full ring map palette-blitted in one go."""
+def test_field_bands_match_the_full_map():
+    """A field-only frame, drawn band by band, equals the full ring map
+    palette-blitted in one go."""
     _need_fb()
     r = Renderer()
     cap = FrameCapture()
@@ -275,21 +276,27 @@ def test_field_strips_match_the_full_map():
     framebuf.FrameBuffer(ref, 240, 240, framebuf.RGB565).blit(full, 0, 0, -1, r.field.pal)
     assert cap.buf == ref
     # The overlays are not in this frame: the snapshot CRCs
-    # (test_fixtures_match_snapshots) catch overlays drawn into the wrong strip.
+    # (test_fixtures_match_snapshots) catch overlays drawn in the wrong place.
 
 
-def test_strips_go_top_to_bottom_from_one_buffer():
-    """In order (one panel window), each drawn in the same buffer."""
+def test_bands_go_top_to_bottom_after_the_whole_frame_is_drawn():
+    """The frame is drawn whole (field band by band, then the overlays, with
+    ``service`` after each), then pushed top to bottom (one panel window),
+    each band a view of the one frame buffer."""
     _need_fb()
     r = Renderer()
     seen = []
 
     class D:
         def push_strip(self, y0, h, buf):
-            seen.append((y0, h, buf is r.buf))
+            seen.append((y0, h, buf is r.bands[y0 // h]))
+
+        def service(self):
+            seen.append("svc")
 
     _run(r, D(), rs.hunt(2, status=None), 0)
-    assert seen == [(24 * k, 24, True) for k in range(10)], seen
+    assert seen == ["svc"] * 5 + [(60 * k, 60, True) for k in range(4)], seen
+    assert len(r.buf) == 240 * 240 * 2
 
 
 class _P16:
@@ -344,7 +351,7 @@ def test_blit_kernel_matches_the_framebuf_path():
     k = _py_blit_kernel()
     r = Renderer()
     assert r.map.kind in ("framebuf", "viper"), r.map.kind
-    r.map = fld.RingMap(24, (r.buf,), kernel=k)
+    r.map = fld.RingMap(R.BH, r.bands, kernel=k)
     assert r.map.kind == "kernel" and r.map.kern is k
     assert len(r.map.q) == 120 * 120
     cap = FrameCapture()
@@ -354,8 +361,8 @@ def test_blit_kernel_matches_the_framebuf_path():
     framebuf.FrameBuffer(ref, 240, 240, framebuf.RGB565).blit(full, 0, 0, -1, r.field.pal)
     assert cap.buf == ref
 
-    def mirrored(dst, q, pal, y0, h):         # a bottom strip from its top mirror, not reversed
-        k(dst, q, pal, y0 if y0 < 120 else 216 - y0, h)
+    def mirrored(dst, q, pal, y0, h):         # a bottom band from its top mirror, not reversed
+        k(dst, q, pal, y0 if y0 < 120 else 240 - h - y0, h)
 
     def swapped(dst, q, pal, y0, h):
         k(dst, q, pal, y0, h)
@@ -372,7 +379,7 @@ def test_blit_kernel_matches_the_framebuf_path():
     unreversed = _py_blit_kernel(src)          # left half: one pixel pair in the wrong order
 
     for bad in (mirrored, swapped, short, unreversed):
-        m = fld.RingMap(24, (r.buf,), kernel=bad)
+        m = fld.RingMap(R.BH, r.bands, kernel=bad)
         assert m.kern is None and m.q is None and "failed" in m.kind, m.kind
 
 
@@ -487,7 +494,7 @@ def test_renders_finder_render_params():
     p = rp.make_params(t_ms=T0)                       # a valid SEARCHING frame
     assert rp.validate(p) == []
     assert _fr(r, p, cap) == ()
-    assert cap.pushes == 10
+    assert cap.pushes == 4
     hot = dict(HOT_KW, ramp="green", ring_live=True, glyph="glow", word="BUMP!",
                status=(55, None, 4, True, False))
     assert rp.validate(rp.make_params(t_ms=T0, **hot)) == []

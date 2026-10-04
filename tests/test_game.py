@@ -5,8 +5,6 @@ a fake estimator whose distance the test sets; ``Two`` links two real games.
 Every RenderParams produced is checked with ``validate``.
 """
 
-import math
-
 from finder import proto
 from finder import tuning as T
 from finder.game import (Game, M_HUNT, M_SCANNING, M_FOUND, M_LINK_LOST, M_SEARCHING, M_PAIRING,
@@ -1847,97 +1845,6 @@ def test_menu_and_saver_interstitial_pause_the_turn_pacer():
     g.set_battery(r.t, 10)
     r.run(2000)
     assert r.p.word == "SAVER ON" and a.phase == A.PH_TURN and a.pacer <= p0 + 3.5
-
-
-def _reveal_frames(r, since):
-    return sum(1 for p in r.params if p.t_ms > since and p.sub == "reveal")
-
-
-def test_an_arrow_back_from_a_scan_under_the_menu_or_saver_on_keeps_its_clock_paused():
-    # the arrow comes back on the tick its scan ends, hidden there: its reveal
-    # still shows for as many frames as one that was never hidden
-    ref = _arrow_rig(150.0)
-    t0 = ref.t
-    ref.run(2000)
-    n = _reveal_frames(ref, t0)
-    for hide in ("menu", "saver"):
-        r = _arrow_rig(150.0, battery=15)
-        g = r.g
-        a = g.arrow
-        t0 = r.t
-        r.tilt = 60.0                           # not flat: the scan's ready holds
-        r.run(500)
-        g.on_gesture(r.t, 1, 120, 120)          # a scan hides the revealing arrow
-        r.run(500)
-        assert g.mode == M_SCANNING and g.arrow is None
-        if hide == "menu":
-            g.on_button(r.t, long=True)         # cancels the scan: back under the MENU
-            r.run(3000)
-            assert g.arrow is a and r.p.screen == "MENU"
-            g.on_button(r.t, long=True)         # RESUME
-        else:
-            g.set_battery(r.t, 10)              # SAVER ON waits for the scan
-            r.run(500)
-            g.on_gesture(r.t, 1, 120, 120)      # cancel: back as SAVER ON starts
-            r.run(100)
-            assert g.arrow is a and r.p.word == "SAVER ON"
-        r.run(5000)
-        assert a.phase == A.PH_TURN, (hide, a.phase)
-        assert _reveal_frames(r, t0) == n, (hide, _reveal_frames(r, t0), n)
-
-
-def _scan_to_a_fix(saver):
-    """A scan in NEAR that ends with a fix 150 deg right (own RSSI peaks there);
-    ``saver`` raises SAVER ON as the scan starts, so it waits for the scan.
-    Returns the rig and the arrow, on the tick the fix made it."""
-    r = paired_rig(d=20.0, battery=15)
-    r.state = SC_NEAR
-    r.run(1000)
-    g = r.g
-    g.on_gesture(r.t, 1, 120, 120)
-    if saver:
-        g.set_battery(r.t, 10)
-    while g.mode == M_SCANNING:
-        r.rssi = round(-60 + 6 * math.cos(math.radians(g.scan.wedge_deg - 150.0)))
-        r.run(100)
-    a = g.arrow
-    assert a is not None and a.t0 == r.t, (a, r.t)
-    return r, a
-
-
-def test_an_arrow_born_as_saver_on_starts_keeps_its_whole_reveal():
-    # SAVER ON starts on the tick the scan's fix makes the arrow: the reveal
-    # clock pauses from that tick on, so no reveal frame runs unseen
-    ref, a = _scan_to_a_fix(False)
-    ref.run(3000)
-    n = _reveal_frames(ref, a.t0 - 100)         # from the birth tick on
-    assert n == T.DIRECTION_REVEAL_MS // 100, n
-    r, a = _scan_to_a_fix(True)
-    assert r.p.word == "SAVER ON"
-    r.run(T.BATT_INTERSTITIAL_MS + 3000)
-    k = _reveal_frames(r, a.t0 - 100)
-    assert a.phase == A.PH_TURN and k == n, (a.phase, k, n)
-
-
-def test_an_arrow_relinked_under_the_menu_keeps_its_pacer_until_it_shows():
-    # relinked under the MENU, then SAVER ON (raised under it) from the tick it
-    # closes: the pacer moves again only on the first frame that shows it
-    r = _arrow_rig(150.0, battery=15)
-    g = r.g
-    a = g.arrow
-    r.run(5300, packets=False)                  # the turn runs until the link is lost
-    assert g.mode == M_LINK_LOST and a.phase == A.PH_TURN
-    p0 = a.pacer
-    g.on_button(r.t, long=True)
-    r.run(1000)                                 # the partner is back
-    assert g.mode == M_HUNT and g.menu_open and g.arrow is a and a.pacer == p0
-    g.set_battery(r.t, 10)
-    r.run(500)
-    g.on_button(r.t, long=True)                 # RESUME
-    r.run(T.BATT_INTERSTITIAL_MS)
-    assert r.p.word == "SAVER ON" and a.pacer == p0
-    r.run(100)
-    assert r.p.sub == "turn" and abs(a.pacer - p0 - 3.0) < 0.01   # its last 100 ms before the loss
 
 
 def test_accidental_tap_keeps_the_arrow_and_sweep_spends_it():

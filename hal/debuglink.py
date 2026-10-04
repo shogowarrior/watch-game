@@ -42,7 +42,7 @@ Both links offer what app/telemetry.py, app/runtime.py and ``Board`` use:
 out), ``send(data)`` (one record, from the 5 Hz path, never from the render
 loop), ``log(text)`` (the runtime's fps line: queued as a plain text line
 between records on USB, printed on Wi-Fi), ``pump(now)`` (once per loop
-pass and after every strip of a frame), ``drain()`` (loop exit) and
+pass and at each mid-frame service), ``drain()`` (loop exit) and
 ``stats()``; ``close()`` is for ``start()`` when a link fails to open and
 for tools/fake_watches.py. The ``rp`` record's channel is the radio's
 (app/telemetry.py), not the link's: ``DebugLink.channel`` only names the
@@ -136,11 +136,11 @@ class SerialLink:
     would, while the FIFO is full), and ``pump`` allocates nothing. The cuts
     fall every ``SERIAL_FIFO`` bytes of the queued stream, not of each
     record, so a pump that finds the FIFO empty fills all of it. The runtime
-    pumps once per loop pass and after each strip of a frame (~8-9 ms of a
-    ~80 ms frame on the watch), so a full FIFO load goes out at least every
-    second strip, about 5 per frame (~7-8 KB/s): well over the ~2.7 KB/s
-    the records need, and the queue fills only in a burst. ``tx`` in
-    ``stats()`` counts the lines written out: records and fps lines."""
+    pumps once per loop pass and at each mid-frame service (after each band
+    the renderer blits or pushes, and after its overlays: ~5-15 ms apart),
+    so the FIFO refills about once a service: well over the ~2.7 KB/s the
+    records need, and the queue fills only in a burst. ``tx`` in ``stats()``
+    counts the lines written out: records and fps lines."""
 
     sta = None               # no Wi-Fi: the radio stays as in normal play
     rp_ms = 1000             # the screen once a second (and at once when it changes)

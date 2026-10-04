@@ -30,8 +30,8 @@ You draw into RGB565 `framebuf` strips (usually a GS8 buffer blitted through a
 palette), then push them with `push_strip(y0, h, buf)` (a full-width strip)
 or `push_frame(fb)` (115,200 B sent as strip-sized writes in one CS-low burst;
 the slice list is cached, so it allocates nothing). A strip that starts where
-the last one ended continues its window (CS stays low, no new command), so 10
-strips top to bottom cost what `push_frame` does (44.1 ms on the watch, against
+the last one ended continues its window (CS stays low, no new command), so
+strips top to bottom (the renderer sends 4 bands of 240x60) cost what `push_frame` does (44.1 ms on the watch, against
 52.4 ms with a window per strip and 37.3 ms as one write; the wire alone takes
 34.6 ms at 26.67 MHz). Every write is copied from the PSRAM heap into an
 internal DMA buffer by ESP-IDF, so a write costs about 0.7 ms on top of the
@@ -244,10 +244,9 @@ does), so the link paces itself:
 - `pump(now)` writes whole pieces only while a model of the FIFO has room
   (refilling at 11 bytes per ms counted from the tick after the last write),
   so a write never waits, and it allocates nothing. `app/runtime.py` calls it
-  once per loop pass and after each strip of a frame (~8-9 ms of a ~80 ms
-  frame), so a full 128-byte piece goes out at least every second strip,
-  about 5 per frame (~7-8 KB/s); once per pass was too slow while frames
-  render.
+  once per loop pass and at each mid-frame service (after each band the
+  renderer blits or pushes, and after its overlays, ~5-15 ms apart); once per
+  pass was too slow while frames render.
 - `drain()` (a forced telemetry flush at loop exit and power off) writes out
   whatever waits, waiting on the port like `print`.
 - `log(text)` queues the runtime's fps line as a plain text line between

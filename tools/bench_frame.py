@@ -7,9 +7,9 @@ Prints where the time goes:
   * kernels: which hot loops run as viper on this build (palette, field
     blit, IMU decode, IMU feed) and the CPU clock
   * render: per screen fixture, ms per frame split into step (state), plan,
-    palette, field (ring-map blit), overlays and push (SPI), then the
-    overlay ms of each of the 10 strips
-  * push: one frame sent as 10 windowed strips, as one window of 10, 5 and
+    palette, field (ring-map blit, 4 bands), overlays (one pass over the
+    whole frame) and push (SPI, 4 bands in one window)
+  * push: one frame sent as 10 windowed strips, as one window of 10, 4 and
     1 writes
   * overlap: whether a second thread can send strips while this one draws:
     ms per frame of 10 strips, each after 3 ms of viper work, sent inline,
@@ -36,9 +36,11 @@ from hal import bma423
 from hal.bma423 import BMA423, decode_frames
 from hal.board import Board
 from ui import field
-from ui.renderer import NS, SH, W, Renderer
+from ui.renderer import BH, NB, W, Renderer
 
 N = 40                    # frames per fixture
+SH = 24                   # the old strip height (push and overlap probes)
+NS = W // SH
 LOOP_MS = 10000
 RATES = (100, 400, 800, 1600)
 _us = time.ticks_us
@@ -63,10 +65,9 @@ def bench_kernels(r):
         imu_feed.KERNEL))
 
 
-def _frame_parts(r, p, display, t, acc, strips):
+def _frame_parts(r, p, display, t, acc):
     """Renderer.frame(p, display, t), timed part by part into ``acc``
-    (step, plan, palette, field, overlays, push; us) and the overlays of
-    each strip into ``strips``."""
+    (step, plan, palette, field, overlays, push; us)."""
     a = _us()
     r._step(p, t)
     b = _us()
@@ -83,21 +84,17 @@ def _frame_parts(r, p, display, t, acc, strips):
     pal = r.field.pal
     arr = r.field.pal_arr
     m = r.map
-    buf = r.buf
-    fb = r.fb
-    for s in range(NS):
-        y0 = s * SH
-        a = _us()
-        m.blit(y0, pal, arr, buf, fb)
-        b = _us()
-        acc[3] += _d(b, a)
-        r._strip(p, t, y0, fb)
-        a = _us()
-        d = _d(a, b)
-        acc[4] += d
-        strips[s] += d
-        display.push_strip(y0, SH, buf)
-        acc[5] += _d(_us(), a)
+    a = _us()
+    for k in range(NB):
+        m.blit(k * BH, pal, arr, r.bands[k], r.band_fbs[k])
+    b = _us()
+    acc[3] += _d(b, a)
+    r._strip(p, t, 0, r.fb)
+    a = _us()
+    acc[4] += _d(a, b)
+    for k in range(NB):
+        display.push_strip(k * BH, BH, r.bands[k])
+    acc[5] += _d(_us(), a)
 
 
 def bench_render(display):
@@ -114,24 +111,20 @@ def bench_render(display):
             t += 50
         gc.collect()
         acc = [0] * 6
-        strips = [0] * NS
         t0 = _us()
         for _ in range(N):
-            _frame_parts(r, p, display, t, acc, strips)
+            _frame_parts(r, p, display, t, acc)
             t += 50
         tot = _d(_us(), t0) / N / 1000
         ms = [x / N / 1000 for x in acc]
         print("%-14s %6.1f  %5.1f %5.1f %5.1f %5.1f    %5.1f  %5.1f  %5.1f" % (
             name, tot, ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], 1000 / tot))
-        print("  overlays per strip ms: " + " ".join("%.1f" % (x / N / 1000) for x in strips))
     return r
 
 
 def bench_push(display, r):
-    """One frame (the last fixture's strip, ten times) four ways."""
-    frame = bytearray(W * W * 2)
-    for s in range(NS):
-        frame[s * W * SH * 2:(s + 1) * W * SH * 2] = r.buf
+    """One frame (the last fixture's) four ways."""
+    frame = bytearray(r.buf)
     mv = memoryview(frame)
     n = W * SH * 2
     spi = display.spi
@@ -142,7 +135,7 @@ def bench_push(display, r):
             display._next = -1
             display.push_strip(s * SH, SH, mv[s * n:(s + 1) * n])
     out.append(_d(_us(), t0) / 10000)
-    for k in (NS, NS // 2, 1):              # one window, k writes
+    for k in (NS, NB, 1):                   # one window, k writes
         step = len(frame) // k
         t0 = _us()
         for _ in range(10):
@@ -151,7 +144,7 @@ def bench_push(display, r):
                 spi.write(mv[i * step:(i + 1) * step])
             display._cs(1)
         out.append(_d(_us(), t0) / 10000)
-    print("push ms: 10 windows %.1f, 1 window x 10 writes %.1f, x 5 writes %.1f, "
+    print("push ms: 10 windows %.1f, 1 window x 10 writes %.1f, x 4 writes %.1f, "
           "x 1 write %.1f" % tuple(out))
 
 
@@ -187,7 +180,7 @@ def bench_overlap(display, r):
             break
         n *= 2
     n = n * 500 // dt
-    buf = r.buf
+    buf = bytearray(r.buf[:W * SH * 2])     # one old-size strip
     st = {"go": _thread.allocate_lock(), "done": _thread.allocate_lock(),
           "y": 0, "stop": False}
     go = st["go"]
