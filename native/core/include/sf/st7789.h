@@ -21,8 +21,12 @@ class St7789 {
   // SWRESET + init; the panel supply (AXP202 LDO2) must already be on. Blocks ~300 ms.
   // ``black`` is a strip of ``rows`` rows used to clear GRAM before DISPON.
   void init(uint16_t* black, int rows);
-  void begin_frame();                                // full-screen window; strips follow top to bottom
-  void push_strip(const uint16_t* px, int rows);     // see LcdBus::pixels for buffer reuse
+  // A window of w x h pixels at (x, y); push_pixels then fills it row by row,
+  // in as many calls as the caller likes (see LcdBus::pixels for buffer reuse).
+  void begin_window(int x, int y, int w, int h);
+  void push_pixels(const uint16_t* px, size_t n);
+  void begin_frame() { begin_window(0, 0, W, H); }   // strips follow top to bottom
+  void push_strip(const uint16_t* px, int rows) { push_pixels(px, (size_t)W * rows); }
   void end_frame() { bus_.wait(); }
 
  private:

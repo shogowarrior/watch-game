@@ -46,6 +46,7 @@ class Bench {
   bool clock(uint32_t hz);
   void compose();
   void push(uint32_t hz);
+  void windows(uint32_t hz);
   void locked(uint32_t hz, const int* targets, int n);
   void imu();
   void pause() { h_.clock.delay_ms(20); }   // let the idle task run (task watchdog)
