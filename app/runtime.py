@@ -238,7 +238,8 @@ class Runtime:
         self._t_frame = now
         self._t_input = now
         self._t_batt = now
-        self._t_chip = now
+        # a start stopped by a bus error waits one poll period (_chip_start says why)
+        self._t_chip = ticks_add(now, CHIP_MS) if self._chip == CHIP_RETRY else now
         self._t_gc = now
         self._win_t = now
         self._motor_lvl = 0.0
@@ -454,8 +455,10 @@ class Runtime:
     def _chip_start(self):
         """Start the BMA423 feature engine without blocking (no blob: software
         steps only); ``_chip_poll`` finishes it (hal.bma423 start/poll_features).
-        A bus error mid-upload leaves INIT_CTRL unset, so the 1 s poll starts it
-        again, CHIP_TRIES starts in all (each one sends the 6 KB blob again)."""
+        A start stopped by a bus error is started again by the 1 s poll, one
+        period later, CHIP_TRIES starts in all: a lost ACK on INIT_CTRL=1 has
+        brought the engine up by then (no second upload), else the 6 KB blob
+        goes again."""
         start = getattr(self.imu, "start_features", None)   # absent on a bare FIFO imu
         if start is None:
             return

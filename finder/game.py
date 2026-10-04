@@ -901,17 +901,15 @@ class Game:
             self.mode = M_HUNT
             self.mode_t = t_ms
             self._still_since = None
-            if self._unstash():
-                self._update_arrow(t_ms, True)
+            self._unstash()
+            self._update_arrow(t_ms, True)    # new or back: hidden if SAVER ON starts this tick
 
     def _unstash(self):
-        """Put the arrow hidden by a scan back; True if there was one."""
+        """Put the arrow hidden by a scan back (unless it expired meanwhile)."""
         st = self._stash
         self._stash = None
-        if st is None or st.done:
-            return False
-        self.arrow = st
-        return True
+        if st is not None and not st.done:
+            self.arrow = st
 
     # LINK_LOST
     def _enter_lost(self, t_ms):

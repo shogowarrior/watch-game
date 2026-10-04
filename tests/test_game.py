@@ -5,6 +5,8 @@ a fake estimator whose distance the test sets; ``Two`` links two real games.
 Every RenderParams produced is checked with ``validate``.
 """
 
+import math
+
 from finder import proto
 from finder import tuning as T
 from finder.game import (Game, M_HUNT, M_SCANNING, M_FOUND, M_LINK_LOST, M_SEARCHING, M_PAIRING,
@@ -1625,6 +1627,39 @@ def test_an_arrow_back_from_a_scan_under_the_menu_or_saver_on_keeps_its_clock_pa
         r.run(5000)
         assert a.phase == A.PH_TURN, (hide, a.phase)
         assert _reveal_frames(r, t0) == n, (hide, _reveal_frames(r, t0), n)
+
+
+def _scan_to_a_fix(saver):
+    """A scan in NEAR that ends with a fix 150 deg right (own RSSI peaks there);
+    ``saver`` raises SAVER ON as the scan starts, so it waits for the scan.
+    Returns the rig and the arrow, on the tick the fix made it."""
+    r = paired_rig(d=20.0, battery=15)
+    r.state = SC_NEAR
+    r.run(1000)
+    g = r.g
+    g.on_gesture(r.t, 1, 120, 120)
+    if saver:
+        g.set_battery(r.t, 10)
+    while g.mode == M_SCANNING:
+        r.rssi = round(-60 + 6 * math.cos(math.radians(g.scan.wedge_deg - 150.0)))
+        r.run(100)
+    a = g.arrow
+    assert a is not None and a.t0 == r.t, (a, r.t)
+    return r, a
+
+
+def test_an_arrow_born_as_saver_on_starts_keeps_its_whole_reveal():
+    # SAVER ON starts on the tick the scan's fix makes the arrow: the reveal
+    # clock pauses from that tick on, so no reveal frame runs unseen
+    ref, a = _scan_to_a_fix(False)
+    ref.run(3000)
+    n = _reveal_frames(ref, a.t0 - 100)         # from the birth tick on
+    assert n == T.DIRECTION_REVEAL_MS // 100, n
+    r, a = _scan_to_a_fix(True)
+    assert r.p.word == "SAVER ON"
+    r.run(T.BATT_INTERSTITIAL_MS + 3000)
+    k = _reveal_frames(r, a.t0 - 100)
+    assert a.phase == A.PH_TURN and k == n, (a.phase, k, n)
 
 
 def test_an_arrow_relinked_under_the_menu_keeps_its_pacer_until_it_shows():
