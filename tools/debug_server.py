@@ -34,8 +34,9 @@ docs/design/debug-mode.md, "Contract between the parts". This server:
   each judgement as ``data: {"src": "bridge", "rx": <ms>, "knock": {...}}``,
   also printed in this terminal;
 - answers ``GET /debug/status`` with the counters, the watches heard so far,
-  the serial ports and the knock totals (the page asks it whether Real mode
-  is available);
+  the serial ports, the knock totals and the last knock judgements (the
+  page asks it whether Real mode is available, and fills its Knocks panel
+  from it when its stream opens);
 - appends every event line, exactly as sent on ``/events``, to
   ``logs/debug-YYYYmmdd-HHMMSS.jsonl`` (gitignored; created with the first
   record) unless ``--no-log``, so a session can be replayed later to calibrate
@@ -188,6 +189,14 @@ class Bridge:
         self._relay(json.dumps({"src": "bridge", "rx": rx, "knock": v}, separators=(",", ":")))
         self._news.append(say(v))
 
+    def tick(self, rx):
+        """Judges the spikes that are ready at ``rx`` while no record arrives
+        (a watch went silent): the UDP loop calls it on each timeout."""
+        with self._lock:
+            if not self.done.is_set():
+                for v in self.knocks.tick(rx):
+                    self._knock(v, rx)
+
     def news(self):
         """The knock sentences since the last call, for the terminal."""
         with self._lock:
@@ -267,7 +276,7 @@ class Bridge:
                     "log": None if self.log is None else _shown(self.log),
                     "watches": {k: dict(v) for k, v in self.watches.items()},
                     "serial": {k: dict(v) for k, v in self.serial.items()},
-                    "knocks": self.knocks.totals()}
+                    "knocks": {"totals": self.knocks.totals(), "recent": self.knocks.recent()}}
 
     def close(self):
         """Judges the spikes still waiting, then ends every /events stream
@@ -277,8 +286,7 @@ class Bridge:
             if not self.done.is_set():
                 for v in self.knocks.flush(rx):
                     self._knock(v, rx)
-        self.done.set()
-        with self._lock:
+            self.done.set()
             for q in self._clients:
                 try:
                     q.put_nowait(None)
@@ -584,6 +592,7 @@ class DebugServer:
             try:
                 data, addr = self.udp.recvfrom(RECV_MAX)
             except socket.timeout:
+                self.bridge.tick(now_ms())
                 continue
             except OSError:           # closed by stop(), or (Windows) longer than RECV_MAX
                 data, addr = None, ("", 0)
@@ -778,7 +787,7 @@ def main(argv=None):
     st = srv.bridge.status()
     print("Stopped. Heard %d record(s) from %d watch(es); %d could not be read." % (
         st["packets"], len(st["watches"]), st["bad"]))
-    for line in summary(st["knocks"]):
+    for line in summary(st["knocks"]["totals"]):
         print(line)
     if st["log"] is not None and st["packets"]:
         print("Session saved to %s" % st["log"])

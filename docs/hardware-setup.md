@@ -342,23 +342,27 @@ If a Wi-Fi watch does not show up:
 ### Bump tests: the Knocks panel
 
 The **Knocks** panel in the Real watches view lists the knocks, newest first,
-with what each watch made of its spike:
+with what each watch made of each knock it felt. Both watches need code from
+4 Oct 2026 or later (deploy both again first): older code does not say which
+knocks it heard, and the panel says so instead of guessing.
 
-- **Matched**: the other watch felt a knock within 0.4 s too (each watch
+- **Matched**: the other watch felt the same knock within 0.4 s (each watch
   learns the other's knock time by radio). A matched knock ends the round
-  only when both watches were in HOT. The matched counts at the top of the
-  panel should be the same on both watches; when they differ, the rows show
-  which knock one of them missed.
+  only when both watches were in HOT, and the sentence says whether they
+  were. The matched knocks at the top of the panel should be the same on
+  both watches; when they differ, one watch's knock time did not reach the
+  other by radio, and the rows show which knock.
 - **Set aside**: the watch was buzzing. Its own motor shakes the
-  accelerometer, so the game ignores spikes until 0.15 s after a buzz.
-- **Too far apart**: the other watch's knock came more than 0.4 s off.
-- **Not matched**: no knock from the other watch, and why: it felt one too
-  but was buzzing; its knock time never arrived by radio; it was not feeling
-  for knocks (it does only in HOT, in FOUND, and in PAIRING once the runes
-  show); its accelerometer passed the bump over (too soft, too long or too
-  short, or during its own buzz); or it felt nothing.
+  accelerometer, so the game ignores knocks until 0.15 s after a buzz.
+- **Too far apart**: the other watch felt a knock too, but 0.4 to 2 s away.
+- **Not matched**: no knock from the other watch, and why: its one knock
+  then went with this watch's other knock; it felt one too but was buzzing;
+  its knock time never arrived by radio; it was not feeling for knocks (it
+  does only in HOT, in FOUND, and in PAIRING once the runes show); its
+  accelerometer ignored the bump (too soft, too long or too soon after a
+  knock, or during its own buzz); or it felt nothing.
 
-Each watch's line also counts the bumps its accelerometer passed over. The
+Each watch's line also counts the bumps its accelerometer ignored. The
 bridge prints every knock in its terminal and saves it in the log, so a bump
 test can be read back later with `python3 tools/knocks.py
 logs/debug-....jsonl`.
@@ -380,8 +384,8 @@ USB port (the boot message, an error, the fps line) is saved too, as
 `{"src", "rx", "line": the text}`, and the bridge's judgement of each knock
 as `{"src": "bridge", "rx", "knock"}` (`python3 tools/knocks.py
 logs/debug-....jsonl` prints a saved session's knocks again). These sessions are real radio data to
-calibrate the estimators with later (`docs/estimation/bakeoff.md`). No tool
-replays them yet: a replay input for the bake-off is a planned next step
+calibrate the estimators with later (`docs/estimation/bakeoff.md`). Nothing
+replays the radio data yet: a replay input for the bake-off is a planned next step
 ([project/handoff.md](project/handoff.md)), and it will read the `rec` lines.
 Pass `--no-log` to save nothing.
 

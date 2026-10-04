@@ -69,10 +69,12 @@ def test_fake_watches_send_what_real_watches_send():
     out = []
     for r in recs:
         out += k.feed(r, 1_790_000_000_000 + r["t"])
-    v = [(x["dev"], x["v"]) for x in out]
-    assert v[:5] == [("A", "alone"), ("A", "apart"), ("B", "apart"), ("A", "matched"),
-                     ("B", "matched")], v
-    assert out[3]["row"] == out[4]["row"] and "Both were in HOT." in out[3]["why"]
+    v = sorted(out[:5], key=lambda x: x["at"])    # a match is judged sooner than the rest
+    assert [(x["dev"], x["v"]) for x in v] == [("A", "alone"), ("A", "apart"), ("B", "apart"),
+                                               ("A", "matched"), ("B", "matched")], out
+    assert v[0]["why"] == "No knock from B."                # its records carry no accelerometer counts
+    assert v[1]["row"] == v[2]["row"] != v[3]["row"] == v[4]["row"]
+    assert "Both were in HOT." in v[3]["why"]
 
 
 def test_fake_watches_over_serial_write_paced_lines():

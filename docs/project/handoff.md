@@ -53,8 +53,8 @@ in one message with the current default marked. Don't build on an assumption.
 
   It runs unchanged on CPython, on MicroPython 1.29 (WebAssembly) and in the
   web simulator.
-- **Tests:** `python3 tests/runner.py` gives 711 passed; `node tools/mpy/run.mjs
-  tests/runner.py` gives 691 passed. The held-out bake-off (seeds 100-129)
+- **Tests:** `python3 tests/runner.py` gives 745 passed; `node tools/mpy/run.mjs
+  tests/runner.py` gives 694 passed. The held-out bake-off (seeds 100-129)
   still ranks kalman2 first, at 0.660.
 - **Review:** four whole-repo review rounds ran on 2026-10-02/03. Every finding
   was verified by an independent skeptic before it was fixed. Confirmed

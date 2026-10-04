@@ -245,7 +245,7 @@ dl.rtele dd { white-space: normal; overflow-wrap: anywhere; }
           <h2>Knocks</h2>
           <span class="kagree" id="kagree" role="status"></span>
         </div>
-        <p class="note" id="knocks-lead">No knocks yet. Knock the watches together, screen to screen, when both show HOT (or once the runes show in PAIRING). Each knock shows up here: whether the other watch felt it within 0.4 s too, which is what makes it count, and if not, why.</p>
+        <p class="note" id="knocks-lead">No knocks yet. Knock the watches together, screen to screen, when both show HOT (or once the runes show in PAIRING). Each knock shows up here: whether the other watch felt it within 0.4 s too, and if not, why. A matched knock ends the round when both watches were in HOT.</p>
         <ul class="ktot" id="ktot"></ul>
         <ol class="krows" id="krows" aria-label="The last 10 knocks, newest first"></ol>
       </div>
@@ -637,7 +637,7 @@ function fmtClock(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 6
 // tools/debug_server.py serves this page and relays the watches' records, read from their USB
 // serial ports or UDP datagrams, as Server-Sent Events on ./events: {src, rx, rec}, src being the
 // port's name or the sender's IP address; a line a watch printed on its USB port comes as
-// {src, rx, line}; the bridge's judgement of a bump spike (tools/knocks.py) as {src: "bridge", rx, knock}.
+// {src, rx, line}; the bridge's judgement of a knock (tools/knocks.py) as {src: "bridge", rx, knock}.
 // An "rp" record carries the RenderParams the watch drew (SIM.show_params draws
 // them with the same renderer; over USB about once a second, and the renderer keeps animating
 // them in between), an "s" record its 5 Hz readings. The mode is offered only when
@@ -720,7 +720,7 @@ function openStream() {
   if (es) return;
   everOpen = false;
   es = new EventSource('./events');
-  es.onopen = () => { everOpen = true; knockTotals(); };
+  es.onopen = () => { everOpen = true; knocks.n = {}; knocks.rows = []; knocks.dirty = true; knocksSoFar(); };   // the bridge may have restarted
   es.onmessage = (e) => {
     let msg = null;
     try { msg = JSON.parse(e.data); } catch (_) { return; }
@@ -729,26 +729,32 @@ function openStream() {
     else if (msg && msg.knock && typeof msg.knock === 'object') onKnock(msg);
   };
 }
-async function knockTotals() {                         // the counts so far, for a page opened mid-session
+async function knocksSoFar() {                         // the bridge's totals and last knocks, for a stream that just opened
   try {
     const r = await fetch('./debug/status', { cache: 'no-store' }), j = r.ok ? await r.json() : null;
-    const n = j && j.knocks;
-    if (n && typeof n === 'object') for (const d of ['A', 'B']) if (n[d] && !knocks.n[d]) { knocks.n[d] = n[d]; knocks.dirty = true; }
+    const n = j && j.knocks && j.knocks.totals, recent = j && j.knocks && j.knocks.recent;
+    if (Array.isArray(recent)) recent.forEach((k) => { if (k && typeof k === 'object') addKnock(k); });
+    if (n && typeof n === 'object') for (const d of ['A', 'B']) {                // a knock line may have come first
+      if (n[d] && typeof n[d] === 'object' && (num(n[d].felt) || 0) >= (knocks.n[d] ? num(knocks.n[d].felt) || 0 : 0)) knocks.n[d] = n[d];
+    }
+    knocks.dirty = true;
   } catch (_) {}
 }
 function onKnock(msg) {
-  const k = msg.knock, d = k.dev;
-  logLine(msg.src, k);
+  logLine(msg.src, msg.knock);
+  addKnock(msg.knock);
+}
+function addKnock(k) {                                 // one judgement into the totals and its row
+  const d = k.dev;
   if (d !== 'A' && d !== 'B' || !Object.hasOwn(KNOCK_LABEL, k.v)) return;
-  if (k.n && typeof k.n === 'object') knocks.n[d] = k.n;
+  if (k.n && typeof k.n === 'object' && (num(k.n.felt) || 0) >= (knocks.n[d] ? num(knocks.n[d].felt) || 0 : 0)) knocks.n[d] = k.n;
   let r = knocks.rows.find((x) => x.row === k.row);
-  if (!r) {
-    r = { row: k.row, at: num(k.at), A: null, B: null };
-    knocks.rows.push(r);
-    knocks.rows.sort((x, y) => y.row - x.row);
-    knocks.rows.length = Math.min(knocks.rows.length, KNOCK_N);
-  }
+  if (!r) knocks.rows.push(r = { row: k.row, at: null, A: null, B: null });
   r[d] = k;
+  const at = num(k.at);                                // the row's time: its earlier knock (a match is judged sooner than the rest)
+  if (at != null && (r.at == null || at < r.at)) r.at = at;
+  knocks.rows.sort((x, y) => (y.at == null ? -Infinity : y.at) - (x.at == null ? -Infinity : x.at) || y.row - x.row);
+  knocks.rows.length = Math.min(knocks.rows.length, KNOCK_N);
   knocks.dirty = true;
 }
 // When the bridge received the record (rx: this computer's clock, ms since 1970), on this page's
@@ -908,17 +914,17 @@ function realTick() {
     if (atEnd) pre.scrollTop = pre.scrollHeight;
   }
 }
-// ---------- knocks: the bridge's judgement of each bump spike (tools/knocks.py) ----------
+// ---------- knocks: the bridge's judgement of each knock a watch felt (tools/knocks.py) ----------
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 function knockTotalsText(d, n) {
   const c = (k) => (num(n[k]) == null ? 0 : n[k]);
-  let t = `Watch ${d} felt ${plural(c('felt'), 'spike', 'spikes')}: ${c('matched')} matched, ${c('apart')} too far apart from the other watch's, ${c('alone')} with no knock from the other watch, ${c('buzz')} set aside while it buzzed.`;
+  let t = `Watch ${d} felt ${plural(c('felt'), 'knock', 'knocks')}: ${c('matched')} matched, ${c('apart')} too far apart from the other watch's, ${c('alone')} with no knock from the other watch, ${c('buzz')} set aside while it buzzed.`;
   const k = Array.isArray(n.spk) ? n.spk.map((v) => num(v) || 0) : [0, 0, 0, 0];
-  if (k[1] || k[2] || k[3]) t += ` Its accelerometer also passed over ${plural(k[1], 'soft bump', 'soft bumps')}, ${k[2]} too long or too short, and ${k[3]} during its own buzz.`;
+  if (k[1] || k[2] || k[3]) t += ` Its accelerometer also ignored ${plural(k[1], 'bump', 'bumps')} too soft to count, ${k[2]} that lasted too long or came too soon after a knock, and ${k[3]} during its own buzz.`;
   return t;
 }
 function knockCell(d, k) {
-  if (!k) return `<div class="kc"><b>${d}</b> no spike</div>`;
+  if (!k) return `<div class="kc"><b>${d}</b> nothing for this knock</div>`;
   const cls = k.v === 'matched' ? 'good' : 'warnc';
   return `<div class="kc"><b>${d}</b> <span class="${cls}">${KNOCK_LABEL[k.v]}</span>. ${esc(String(k.why || ''))}</div>`;
 }
@@ -930,8 +936,8 @@ function renderKnocks() {
   if (has.length === 2) {
     const same = m('A') === m('B');
     ag.className = 'kagree ' + (same ? 'good' : 'warnc');
-    setText('kagree', same ? `Matched on both watches: ${m('A')}` : `Matched: watch A counts ${m('A')}, watch B ${m('B')}`);
-  } else { ag.className = 'kagree'; setText('kagree', has.length ? `Matched on watch ${has[0]}: ${m(has[0])}` : ''); }
+    setText('kagree', same ? `Matched knocks: ${m('A')} on each watch` : `Matched knocks: ${m('A')} on watch A, ${m('B')} on watch B`);
+  } else { ag.className = 'kagree'; setText('kagree', has.length ? `Matched knocks: ${m(has[0])} on watch ${has[0]}` : ''); }
   $('knocks-lead').hidden = knocks.rows.length > 0 || has.some((d) => num(n[d].felt) > 0);
   $('ktot').innerHTML = has.map((d) => `<li><span class="swatch" style="background: var(--${d.toLowerCase()})"></span><span>${esc(knockTotalsText(d, n[d]))}</span></li>`).join('');
   const p2 = (v) => String(v).padStart(2, '0');
