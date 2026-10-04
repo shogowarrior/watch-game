@@ -377,8 +377,9 @@ class TwoWatchSim:
     def set_posture(self, i, posture):
         """What the accelerometer sees: 'flat' (face up, 5 deg), 'tilted' (50 deg: past the
         30 deg face-up limit of finder.motion and the scan's 35 deg tilt fault, so a sweep
-        pauses, ``ready`` cancels after 2 s and otherwise the screen turns off after 2 s, as on
-        the watch) or 'down' (wrist lowered: the screen turns off after 2 s)."""
+        pauses and ``ready`` cancels after 2 s, but short of the 60 deg wrist-down tilt, so
+        the screen stays on, as on the watch) or 'down' (wrist lowered: the screen turns
+        off after 10 s; the simulated watches run on battery)."""
         if posture == "flat":
             self.tilt[i], self.face_up[i] = TILT_FLAT, True
         elif posture == "tilted":
@@ -404,8 +405,8 @@ class TwoWatchSim:
         self._gesture(i, G_SWIPE_U if up else G_SWIPE_D)
 
     def _gesture(self, i, code, x=120, y=120):
-        """A finger lands (``Game.on_touch_down``: bump guard, rain/sleeve
-        burst filter), then its gesture ends, as on the watch."""
+        """A finger lands (``Game.on_touch_down``: rain/sleeve burst filter),
+        then its gesture ends, as on the watch."""
         g = self.games[i]
         g.on_touch_down(self.t_ms)
         g.on_gesture(self.t_ms, code, x, y)

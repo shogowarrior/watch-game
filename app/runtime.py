@@ -10,21 +10,21 @@ One ``step(now)`` does, in order:
 
   radio   drain ESP-NOW -> LinkMonitor (partner lock = ``game.pair.peer_mac``,
           seq dedup) -> valid beacons -> ``game.on_packet``
-  touch   FT6336 -> GestureRecognizer (multi-touch ignored, §8). Also sampled
-          after a strip once TOUCH_GAP_MS (15) have passed, so a 60 ms tap
-          measures right while a frame renders; what those samples find
-          waits for this stage (the game changes only between frames):
-          ``game.on_gesture``, and
-          ``game.on_touch_down`` when a finger lands (bump guard, ui-spec §6;
-          before the imu stage, so the finger's own spike is guarded), in
-          time order: a press lands before its gesture; on one sample the
-          gesture goes first (it ended the previous press)
   imu     BMA423 FIFO -> MotionTracker (25 Hz, g) + bump spikes -> ``on_accel_tap``
           (the FIFO runs fast only while ``game.bump_armed()``, set each tick);
           once a second the feature engine (if ``bma423conf.bin`` loaded):
           chip steps/activity -> tracker, wrist-wear -> ``game.on_wake`` (only
           when the screen is off: polled up to 1 s late, face_up has usually
-          woken it, and a second wake would drop taps for 300 ms)
+          woken it, and a second wake would drop taps for 300 ms). Before the
+          touch stage, so a knock's spike is known when its touch's gesture
+          arrives (screen-to-screen knocks touch the panel, ui-spec §8)
+  touch   FT6336 -> GestureRecognizer (multi-touch ignored, §8). Also sampled
+          after a strip once TOUCH_GAP_MS (15) have passed, so a 60 ms tap
+          measures right while a frame renders; what those samples find
+          waits for this stage (the game changes only between frames):
+          ``game.on_gesture``, and ``game.on_touch_down`` when a finger lands
+          (rain filter), in time order: a press lands before its gesture; on
+          one sample the gesture goes first (it ended the previous press)
   button  AXP202 PEK -> ``game.on_button`` (short / long; wakes when off)
   logic   every 100 ms: tracker + battery (every 10 s) -> ``game.tick``
           -> RenderParams; screen power; AXP202 shutdown only once
@@ -358,12 +358,12 @@ class Runtime:
         if self.radio is not None:
             self._stage_radio(now)
             a = self._acc(S_RADIO, a)
-        if self.touch is not None:
-            self._stage_touch(now)
-            a = self._acc(S_TOUCH, a)
         if self.feed is not None:
             self._stage_imu(now)
             a = self._acc(S_IMU, a)
+        if self.touch is not None:
+            self._stage_touch(now)
+            a = self._acc(S_TOUCH, a)
         if self.pmu is not None:
             self._stage_button(now)
             a = self._acc(S_BUTTON, a)
@@ -519,7 +519,7 @@ class Runtime:
         td = self._td_t                     # in time order; on one sample the gesture
         self._td_t = None                   # first (it ended the press before that finger)
         if td is not None and (not code or ticks_diff(self._g_t, td) > 0):
-            self.game.on_touch_down(td)     # a finger landed: its own spike is no bump
+            self.game.on_touch_down(td)     # a finger landed (rain filter)
             td = None
         if code:
             self._g_code = 0
@@ -597,6 +597,7 @@ class Runtime:
             self.wd = self._make_watchdog(usb=False)
         if usb and pct is not None and pct <= T.BATT_SHUTDOWN_PCT:
             pct = T.BATT_SHUTDOWN_PCT + 1     # on USB: never an automatic power-off
+        self.game.set_usb(now, usb)           # on USB: the screen stays on (§8)
         b = self.game.battery
         if pct is not None and pct <= T.BATT_WARN_PCT and (b is None or pct < b):
             self._low_n += 1                  # a drop on the LOW-BATTERY ladder: confirm it

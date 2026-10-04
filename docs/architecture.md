@@ -98,32 +98,34 @@ stages in order:
    `game.on_packet(t_rx, mac, rssi, beacon)`. The game updates the partner view,
    feeds pairing/calibration, calls `est.update(t, rssi, peer_rssi, my_motion,
    peer_motion)` and, while scanning, `scan.on_packet` with the raw RSSI.
-2. **touch**: `FT6336.read()` -> `GestureRecognizer` (multi-touch ignored).
-   Touch is also sampled after a strip, at least 15 ms apart, while a frame
-   renders (so a 60 ms tap measures right); what those samples find waits
-   for this stage: `game.on_touch_down` when a finger landed
-   (`GestureRecognizer.began`) and `game.on_gesture`, in time order: a press
-   lands before its gesture; when a gesture ends on the sample where a new
-   finger lands, the gesture goes first. It runs before imu, so the finger's
-   own spike is guarded.
-3. **imu**: `ImuFeed.poll` drains the BMA423 FIFO, averages each block of
+2. **imu**: `ImuFeed.poll` drains the BMA423 FIFO, averages each block of
    samples into one 25 Hz sample for `MotionTracker.add_sample` (steps,
    activity, stillness, tilt, face-up) and, while `game.bump_armed()` (HOT,
-   PAIRING seen / confirmed; the logic stage sets it each tick), samples at
+   FOUND, PAIRING seen / confirmed; the logic stage sets it each tick), samples at
    800 Hz and runs the bump spike detector on every sample
    (-> `game.on_accel_tap`). The FIFO decode and the per-sample loop
    (gravity, spike runs, block sums) are integer kernels compiled with
    `@micropython.viper` on the watch, after a self-check against their plain
    Python versions, which are what CPython, the wasm port and the browser
-   run. Spikes inside haptic
-   blanking (the motor shakes the accelerometer, so samples from the start of a
-   buzz until 150 ms after it are ignored). There are two blanking windows:
+   run. Spikes inside haptic blanking are dropped (the motor shakes the
+   accelerometer, so samples from the start of a buzz until 150 ms after it
+   are ignored; HOT has no heartbeat for this reason). There are two blanking windows:
    ImuFeed's own, from the actual motor edges (`ImuFeed.blanked`, which the
    game also gets as `blank_fn`), and Game's `BlankWindow`, set for each haptic
    event it raises (also the only one in the simulator, which has no feed).
    `Game.blanked` ORs them and the scan uses it, so a tap must clear both. Once
    a second the optional feature engine adds chip steps and activity, and
    wrist-wear -> `game.on_wake` (only while the screen is off).
+3. **touch**: `FT6336.read()` -> `GestureRecognizer` (multi-touch ignored).
+   Touch is also sampled after a strip, at least 15 ms apart, while a frame
+   renders (so a 60 ms tap measures right); what those samples find waits
+   for this stage: `game.on_touch_down` when a finger landed
+   (`GestureRecognizer.began`; the rain filter) and `game.on_gesture`, in
+   time order: a press lands before its gesture; when a gesture ends on the
+   sample where a new finger lands, the gesture goes first. It runs after
+   imu: players knock the watches screen to screen, so a knock's spike is
+   known when its touch's gesture arrives, and the game drops that gesture
+   (ui-spec §8).
 4. **button**: `AXP202.poll()` -> `game.on_button(t, long)`.
 5. **logic** (every 100 ms): `game.set_tracker`, battery every 10 s, then
    `game.tick(t)`. Inside `tick`: the delivery meter (the share of the partner's
@@ -132,9 +134,11 @@ stages in order:
    gated trend (WARMER/COLDER, shown only once the change is clearly bigger
    than the noise); the active mode runs (`pairing`, hunt with `arrow`, `scan`,
    link-lost, found, menu); FOUND is checked from the bump match; the result is
-   one `RenderParams`. The runtime then applies screen power (the panel wakes
-   dark; the backlight follows `params.backlight` after each rendered frame),
-   and shuts the PMU down only once `game.power_off`.
+   one `RenderParams`. The battery reading also tells the game whether VBUS
+   is present (`game.set_usb`: on USB the screen stays on). The runtime then
+   applies screen power (the panel wakes dark; the backlight follows
+   `params.backlight` after each rendered frame), and shuts the PMU down only
+   once `game.power_off`.
 6. **render** (at `params.fps_cap`): `Renderer.frame(params, display, now)`
    composes each 240x24 strip off-screen (a map of each pixel's ring number,
    coloured through a 256-entry palette of byte-swapped RGB565, then glyph and

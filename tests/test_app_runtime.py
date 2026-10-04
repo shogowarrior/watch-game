@@ -14,6 +14,7 @@ used there.
 from array import array
 
 from tests import fakes
+from finder.tuning import WRIST_DOWN_MS
 
 MAC_A = b"\x24\x0a\xc4\x10\x00\x0a"
 MAC_B = b"\x24\x0a\xc4\x10\x00\x0b"
@@ -333,7 +334,18 @@ def test_two_watches_one_minute():
     assert not any(b.motor._pwm.history[off_idx:]), b.motor._pwm.history[off_idx:]
     assert b.motor.duty_u16 == 0
     assert a.game.buzz == BUZZ_FULL
-    assert any(a.motor._pwm.history[a_idx:])     # A (FULL) kept buzzing
+    # A (FULL) still buzzes, B (OFF) does not; HOT has no heartbeat, so an event
+    # (a held one plays on the next tick)
+    assert a.game.px.zone == 3 and b.game.px.zone == 3
+    a_idx = len(a.motor._pwm.history)
+    for rt in rts:
+        rt.game._held = "NOPE"
+    end = clock.now + 1500
+    while clock.now < end:
+        w = min(rt.step(clock.now) for rt in rts)
+        clock.sleep(w if w > 0 else 1)
+    assert any(a.motor._pwm.history[a_idx:])
+    assert not any(b.motor._pwm.history[off_idx:])
     assert not b.game.menu_open
     for rt in rts:
         assert not rt.pmu.off and not rt.powered_off
@@ -363,9 +375,9 @@ def test_missing_parts_and_screen_off():
     # face down (z = -1 g) for > WRIST_DOWN_MS: display sleeps, frames stop
     imu.spikes.append((clock.now, 100000, -2000))
     n0 = d.pushes
-    rt.run(max_ms=4000)
+    rt.run(max_ms=WRIST_DOWN_MS + 2000)
     assert d.asleep and not rt.screen_is_on and rt.bl_level == 0.0
-    assert d.pushes < n0 + 10 * 20 * 3
+    assert d.pushes < n0 + 10 * 20 * (WRIST_DOWN_MS // 1000 + 1)
     n1 = d.pushes
     rt.run(max_ms=1000)
     assert d.pushes == n1
@@ -992,7 +1004,7 @@ def test_no_renderer_wake_restores_backlight():
     rt.begin(0)
     rt.renderer = None                     # MicroPython: begin() built a Renderer
     imu.spikes.append((1000, 100000, -2000))   # face down: the screen goes off
-    rt.run(max_ms=5000)
+    rt.run(max_ms=WRIST_DOWN_MS + 2000)
     assert d.asleep and not rt.screen_is_on
     rt.game.on_wake(clock.now)
     rt.run(max_ms=500)
@@ -1040,7 +1052,7 @@ def test_wake_lights_a_fresh_frame_and_keeps_motor_timing():
                  clock=clock, sleep_ms=clock.sleep, renderer=_renderer(), gc_collect=lambda: None)
     rt.run(max_ms=1000)
     imu.spikes.append((clock.now, 100000, -2000))    # face down: the screen goes off
-    rt.run(max_ms=4000)
+    rt.run(max_ms=WRIST_DOWN_MS + 2000)
     assert d.asleep and not rt.screen_is_on
     del d.log[:]
     del m.log[:]
@@ -1093,27 +1105,37 @@ def test_watchdog_turns_hardware_once_unplugged():
     assert rt.wd.mode == MODE_HW                     # cannot be stopped: still armed
 
 
-def test_touch_down_spike_is_not_a_bump():
-    """ui-spec §6/§8: the accelerometer spike of the finger itself is no bump
-    tap, whether it reaches the game just before or after the touch-down."""
+def _inputs(rt):
+    """Times of the gestures the game took (``game._input`` calls)."""
+    out = []
+    inp = rt.game._input
+    rt.game._input = lambda t: (out.append(t), inp(t))
+    return out
+
+
+def test_a_knock_counts_and_its_touch_does_nothing():
+    """ui-spec §6/§8: players knock screen to screen, so a knock touches the
+    panel. Its spike counts whether it reaches the game before or after the
+    touch-down, and the touch is no gesture; a touch apart from any spike is."""
     fakes.install()
     from hal.radio import SimRadio
     from app.telemetry import Telemetry
     import json
     clock = Clock(0)
     rt = _watch(clock, SimRadio(MAC_A).begin(),
-                imu_spikes=((4990, 2, 3000), (5250, 2, 3000), (7000, 2, 3000)),
-                touches=((5050, 5350, 120, 120), (8000, 8100, 120, 120)))
+                imu_spikes=((4990, 2, 3000), (7000, 2, 3000)),
+                touches=((5050, 5350, 120, 120), (6980, 7080, 120, 120),
+                         (9000, 9100, 120, 120)))
     rt.tele = Telemetry(cap=200, hz=0)
     _arm(rt)
-    _run(rt, clock, 6000)
+    took = _inputs(rt)
+    _run(rt, clock, 10000)
     ev = [json.loads(s) for s in rt.tele.lines()]
     taps = [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"]
-    assert taps == [(4990, True), (5250, False)], taps   # 4990: before the finger was seen
-    assert rt.game.bump_t is None                    # ... dropped at touch-down
-    assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"]
-    _run(rt, clock, 1500)
-    assert rt.game.bump_t == 7000                    # a real knock still counts
+    assert taps == [(4990, True), (7000, True)], taps
+    assert rt.game.bump_t == 7000
+    assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"] * 3
+    assert len(took) == 1 and took[0] >= 9100, took
     rt.board.touch.contacts = 2                      # two fingers: ignored (§8)
     n = rt.tele.n
     _run(rt, clock, 1000)
@@ -1163,9 +1185,10 @@ def test_short_taps_count_while_frames_render():
     assert len(reads) <= 26000 // 12, len(reads)   # not after every 2nd 4 ms strip
 
 
-def test_finger_spike_after_a_mid_frame_touch_down():
-    """A touch-down sampled between strips reaches the game before the next
-    FIFO read, so the finger's spike just after it is no bump (§6)."""
+def test_knock_spike_after_a_mid_frame_touch_down():
+    """A touch-down sampled between strips, then the knock's spike: the spike
+    counts, and the imu stage runs before the touch stage, so the gesture
+    finds it and is dropped (§8)."""
     fakes.install()
     from hal.radio import SimRadio
     from app.telemetry import Telemetry
@@ -1176,16 +1199,20 @@ def test_finger_spike_after_a_mid_frame_touch_down():
     rt.board.display = SlowDisplay(clock)
     rt.tele = Telemetry(cap=200, hz=0)
     _arm(rt)
+    took = _inputs(rt)
     _run(rt, clock, 6000)
     ev = [json.loads(s) for s in rt.tele.lines()]
-    assert [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"] == [(5030, False)], ev
-    assert rt.game.bump_t is None
+    assert [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"] == [(5030, True)], ev
+    assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"], ev
+    assert rt.game.bump_t == 5030 and not took, took
 
 
-def _bump_in_hot(t0, finger):
+def _bump_in_hot(t0, finger, knocks=()):
     """Two Runtimes on connected SimRadios, paired and both in HOT; both
-    accelerometers spike at ``t0`` and, with ``finger``, A's screen is tapped
-    then (touch-down 70 ms after the spike). Runs to ``t0`` + 1.2 s."""
+    accelerometers spike at ``t0`` and, with ``finger``, A's screen is touched
+    by the knock (touch-down 70 ms after the spike). Each time in ``knocks``
+    is one more knock on both, touching A's screen too. Runs to the last
+    knock + 1.2 s."""
     fakes.install()
     from hal.radio import SimRadio
     from hal.axp202 import EV_SHORT
@@ -1195,16 +1222,20 @@ def _bump_in_hot(t0, finger):
     ra = SimRadio(MAC_A, seed=11).begin()
     rb = SimRadio(MAC_B, seed=22).begin()
     ra.connect(rb, rssi=-50)
-    a = _watch(clock, ra, imu_spikes=((t0, 2, 3000),), buttons=((1000, EV_SHORT),),
-               touches=((t0 + 70, t0 + 160, 120, 120),) if finger else ())
-    b = _watch(clock, rb, imu_spikes=((t0, 2, 3000),), buttons=((1100, EV_SHORT),))
+    spikes = tuple((t, 2, 3000) for t in (t0,) + tuple(knocks))
+    touches = tuple((t + 20, t + 110, 120, 120) for t in knocks)
+    if finger:
+        touches = ((t0 + 70, t0 + 160, 120, 120),) + touches
+    a = _watch(clock, ra, imu_spikes=spikes, buttons=((1000, EV_SHORT),), touches=touches)
+    b = _watch(clock, rb, imu_spikes=spikes, buttons=((1100, EV_SHORT),))
     rts = (a, b)
     for rt in rts:
         rt.begin(0)
         rt.game.pair.split_s = 1           # short split countdown
         rt.game.buzz = BUZZ_OFF            # no motor pulse can blank a spike
     hot = False
-    while clock.now < t0 + 1200:
+    end = (knocks[-1] if knocks else t0) + 1200
+    while clock.now < end:
         if not hot and clock.now >= t0 - 50:
             hot = True
             for rt in rts:
@@ -1215,20 +1246,23 @@ def _bump_in_hot(t0, finger):
             if d < w:
                 w = d
         clock.sleep(w if w > 0 else 1)
-    assert a.feed.n_taps == 1 and b.feed.n_taps == 1, (a.feed.n_taps, b.feed.n_taps)
+    n = 1 + len(knocks)
+    assert a.feed.n_taps == n and b.feed.n_taps == n, (a.feed.n_taps, b.feed.n_taps)
     return a.game, b.game
 
 
-def test_withdrawn_finger_spike_never_reaches_the_partner():
-    """ui-spec §6, rule 10: a spike withdrawn by a touch-down that follows it
-    was never a bump, on either watch. It is neither matched nor sent in
-    beacons until it is 100 ms old, so the partner's own knock 0 ms apart
-    finds nothing to match; without the finger, both watches enter FOUND."""
+def test_a_knock_that_touches_the_screen_is_found_on_both():
+    """ui-spec §6, rule 10: screen-to-screen knocks touch the panel; the touch
+    never withdraws the spike, so both watches enter FOUND, finger or not.
+    Knocks that go on after FOUND (on TAP=AGAIN) start no new round (§8)."""
     from finder.game import M_FOUND
+    from finder import tuning as T
     ga, gb = _bump_in_hot(7960, finger=True)
-    assert ga.mode != M_FOUND and gb.mode != M_FOUND, (ga.mode, gb.mode)
-    assert ga.bump_t is None and gb.peer.tap_t is None, (ga.bump_t, gb.peer.tap_t)
+    assert ga.mode == M_FOUND and gb.mode == M_FOUND, (ga.mode, gb.mode)
     ga, gb = _bump_in_hot(7960, finger=False)
+    assert ga.mode == M_FOUND and gb.mode == M_FOUND, (ga.mode, gb.mode)
+    k = 7960 + T.FOUND_CELEBRATE_MS
+    ga, gb = _bump_in_hot(7960, finger=True, knocks=(k + 300, k + 900))
     assert ga.mode == M_FOUND and gb.mode == M_FOUND, (ga.mode, gb.mode)
 
 
@@ -1278,8 +1312,9 @@ def test_touch_that_lands_in_the_wake_window_is_ignored():
     fakes.install()
     from hal.radio import SimRadio
     clock = Clock(0)
-    rt = _watch(clock, SimRadio(MAC_A).begin(), imu_spikes=((1000, 400, -2000),))
-    _run(rt, clock, 4500)                  # face down 1-5 s: the screen goes off
+    down = WRIST_DOWN_MS + 1000
+    rt = _watch(clock, SimRadio(MAC_A).begin(), imu_spikes=((1000, down // 10, -2000),))
+    _run(rt, clock, down + 500)            # face down 1 s on: the screen goes off
     g = rt.game
     assert not g.screen_on
     while not g.screen_on:                 # face up: wake
@@ -1512,7 +1547,7 @@ def test_bma423_feature_engine_started_and_polled():
     g.on_wake = on_wake
     dev.regs[0x1E] = 10
     dev.regs[0x27] = 1                     # walking
-    rt.run(max_ms=2500)                    # no FIFO samples: face down, dark after 2 s
+    rt.run(max_ms=WRIST_DOWN_MS + 500)     # no FIFO samples (no tilt), not face-up: dark
     assert rt.feed.tracker.chip_live and not woke and not g.screen_on
     dev.regs[0x1E] = 30
     dev.regs[0x1C] = 0x08                  # wrist-wear latched

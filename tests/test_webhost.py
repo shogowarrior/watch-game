@@ -448,7 +448,7 @@ def test_dark_screen_draws_nothing_and_a_tap_wakes_it():
     s = TwoWatchSim()
     assert _run_until(s, _hunting, 30000)
     s.set_posture(0, "down")
-    assert _run_until(s, lambda s: not s.games[0].screen_on, 5000)   # wrist down -> screen off
+    assert _run_until(s, lambda s: not s.games[0].screen_on, 12000)  # wrist down -> screen off
     if MPY:
         s.step(100)
         n = list(s.frames)
@@ -464,8 +464,10 @@ def test_dark_screen_draws_nothing_and_a_tap_wakes_it():
         n0 = s.frames[0]
         assert _run_until(s, lambda s: s.frames[0] > n0, 500)          # the next frame snaps, no intro
         assert not s.renderers[0]._dark
-    s.set_posture(0, "tilted")                    # 50 deg is not face-up either: off after 2 s
-    assert _run_until(s, lambda s: not s.games[0].screen_on, 5000)
+    s.set_posture(0, "tilted")                    # 50 deg: not face-up, not lowered (§8): stays on
+    assert not _run_until(s, lambda s: not s.games[0].screen_on, 12000)
+    s.set_posture(0, "down")
+    assert _run_until(s, lambda s: not s.games[0].screen_on, 12000)
     try:
         s.set_posture(0, "sideways")
         assert False

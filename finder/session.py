@@ -96,8 +96,9 @@ class MotionSnap:
         self.face_up = face_up
 
     def from_tracker(self, t_ms, mt):
-        """Copy a ``finder.motion.MotionTracker``."""
-        self.set(t_ms, mt.activity, mt.steps, mt.step_rate_hz, mt.tilt_deg, mt.face_up)
+        """Copy a ``finder.motion.MotionTracker`` (no tilt before its first sample)."""
+        self.set(t_ms, mt.activity, mt.steps, mt.step_rate_hz,
+                 mt.tilt_deg if mt.has_gravity else None, mt.face_up)
 
 
 class PeerView:

@@ -55,7 +55,7 @@ _hunt = {
     2: dict(screen="WARM", zone=2, intensity=0.55, speed_px_s=80, pulse_period_ms=1000,
             wavelength_px=80, glow_r_px=42, heartbeat="DOUBLE"),
     3: dict(screen="HOT", zone=3, intensity=0.85, speed_px_s=120, pulse_period_ms=500,
-            wavelength_px=60, glow_r_px=54, heartbeat="TICK"),
+            wavelength_px=60, glow_r_px=54, heartbeat=None),
 }
 
 

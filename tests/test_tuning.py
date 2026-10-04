@@ -128,9 +128,8 @@ def test_zone_tempo_matches_spec_table():
     for z in range(4):
         wl = T.ZONE_SPEED_PX_S[z] * T.ZONE_PERIOD_MS[z] / 1000.0
         assert abs(wl - spec_wl[z]) <= 1.0
-        assert T.ZONE_HEARTBEAT[z] in T.HAPTIC_PATTERNS
     assert T.ZONE_HB_EVERY == (2, 1, 1, 1)
-    assert T.ZONE_HEARTBEAT[2] == "DOUBLE"
+    assert T.ZONE_HEARTBEAT == ("TICK", "TICK", "DOUBLE", None)   # HOT: knocks (§6)
     assert T.ZONE_PERIOD_MS == (2400, 1600, 1000, 500)
     assert T.ZONE_SPEED_PX_S == (40.0, 56.0, 80.0, 120.0)
     assert T.ZONE_LEAD_PX == (3, 3, 3, 3) and T.ZONE_TRAIL_PX == (22, 20, 18, 14)

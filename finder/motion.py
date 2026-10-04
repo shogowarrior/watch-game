@@ -101,6 +101,12 @@ class MotionTracker:
         return tilt_from_gravity(self.gx, self.gy, self.gz, self.z_sign)
 
     @property
+    def has_gravity(self):
+        """True once a sample has set the gravity estimate (before it, tilt_deg
+        reads the initial face-up guess)."""
+        return self._t is not None
+
+    @property
     def roll_deg(self):
         return math.atan2(self.gy, self.gz * self.z_sign) * _R2D
 

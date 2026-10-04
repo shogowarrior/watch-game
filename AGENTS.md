@@ -24,7 +24,7 @@ watches.** Every threshold is a starting value to calibrate.
 |---|---|
 | `boot.py` | Minimal: silences IDF logs. No Wi-Fi, no webrepl, no app code. |
 | `main.py` | Safe-boot check (`/noapp` or side-key double press / hold), `Board().init()`, then `app.run(board, watchdog_ms=8000)`. |
-| `app/runtime.py` | The watch main loop `Runtime.step(now)`: radio, touch, imu, button, logic (10 Hz), render, tx, haptic, gc. |
+| `app/runtime.py` | The watch main loop `Runtime.step(now)`: radio, imu, touch, button, logic (10 Hz), render, tx, haptic, gc. |
 | `app/imu_feed.py` | BMA423 FIFO (100 Hz mg) -> `MotionTracker` at 25 Hz in g, plus the bump spike detector. |
 | `app/telemetry.py` | JSONL telemetry for field tests (`session()`; main.py turns it on when `/tele` exists). |
 | `hal/` | The only code that touches hardware. See `hal/README.md` (drivers, gotchas, bench tools). |

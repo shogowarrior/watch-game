@@ -264,13 +264,13 @@ Tempo is fixed per zone, so the eye and the wrist agree. It changes only for rin
 | FAR (0) | 2400 | 40 | 96 | 3 / 22 | ~1.5 | `TICK` every 2nd ring (4.8 s) |
 | NEAR (1) | 1600 | 56 | 90 | 3 / 20 | ~1.7 | `TICK` every ring (1.6 s) |
 | WARM (2) | 1000 | 80 | 80 | 3 / 18 | ~1.9 | `DOUBLE` every ring (1.0 s) |
-| HOT (3) | 500 | 120 | 60 | 3 (eff. 9) / 14 | ~2.5 | `TICK` every ring (0.5 s) |
+| HOT (3) | 500 | 120 | 60 | 3 (eff. 9) / 14 | ~2.5 | None: a pulse would blank a knock (§6) |
 
 `wavelength_px = speed_px_s · pulse_period_ms / 1000`. `glow_r_px = 20 + 40·I`. Rings at a zone tempo on other screens (PAIRING `split`, SCANNING `ready`) take that zone's lead / trail too; every other ring is 3 / 22 px, and the FOUND burst 3 / 24.
 
-The four heartbeats differ in rhythm class: sparse, slow, double and geiger. R-07 allows at most four levels.
+The three heartbeats differ in rhythm class: sparse, slow and double. R-07 allows at most four levels. HOT has none: every pulse blanks the accelerometer until 150 ms after it ends (§7), and on real watches (2026-10-04) a `TICK` every 0.5 s hid about 40 % of knocks; with it muted the first knock was FOUND.
 
-**FAR is no longer silent.** Its sparse tick is the "still connected" heartbeat, so silence always means "no packets".
+**FAR is no longer silent.** Its sparse tick is the "still connected" heartbeat, so silence means "no packets" everywhere except HOT, where the players are a few metres apart (HOT is entered with `CLOSER` + `burst`, and link loss still plays `LOST`).
 
 ### 5.4 Distance → readout band
 
@@ -418,16 +418,16 @@ The field table in each screen uses: ramp | I | speed | period | λ | glow_r | n
 | Centre | `arrow` if valid, else `glow`. There are **no trend chevrons**, because multipath dominates below about 7 m |
 | Top | Chip `LOOK AROUND` for 4 s on entry. On bump-ready: `TAP WATCHES` |
 | Bottom | Readout `~5` or `<3`. **Bump-ready** (band `<3` held 1.5 s): word `BUMP!` in `prox.7`, replacing the readout |
-| Haptic | `TICK` every live ring (0.5 s, 12 % duty). `CLOSER` + `burst` on entry. On bump-ready: `DOUBLE` once |
+| Haptic | **No heartbeat**, so no pulse blanks a knock (§5.3). `CLOSER` + `burst` on entry. On bump-ready: `DOUBLE` once |
 | Beacon | 20 Hz, so "pings are real" still holds at a 500 ms ring period |
 
 **Bump rule (R-10):**
 
 - Both watches are in HOT, and each made its spike in HOT (the beacon's `ST_TAP_HOT` bit says so for the partner's).
-- Both watches see an accelerometer bump spike within 400 ms of each other. A spike is the gravity-removed |a| above 2.0 g for at most 6 ms, with 200 ms refractory time (`app/imu_feed.py`). The accelerometer samples at 800 Hz while a spike can count (HOT, PAIRING `seen` and `confirmed`) and at 100 Hz otherwise: its filter passes about 0.4× the rate, so at 100 Hz a 1–3 ms knock is smeared to about 1 g, while at 800 Hz it keeps most of its 3–8 g peak. Each beacon carries `bump_ago_ms` (time since the sender's last spike), so the receiver places the partner's spike on its own clock as t_rx − `bump_ago_ms` − air time (`finder/session.py`). No clock offset is needed.
-- No spike counts from 100 ms before a screen touch-down until 300 ms after it (the finger's own spike: one accepted up to 100 ms before the touch-down is withdrawn), or inside the haptic blanking window (§7). So a spike is neither matched nor sent in beacons (`bump_ago_ms`) until it is 100 ms old.
+- Both watches see an accelerometer bump spike within 400 ms of each other. A spike is the gravity-removed |a| above 1.5 g for at most 6 ms, with 200 ms refractory time (`app/imu_feed.py`). The accelerometer samples at 800 Hz while a spike can count (HOT, PAIRING `seen` and `confirmed`) and in FOUND (so a knock's touch is still recognised there, §8), and at 100 Hz otherwise: its filter passes about 0.4× the rate, so at 100 Hz a 1–3 ms knock is smeared to about 1 g, while at 800 Hz it keeps most of its 3–8 g peak. Each beacon carries `bump_ago_ms` (time since the sender's last spike), so the receiver places the partner's spike on its own clock as t_rx − `bump_ago_ms` − air time (`finder/session.py`). No clock offset is needed.
+- Players knock the watches screen to screen, so a knock touches both panels. A screen touch never stops a spike; the knock's touch is dropped instead (§8). No spike counts inside the haptic blanking window (§7). An accepted spike is matched and sent in beacons (`bump_ago_ms`) at once.
 
-**Fallback:** both players short-press within 3 s while in HOT with band ≤ `~5`. In HOT a short press is this fallback press; a second short press within 1 s (partner not pressing) starts a scan instead.
+**Fallback:** both players short-press within 3 s while in HOT with band ≤ `~5`. In HOT a short press is this fallback press; a second short press within 1 s (partner not pressing) starts a scan instead. A screen tap in HOT starts no scan (§8).
 
 RSSI alone never enters FOUND.
 
@@ -439,10 +439,10 @@ RSSI alone never enters FOUND.
 | `result` (until a press) | as above | as above | same | word `TAP=AGAIN` | — |
 
 - Both watches enter FOUND on the shared bump packet.
-- A press or tap on either watch starts a new round on both: PAIRING `split`, keeping the existing pairing and calibration.
+- A press or tap on either watch starts a new round on both: PAIRING `split`, keeping the existing pairing and calibration. A knock's touch is no tap (§8), so knocks that go on after FOUND start nothing.
 - The standing wave's breathing changes the field by 1 ramp step over 1.2 s, well inside the flash limit.
 
-### SCANNING (a guided 360° body turn; a centre tap from FAR/NEAR/WARM/HOT, or a short press, which in HOT must be a second press within 1 s)
+### SCANNING (a guided 360° body turn; a centre tap from FAR/NEAR/WARM, or a short press, which in HOT must be a second press within 1 s)
 
 | Sub | Field | Centre (iris r 64) | Top / bottom | Haptic |
 |---|---|---|---|---|
@@ -562,7 +562,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 
 | Name | Pattern | Meaning |
 |---|---|---|
-| `TICK` | 60 | Heartbeat for FAR (every 2nd ring), NEAR and HOT; scan pacing every 45°; countdown |
+| `TICK` | 60 | Heartbeat for FAR (every 2nd ring) and NEAR; scan pacing every 45°; countdown |
 | `DOUBLE` | 60·80·60 | WARM heartbeat; halfway during the scan; arrow locked; partner seen; bump-ready |
 | `CLOSER` | 60·60·60·60·200 | Good news: closer zone, relinked, scan fix, pairing done, GO |
 | `FARTHER` | 300 | Farther zone; arrow expired |
@@ -577,7 +577,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
   - An event is dropped only if one of the same or higher priority started less than 1 s earlier. A TICK is dropped only by a higher-priority event, because countdown TICKs come at 1 Hz.
   - While a higher-priority event plays, at most one lower event waits and starts 60 ms after it ends. A newer waiting event of the same or higher priority replaces it (latest wins); a lower one is dropped.
   - A pulse that is on always finishes; the event then starts 60 ms after it (also when it pre-empts a lower event).
-- **Blanking.** The accelerometer's tap, shake and tilt-fault detection ignores samples from each pulse start until 150 ms after it ends.
+- **Blanking.** The accelerometer's tap, shake and tilt-fault detection ignores samples from each pulse start until 150 ms after it ends. So HOT, where the knock must be sensed, has no heartbeat (§5.3).
 - **Screen off.** Heartbeats and events continue while the screen is off; the scheduler is time-based.
 - **Modes (menu).** `FULL` (default), `EVENTS` (no heartbeats), `OFF`.
 
@@ -587,17 +587,18 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 
 | Input | Where | Action |
 |---|---|---|
-| **Tap** (touch down→up 60–400 ms, one finger, moving ≤ 12 px, inside r ≤ 92 of C) | FAR–HOT | Start SCANNING. The 3 s `ready` countdown is the confirmation window, so an accidental tap costs nothing and any second tap cancels |
+| **Tap** (touch down→up 60–400 ms, one finger, moving ≤ 12 px, inside r ≤ 92 of C) | FAR–WARM | Start SCANNING. The 3 s `ready` countdown is the confirmation window, so an accidental tap costs nothing and any second tap cancels |
+| Tap | HOT | Nothing: players knock the watches screen to screen, and a knock whose spike was missed must not start a scan (it would stop bump sensing). A short press scans (the second within 1 s, below) |
 | Tap | PAIRING `seen` | Confirm runes |
 | Bump watches | PAIRING `seen` / `confirmed` | Confirm both sides at once |
 | Tap | DIRECTION `turn` | "I'm facing it": lock now |
-| Tap | FOUND `result` | New round |
+| Tap | FOUND `result` | New round (not a knock's touch, below) |
 | Tap | SCANNING | Cancel |
 | **Long-press** (≥ 800 ms stationary) | Any screen | MENU |
 | **Button short** | Any screen | The same primary action as a tap on that screen, except in HOT: there it is the fallback bump press, and a second short press within 1 s (partner not pressing) starts a scan. In the MENU it moves to the next row. **When the screen is off, it only wakes the screen** |
 | **Button long** (1.5 s) | Any screen | MENU. Nothing is ever mapped near the AXP202 hardware power-off hold |
 | Wrist raise (BMA423 wrist-tilt IRQ, or `face_up` from `finder/motion.py`) | — | Screen on. The first frame is the current state with no intro (rings are time-based, so they are already mid-flight). Backlight 1.0 for 3 s, then 0.6 |
-| Wrist down (not face-up for 2 s) | Except during a scan and the DIRECTION `turn` (in `ready` it cancels the scan instead) | Backlight off and rendering stops. Radio, logic and haptics continue |
+| Wrist down (on battery: tilted more than 60° from face-up for 10 s, 3 s at 5 %) | Except during a scan and the DIRECTION `turn` (in `ready`, 2 s not face-up cancels the scan instead) | Backlight off and rendering stops. Radio, logic and haptics continue. **On USB power the screen stays on** (and plugging in wakes it), so a desk test can watch both screens. Held at an angle up to 60° (reading it), the screen stays on |
 | Face-up > 30 s with no input | Not SCANNING or `turn` | Dim to 0.35. The glow stays readable. Any input or zone change → 0.6 |
 | Sun mode (menu) | — | Backlight 1.0, and the ramp LUT and the grey ghost channel are lifted by one stop (floor ≥ 1.0) |
 
@@ -607,8 +608,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 - Ignore multi-touch.
 - After 3 or more touch-downs in 1 s (any length, gesture or not), ignore touches for 2 s.
 - The wake window and the 2 s block judge a touch by when the finger landed, not by when its gesture ends.
-- In HOT, a tap within 400 ms of an accelerometer spike is treated as part of a bump and ignored.
-- A touch also guards the bump: no accelerometer spike counts from 100 ms before its touch-down until 300 ms after (§6 HOT).
+- **Knocks.** Players knock the watches screen to screen. A gesture (tap, swipe or press, on any screen) whose finger landed from 100 ms before a counted accelerometer spike until 300 ms after it is the knock's and does nothing; the spike still counts (§6 HOT). The accelerometer samples fast in FOUND too, so knocks that go on after FOUND never start a new round.
 
 **During a scan:**
 
@@ -705,7 +705,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
   - Red is only battery-critical, always with text.
 - **Type size:** anything read while walking is ≥ 32 px (about 3.7 mm) and ≤ 10 characters. 16 px text is only for stationary moments: pairing, scan prep, toasts, menu. The 8 px micro type is debug and battery % only.
 - **Photosensitivity:** travelling rings only. There is no full-field change of more than 2 ramp steps in 333 ms. The HOT rings at 2 Hz are narrow bands, and the scan bin blink covers one bar.
-- **Eyes-free:** zone heartbeats, zone changes, wrong way, scan pacing, lost, found and battery are all distinct patterns. A player can play FAR → HOT with the wrist down and look only to scan or bump.
+- **Eyes-free:** zone heartbeats, zone changes, wrong way, scan pacing, lost, found and battery are all distinct patterns. A player can play FAR → HOT with the wrist down and look only to scan or bump. HOT itself is silent between events (no heartbeat, so knocks are sensed); its entry plays `CLOSER` and bump-ready `DOUBLE`.
 - **One hand:** every action is reachable with the side button alone (short = primary, long = menu), and the tap target is the whole iris.
 
 ## 12. What not to do

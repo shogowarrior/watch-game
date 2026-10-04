@@ -12,7 +12,7 @@ Pure logic: no hardware. The main loop (or the simulator) feeds it
     g = Game(my_mac)
     g.on_packet(t_rx, mac, rssi, beacon)   # every valid beacon (proto.Beacon fields)
     g.set_motion(t, activity, steps, step_rate_hz, tilt_deg, face_up)
-    g.on_touch_down(t)                     # every finger landing (bump guard, rain filter)
+    g.on_touch_down(t)                     # every finger landing (rain filter)
     g.on_gesture(t, code, x, y, t_down)    # finder.gestures codes
     g.on_button(t, long=False)
     g.on_accel_tap(t)                      # accelerometer bump spike (app/imu_feed.py)
@@ -25,9 +25,14 @@ Pure logic: no hardware. The main loop (or the simulator) feeds it
 It never declares FOUND from RSSI: only a matched bump (both accelerometer
 taps within 400 ms, each made in HOT - the beacon's ``ST_TAP_HOT`` bit says so
 for the partner's - while both watches are in HOT) or the fallback (both short
-presses within 3 s in HOT with band <= ~5). A spike is neither matched nor
-sent in beacons until it is BUMP_TOUCH_LEAD_MS (100 ms) old, because a
-touch-down can still withdraw it as the finger's own (ui-spec §6).
+presses within 3 s in HOT with band <= ~5). Players knock screen to screen,
+so a knock touches both panels: a touch never stops a spike, and a touch
+that lands with a counted spike (from KNOCK_TOUCH_BEFORE_MS before its
+touch-down to KNOCK_TOUCH_AFTER_MS after) is the knock's, so its gesture
+does nothing (ui-spec §6, §8). A touch in HOT never starts a scan (a knock
+whose spike was missed or blanked would disarm the bump; the button scans
+there). The accelerometer samples fast in FOUND too, so knocks that go on
+after FOUND never start a new round.
 
 Choices where the spec is silent (all starting values):
   * the expected partner beacon rate mirrors the partner's ``beacon_hz``
@@ -50,7 +55,7 @@ Choices where the spec is silent (all starting values):
   * an arrow hidden by a scan, the MENU or the SAVER ON interstitial keeps
     aging (sigma grows) while its reveal/turn/face clock pauses; its 20 s
     relink limit starts only at LINK_LOST
-  * ``ready`` cancels silently after WRIST_DOWN_MS face-down or 15 s without
+  * ``ready`` cancels silently after SCAN_READY_DOWN_MS not flat or 15 s without
     completing, so an accidental tap never pins the screen on and 20 Hz
     beacons; the screen stays on in ``ready`` only while face-up
 
@@ -91,6 +96,7 @@ M_LINK_LOST = "LINK_LOST"
 
 
 BUMP_FRESH_MS = 2000       # own tap older than this never matches
+KNOCK_KEEP_MS = 2000       # a spike older than this makes no touch a knock's
 PEER_FOUND_TAP_MS = 2000   # partner already FOUND: follow if we tapped this recently
 UNRELIABLE_PIN_MS = 3000   # StatusStrip stays pinned this long after 'unreliable' clears
 FOUND_FOLLOW_MS = 500      # FOUND at least this long before following a new round
@@ -134,9 +140,14 @@ def _glow(i):
     return T.GLOW_R_A + T.GLOW_R_B * i
 
 
-def _guards(t_ms, tt):
-    """A touch stamped ``tt`` guards a spike at ``t_ms`` (100 ms before .. 300 ms after)."""
-    return tt is not None and -T.BUMP_TOUCH_LEAD_MS <= ticks_diff(t_ms, tt) < T.BUMP_TOUCH_GUARD_MS
+def _knock(spike_t, t_down):
+    """A counted spike at ``spike_t`` makes the touch that landed at ``t_down``
+    a knock's (screen to screen): from KNOCK_TOUCH_BEFORE_MS before to
+    KNOCK_TOUCH_AFTER_MS after the touch-down."""
+    if spike_t is None:
+        return False
+    d = ticks_diff(spike_t, t_down)
+    return -T.KNOCK_TOUCH_BEFORE_MS <= d <= T.KNOCK_TOUCH_AFTER_MS
 
 
 class Game:
@@ -175,6 +186,7 @@ class Game:
         self._wake_t = t_ms
         self._down_since = None
         self._fu_prev = True
+        self.usb = False              # on USB power: screen kept on (set_usb)
         self.reset(t_ms)
 
     # ---- lifecycle ---------------------------------------------------------------
@@ -203,8 +215,7 @@ class Game:
         self._used_my = None
         self._used_peer = None
         self._press_t = None
-        self._touch_t = None      # last gesture
-        self._down_t = None       # last finger landing
+        self._spike_t = None      # last counted accelerometer spike (knock touches)
         self._touches.clear()
         self._touch_block = None
         self._hap = None
@@ -293,11 +304,12 @@ class Game:
         self.meter.note(t_ms)
 
     def on_accel_tap(self, t_ms):
-        """Accelerometer bump spike at ``t_ms``; returns True if accepted as a bump tap."""
-        if _guards(t_ms, self._down_t) or _guards(t_ms, self._touch_t):
-            return False
+        """Accelerometer bump spike at ``t_ms``; returns True if accepted as a
+        bump tap. A touch does not stop it: a screen-to-screen knock touches
+        the panel too (its gesture is dropped instead, ``on_gesture``)."""
         if self.blanked(t_ms):
             return False
+        self._spike_t = t_ms
         self.bump_t = t_ms
         self.taps = (self.taps + 1) & 7
         self._tap_hot = self.mode == M_HUNT and self.px.zone == HOT
@@ -305,31 +317,23 @@ class Game:
 
     def bump_armed(self):
         """True while a bump spike can count: HOT (FOUND, §6) and PAIRING
-        seen / confirmed (a matched bump confirms both). The IMU samples fast
-        enough to see a knock only then (app/imu_feed.py)."""
-        if self.mode == M_HUNT:
+        seen / confirmed (a matched bump confirms both), and in FOUND, where
+        knocks that go on must be seen to drop their touches (§8). The IMU
+        samples fast enough to see a knock only then (app/imu_feed.py)."""
+        m = self.mode
+        if m == M_HUNT:
             return self.px.zone == HOT
-        return self.mode == M_PAIRING and self.pair.sub in (P.SEEN, P.CONFIRMED)
+        if m == M_FOUND:
+            return True
+        return m == M_PAIRING and self.pair.sub in (P.SEEN, P.CONFIRMED)
 
     def _tap(self, t_ms):
-        """``bump_t`` once a touch-down can no longer withdraw it (ui-spec §6: the
-        finger's own spike lands up to BUMP_TOUCH_LEAD_MS before its touch-down),
-        else None."""
-        bt = self.bump_t
-        if bt is not None and ticks_diff(t_ms, bt) <= T.BUMP_TOUCH_LEAD_MS:
-            return None
-        return bt
+        """The last accepted bump spike (``bump_t``), or None."""
+        return self.bump_t
 
     def on_touch_down(self, t_ms):
         """A finger lands (every touch, even one the gesture recognizer drops): it
-        guards the bump tap, a tap accepted just before it was its own spike, and
-        it counts toward the rain/sleeve burst filter."""
-        self._down_t = t_ms
-        bt = self.bump_t
-        if (bt is not None and bt != self._used_my
-                and 0 <= ticks_diff(t_ms, bt) <= T.BUMP_TOUCH_LEAD_MS):
-            self.bump_t = None
-            self._tap_hot = False
+        counts toward the rain/sleeve burst filter."""
         if (self.screen_on and not self.power_off and self._touch_block is None
                 and ticks_diff(t_ms, self._wake_t) >= T.WAKE_TOUCH_IGNORE_MS):
             self._touch_burst(t_ms)
@@ -345,18 +349,15 @@ class Game:
         wake and burst filters judge the press by its landing ``t_down``."""
         if code == 0:
             return
-        self._touch_t = t_ms      # guards the bump tap even if filtered below
         if not self.screen_on or self.power_off or self._bye_t is not None:
             return
         td = t_ms if t_down is None else t_down
+        if _knock(self._spike_t, td):
+            return          # a knock touched the screen (§8): no tap, swipe or press
         if ticks_diff(td, self._wake_t) < T.WAKE_TOUCH_IGNORE_MS:
             return
         if self._touch_block is not None and ticks_diff(td, self._touch_block) < 0:
             return
-        bt = self.bump_t
-        if (self.mode == M_HUNT and self.px.zone == HOT and bt is not None
-                and 0 <= ticks_diff(t_ms, bt) < T.BUMP_TAP_IGNORE_MS):
-            return          # part of a bump
         self._input(t_ms)
         if code == G_LONG_PRESS:
             self._long_press(t_ms)
@@ -409,7 +410,9 @@ class Game:
             a = self.arrow
             if a is not None and a.tap():
                 return
-            if button and self.px.zone == HOT:
+            if self.px.zone == HOT:
+                if not button:
+                    return        # HOT: the screen is where watches knock (§8)
                 pt = self._press_t
                 pv = self.peer
                 if (pt is not None and 0 <= ticks_diff(t_ms, pt) <= T.HOT_SCAN_PRESS_MS
@@ -529,12 +532,9 @@ class Game:
         if s is not None and ticks_diff(s, t_ms) <= 0:
             self._touch_block = None
         self._touches.expire(t_ms, T.TOUCH_BURST_WINDOW_MS)
-        s = self._touch_t
-        if s is not None and ticks_diff(t_ms, s) >= T.BUMP_TOUCH_GUARD_MS:
-            self._touch_t = None
-        s = self._down_t
-        if s is not None and ticks_diff(t_ms, s) >= T.BUMP_TOUCH_GUARD_MS:
-            self._down_t = None
+        s = self._spike_t
+        if s is not None and ticks_diff(t_ms, s) > KNOCK_KEEP_MS:
+            self._spike_t = None
         s = self._unrel_t
         if s is not None and ticks_diff(t_ms, s) >= UNRELIABLE_PIN_MS:
             self._unrel_t = None
@@ -883,7 +883,7 @@ class Game:
                 self._rdown = None
             elif self._rdown is None:
                 self._rdown = t_ms
-            if ((self._rdown is not None and ticks_diff(t_ms, self._rdown) >= T.WRIST_DOWN_MS)
+            if ((self._rdown is not None and ticks_diff(t_ms, self._rdown) >= T.SCAN_READY_DOWN_MS)
                     or ticks_diff(t_ms, self.mode_t) >= SCAN_READY_MAX_MS):
                 sc.cancel(t_ms)   # accidental tap: silent, the arrow comes back
         pv = self.peer
@@ -992,6 +992,22 @@ class Game:
         return (self.mode == M_HUNT and a is not None
                 and (a.phase == A.PH_TURN or a.phase == A.PH_FACE))
 
+    def set_usb(self, t_ms, on):
+        """VBUS present (the runtime's battery reading): the screen stays on
+        while the watch is on USB power (§8), and wakes when it is plugged in."""
+        on = bool(on)
+        if on and not self.usb and not self.screen_on and not self.power_off:
+            self._wake(t_ms)
+        self.usb = on
+
+    def _lowered(self):
+        """Tilted more than WRIST_DOWN_DEG from face-up (no tilt: not face-up)."""
+        me = self.me
+        tilt = me.tilt_deg
+        if tilt is None:
+            return not me.face_up
+        return tilt > T.WRIST_DOWN_DEG
+
     def _power(self, t_ms):
         fu = self.me.face_up
         if fu and not self._fu_prev and not self.screen_on:
@@ -999,7 +1015,7 @@ class Game:
         self._fu_prev = fu
         if not self.screen_on:
             return
-        if fu or self._keep_on():
+        if self.usb or not self._lowered() or self._keep_on():
             self._down_since = None
             return
         if self._down_since is None:
@@ -1239,8 +1255,8 @@ class Game:
             strong = px.trend_strong and trend != 0
             a = self.arrow
             if a is None or not (a.phase == A.PH_TURN or a.phase == A.PH_FACE):
-                hb = T.ZONE_HEARTBEAT[z]     # turn/face: only the pacer ticks
-                every = T.ZONE_HB_EVERY[z]
+                hb = T.ZONE_HEARTBEAT[z]     # turn/face: only the pacer ticks; HOT: None,
+                every = T.ZONE_HB_EVERY[z]   # a pulse would blank the knock (§6)
             if a is not None and a.phase == A.PH_TURN:
                 glow = T.FIELD_SCAN_SWEEP_GLOW_R     # the live-mirror halo (§5.7)
                 if self.mirror.value is not None:
