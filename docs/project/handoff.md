@@ -65,6 +65,21 @@ in one message with the current default marked. Don't build on an assumption.
   levels were measured, and with the HOT heartbeat muted a knock reached
   FOUND. Still to do: the rest of the checklist in docs/hardware-setup.md
   (radio ping-pong, path loss) and debug mode on real watches.
+- **Themes** (ui-spec §4A): six looks for the field (Ripple, Sonar, Tide,
+  Warp, Arcade, Fireflies) are built in `ui/themes/` with their tokens
+  (`tokens.json` "themes") and previews in docs/design/themes/. They are not
+  wired yet: next is the renderer hook (`ui/renderer.py` takes over what
+  `ThemedRenderer` does), the MENU row `THEME: <NAME>`, a saved choice, a
+  `theme` field in RenderParams and a theme picker in the web simulator.
+  The hook must keep two things `ThemedRenderer` already does: switch with
+  `queue_theme` (a theme loads in steps while the old one draws; loading one
+  whole takes 10-30 ms on desktop MicroPython, seconds on the watch, under the
+  8 s watchdog) and load the saved theme whole before `app.run` arms the
+  watchdog; and remember the moment and params under the MENU (`m_live`,
+  `p_live`). One step, the theme module's own compile, cannot be split (5-9 ms
+  on desktop, roughly 1-2 s on the watch): precompiling the theme modules to
+  .mpy with mpy-cross at deploy would remove it, but the watch runs pure .py
+  today, so that is the owner's call.
 - **Beacon format is version 3.** Both watches must run the same code; a watch
   on older code ignores the other.
 

@@ -54,6 +54,7 @@ over their USB cables or over Wi-Fi.
 | `finder/menu.py` | `Menu`: the MENU list (rows, scroll, END ROUND confirm, auto-close). |
 | `finder/render_params.py` | `RenderParams`, the only thing the renderer reads (ui-spec §3). |
 | `ui/` | Frame renderer: `renderer.py` (draws the whole 240x240 frame, pushes it as 4 bands of 240x60), `field.py` (ripple palette), `glyphs.py`, `text.py`, `font.py`. Colours in `ui/__init__.py` are byte-swapped RGB565. |
+| `ui/themes/` | Field themes (ui-spec §4A): `base.py` (the contract and shared helpers), one module per theme (`ripple`, `sonar`, `tide`, `warp`, `arcade`, `fireflies`), `ThemedRenderer` in `__init__.py`. Built and tested, not yet chosen from the MENU or wired into the game. |
 | `sim/` | Two-watch simulator: `world.py`, `radio.py` (RSSI profiles clean/typical/harsh/indoor, per-watch beacon period), `imu.py`, `accel_synth.py`, `scenarios.py`, `rng.py`, `link.py` (`GameLink`: beacon hand-off between two Games), `Sim`; `webhost.py` drives the browser sim. |
 | `native/` | Arduino and ESP-IDF ports (PlatformIO), work in progress: a shared C++ core (the game logic of `finder/`, checked call for call against traces of the Python tests; the renderer of `ui/`, checked against `tests/snapshot_crc.json`; display, PMU and IMU sequences from `hal/`) and the display benchmark both builds run; the main loop and the game builds are next. See `native/README.md`; `tests/test_native.py` runs its host tests. |
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). Its **Simulator \| Real watches** toggle shows the real watches in debug mode. |
@@ -67,7 +68,7 @@ over their USB cables or over Wi-Fi.
 | `secrets.example.py` | The format of the Wi-Fi file (`WIFI_SSID`, `WIFI_PASSWORD`) that `tools/wifi_setup.py` saves and the watch reads as `/secrets.py`. Not to be filled in. |
 | `logs/` | Gitignored. `debug-*.jsonl` sessions from the bridge: each line is one `/events` payload, either a record `{"src", "rx", "rec"}`, from a USB port a text line `{"src", "rx", "line"}` (boot messages, errors, the fps line), or a knock judgement `{"src": "bridge", "rx", "knock"}`; a replay reads the `rec` lines. |
 | `docs/project/` | `handoff.md` (current state, open questions, next steps: read first); the Claude Project's `goal.md`, `instructions.md` and `setup.md` (how to create it). |
-| `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`, `debug-mode.md` (debug mode: decisions and the contract between watch, bridge and page). |
+| `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`, `themes/*.png` (theme previews), `debug-mode.md` (debug mode: decisions and the contract between watch, bridge and page). |
 | `docs/estimation/` | `bakeoff.md` (why kalman2), `imu-drift.md` (why no dead reckoning). |
 | `docs/research/user-research.md` | Personas, field-test plan, requirements R-01..R-15. |
 | `docs/architecture.md` `docs/hardware-setup.md` | Layers and data flow (with the debug data path); bring-up on real watches and how to use debug mode (§7). |
@@ -113,6 +114,7 @@ sets it as CPython would.
 | `python3 tools/render_snapshots.py [name ...]` | Render `RenderParams` fixtures through the real renderer (via the WebAssembly port) into `docs/design/snapshots/*.png`, and their frame CRCs into `tests/snapshot_crc.json` (checked by `test_renderer`). |
 | `node tools/mpy/run.mjs tools/bench_est.py` | Per-packet cost and heap per estimator. |
 | `node tools/mpy/run.mjs tools/bench_webhost.py` | Cost of one browser-sim step. |
+| `python3 tools/render_themes.py [theme ...]` / `--bench` | Theme previews (a contact sheet of 8 moments per theme) into `docs/design/themes/*.png` / ms per frame per theme and moment next to Ripple's (`--mp PATH` runs another MicroPython, such as a 32-bit unix build with viper). |
 | `python3 tools/drift_demo.py` | Why accelerometer double integration fails. |
 | `python3 tools/build_sim.py` | Build the web simulator into `dist/sim/` (needs `tools/mpy` npm install). |
 | `python3 native/tools/qemu_run.py native/idf` | Check a native build's flash layout and boot it in Espressif's QEMU (`--install` once). Checks boot and crashes, not speed (`native/README.md`). |

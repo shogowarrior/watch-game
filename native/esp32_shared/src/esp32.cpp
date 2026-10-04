@@ -71,8 +71,9 @@ void CoreImuTask::stop() {
   while (!done_) vTaskDelay(1);
 }
 
-void backlight(bool on) {
+void backlight_level(double level) {
   static bool ready = false;
+  static uint32_t duty = 0;
   constexpr ledc_mode_t MODE = LEDC_LOW_SPEED_MODE;
   constexpr ledc_channel_t CH = LEDC_CHANNEL_7;
   if (!ready) {
@@ -93,7 +94,11 @@ void backlight(bool on) {
     ledc_channel_config(&c);
     ready = true;
   }
-  ledc_set_duty(MODE, CH, on ? (uint32_t)(T::BACKLIGHT_NORMAL * 8191 + 0.5) : 0);
+  const double l = level < 0.0 ? 0.0 : level > 1.0 ? 1.0 : level;
+  const uint32_t d = (uint32_t)(l * 8191 + 0.5);
+  if (d == duty) return;
+  duty = d;
+  ledc_set_duty(MODE, CH, d);
   ledc_update_duty(MODE, CH);
 }
 
