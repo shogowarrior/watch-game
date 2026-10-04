@@ -1409,9 +1409,12 @@ def test_menu_rows_sun_buzz_end_round():
     assert r.p.screen == "WARM" and r.p.heartbeat is None    # EVENTS: no heartbeat
     assert r.p.menu_rows is None
     g.on_button(r.t, long=True)
-    g.on_gesture(r.t + 10, 6, 120, 120)         # swipe up: END ROUND scrolls into view
+    g.on_gesture(r.t + 10, 6, 120, 120)         # swipe up twice: END ROUND scrolls into view
+    r.run(1000)
+    g.on_gesture(r.t, 6, 120, 120)
     r.run(100)
-    assert g.menu.rows[3] == "END ROUND" and r.p.sub == "0^"
+    assert g.menu.rows[2:] == ("THEME: RIPPLE", "END ROUND") and r.p.sub == "0^"
+    r.run(1000)                                 # (touch burst filter)
     g.on_gesture(r.t, 1, 120, 170)              # END ROUND asks first
     r.run(100)
     assert g.menu.rows[3] == "SURE? PRESS" and g.mode == M_HUNT and r.p.sub == "3^"
@@ -1440,9 +1443,12 @@ def test_menu_place_row_scrolls_and_switches_the_exponent():
         g.on_button(r.t)                        # step to PLACE (still in view)
     r.run(100)
     assert r.p.sub == "3v" and g.menu.top == 0
-    g.on_button(r.t)                            # step to END ROUND: the list scrolls
+    g.on_button(r.t)                            # step to THEME: the list scrolls
     r.run(100)
-    assert g.menu.top == 1 and r.p.sub == "3^" and g.menu.rows[3] == "END ROUND"
+    assert g.menu.top == 1 and r.p.sub == "3^v" and g.menu.rows[3] == "THEME: RIPPLE"
+    g.on_button(r.t)                            # step to END ROUND, the last row
+    r.run(100)
+    assert g.menu.top == 2 and r.p.sub == "3^" and g.menu.rows[3] == "END ROUND"
     g.on_button(r.t)                            # wraps to RESUME at the top
     r.run(100)
     assert g.menu.top == 0 and r.p.sub == "0v"
@@ -1460,20 +1466,22 @@ def test_menu_place_row_scrolls_and_switches_the_exponent():
     assert g.menu.sel == 0 and g.menu.top == 0
     g.on_gesture(r.t, 6, 120, 120)              # swipe up: selection follows into view
     r.run(100)
-    assert g.menu.top == 1 and g.menu.sel == 1 and r.p.sub == "0^"
+    assert g.menu.top == 1 and g.menu.sel == 1 and r.p.sub == "0^v"
     g.on_button(r.t)
     g.on_button(r.t)
-    g.on_button(r.t)                            # SUN -> BUZZ -> PLACE -> END ROUND
+    g.on_button(r.t)                            # SUN -> BUZZ -> PLACE -> THEME
     r.run(100)
-    assert g.menu.sel == 4 and g.menu.top == 1 and r.p.sub == "3^"
-    g.on_gesture(r.t, 7, 120, 120)              # swipe down: END ROUND leaves, sel clamps to PLACE
+    assert g.menu.sel == 4 and g.menu.top == 1 and r.p.sub == "3^v"
+    g.on_gesture(r.t, 7, 120, 120)              # swipe down: THEME leaves, sel clamps to PLACE
     r.run(100)
     assert g.menu.top == 0 and g.menu.sel == 3 and r.p.sub == "3v"
     assert g.menu.rows == ("RESUME", "SUN: OFF", "BUZZ: FULL", "PLACE: IN")
     r.run(1000)                                 # (touch burst filter)
     g.on_gesture(r.t, 6, 120, 120)
     r.run(1000)
-    assert g.menu.top == 1
+    g.on_gesture(r.t, 6, 120, 120)
+    r.run(1000)
+    assert g.menu.top == 2
     g.on_gesture(r.t, 1, 120, 170)              # END ROUND, then confirm
     r.run(100)
     g.on_button(r.t)
@@ -1491,16 +1499,59 @@ def test_menu_shows_a_place_set_from_outside():
     assert g.menu.rows[3] == "PLACE: IN" and r.p.menu_rows[3] == "PLACE: IN"
 
 
+def test_menu_theme_row_steps_through_the_themes():
+    """THEME (row 5) steps to the next theme on select and keeps the MENU open;
+    RenderParams.theme carries the choice on every frame, and END ROUND keeps it
+    (ui-spec §4A Choosing)."""
+    r = warm_rig()
+    g = r.g
+    assert g.theme == T.THEME_DEFAULT and r.p.theme == T.THEME_DEFAULT
+    g.on_button(r.t, long=True)
+    r.run(100)
+    for _ in range(4):
+        g.on_button(r.t)                        # RESUME -> SUN -> BUZZ -> PLACE -> THEME
+    r.run(100)
+    assert g.menu.sel == 4 and g.menu.rows[3] == "THEME: RIPPLE" and r.p.sub == "3^v"
+    names = T.THEME_NAMES
+    for k in range(1, len(names) + 1):
+        g.on_button(r.t, long=True)             # select: the next theme, wrapping
+        r.run(100)
+        n = names[k % len(names)]
+        assert g.menu_open and g.theme == n and r.p.theme == n and r.p.screen == "MENU"
+        assert r.p.menu_rows[3] == "THEME: " + T.THEME_LABELS[n]
+        assert validate(r.p) == [], validate(r.p)
+    g.on_button(r.t, long=True)                 # Sonar
+    g.on_button(r.t)
+    g.on_button(r.t)                            # THEME -> END ROUND -> RESUME
+    g.on_button(r.t, long=True)                 # RESUME closes the MENU
+    r.run(100)
+    assert not g.menu_open and r.p.screen == "WARM" and r.p.theme == "sonar"
+    g.reset(r.t)                                # END ROUND (or a partner leaving)
+    r.run(100)
+    assert g.mode == M_PAIRING and g.theme == "sonar" and r.p.theme == "sonar"
+
+
+def test_set_theme_takes_known_names_only():
+    g = Game(b"\x01\x02\x03\x04\x05\x06")
+    g.set_theme("".join(["ti", "de"]))          # equal, not the same object: the constant
+    assert g.theme == "tide" and g.theme is T.THEME_NAMES[2]
+    for bad in ("TIDE", "", None, "sheen"):
+        g.set_theme(bad)
+        assert g.theme == T.THEME_DEFAULT
+    g.set_theme("warp")
+    assert g.tick(0).theme == "warp"
+
+
 def _menu_at_end_armed(r):
     """Open the menu, step to END ROUND (list scrolled) and arm SURE? PRESS."""
     g = r.g
     g.on_button(r.t, long=True)
     r.run(100)
-    for _ in range(4):
+    for _ in range(5):
         g.on_button(r.t)
     g.on_button(r.t, long=True)                 # select END ROUND: asks first
     r.run(100)
-    assert g.menu.sel == 4 and g.menu.top == 1 and g.menu.rows[3] == "SURE? PRESS"
+    assert g.menu.sel == 5 and g.menu.top == 2 and g.menu.rows[3] == "SURE? PRESS"
     assert r.p.sub == "3^" and g.mode == M_HUNT
 
 
@@ -1510,10 +1561,11 @@ def test_menu_end_round_confirm_cancelled_by_swipe():
     _menu_at_end_armed(r)
     g.on_gesture(r.t, 7, 120, 120)              # swipe down: SURE? PRESS scrolls away
     r.run(100)
-    assert g.menu.rows == ("RESUME", "SUN: OFF", "BUZZ: FULL", "PLACE: OUT") and r.p.sub == "3v"
+    assert g.menu.rows == ("SUN: OFF", "BUZZ: FULL", "PLACE: OUT", "THEME: RIPPLE")
+    assert r.p.sub == "3^v"
     g.on_button(r.t)                            # short = next row, not a confirm
     r.run(100)
-    assert g.mode == M_HUNT and g.menu_open and g.menu.sel == 4 and r.p.sub == "3^"
+    assert g.mode == M_HUNT and g.menu_open and g.menu.sel == 5 and r.p.sub == "3^"
     assert g.menu.rows[3] == "END ROUND"        # the question is gone: it must be asked again
     g.on_button(r.t)                            # wraps to RESUME
     r.run(100)
@@ -1525,18 +1577,18 @@ def test_menu_end_round_confirm_cancelled_by_other_row():
     g = r.g
     _menu_at_end_armed(r)
     r.run(1000)                                 # (touch burst filter)
-    g.on_gesture(r.t, 1, 120, 50)               # tap SUN (visible row 0 at top 1)
+    g.on_gesture(r.t, 1, 120, 50)               # tap BUZZ (visible row 0 at top 2)
     r.run(100)
-    assert g.sun and g.menu.sel == 1 and g.menu.rows[3] == "END ROUND"
-    g.on_button(r.t)                            # next row: BUZZ, the round goes on
+    assert g.buzz == 1 and g.menu.sel == 2 and g.menu.rows[3] == "END ROUND"
+    g.on_button(r.t)                            # next row: PLACE, the round goes on
     r.run(100)
-    assert g.mode == M_HUNT and g.menu.sel == 2
+    assert g.mode == M_HUNT and g.menu.sel == 3
     # armed, then the short press moves on from END ROUND itself: confirms (same row)
     for _ in range(2):
         g.on_button(r.t)
     g.on_button(r.t, long=True)
     r.run(100)
-    assert g.menu.sel == 4 and g.menu.rows[3] == "SURE? PRESS"
+    assert g.menu.sel == 5 and g.menu.rows[3] == "SURE? PRESS"
     g.on_button(r.t)
     r.run(100)
     assert g.mode == M_PAIRING
@@ -1549,7 +1601,7 @@ def test_menu_rows_and_sub_change_together_at_the_tick():
     g = r.g
     g.on_button(r.t, long=True)
     r.run(100)
-    for _ in range(4):
+    for _ in range(5):
         g.on_button(r.t)
     r.run(100)
     assert r.p.sub == "3^" and g.menu.rows[3] == "END ROUND"
@@ -2233,7 +2285,7 @@ def test_new_round_split_is_not_taken_by_a_partner_that_left():
             g = w.a
             g.on_button(w.t, long=True)
             w.run(100)
-            for _ in range(4):
+            for _ in range(5):
                 g.on_button(w.t)
             g.on_button(w.t, long=True)
             w.run(100)

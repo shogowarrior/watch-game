@@ -15,7 +15,10 @@ def test_select_confirm_and_close():
     assert m.rows == ("RESUME", "SUN: OFF", "BUZZ: FULL", "PLACE: OUT")
     m.scroll(30, 1)                                              # a swipe cancels it
     m.window(False, 0, False)
-    assert m.rows[3] == "END ROUND" and m.top == 1 and m.sel == 1 and m.sub == "0^"
+    assert m.rows[3] == "THEME: RIPPLE" and m.top == 1 and m.sel == 1 and m.sub == "0^v"
+    m.scroll(35, 5)                                              # clamped at the bottom
+    m.window(False, 0, False)
+    assert m.rows[3] == "END ROUND" and m.top == 2 and m.sel == 2 and m.sub == "0^"
     assert m.select(40, M.END) is None and m.select(50, M.END) == M.END and not m.is_open
     m.open(100)
     assert m.select(110, M.RESUME) == M.RESUME and not m.is_open
@@ -24,17 +27,17 @@ def test_select_confirm_and_close():
 def test_next_scrolls_and_confirms_on_end_only():
     m = M.Menu()
     m.open(0)
-    for k in range(4):
+    for k in range(5):
         assert m.next(k) is None
-    assert m.sel == M.END and m.top == 1
+    assert m.sel == M.END and m.top == 2
     assert m.select(10, M.END) is None
     assert m.next(20) == M.END and not m.is_open                 # short press confirms
     m.open(30)
-    m.select(31, M.END)                                          # armed on row 4, but ...
-    m.sel = M.PLACE
+    m.select(31, M.END)                                          # armed on row 6, but ...
+    m.sel = M.THEME
     assert m.next(32) is None and m.sel == M.END                 # ... moving cancels it
-    m.window(True, 2, True)
-    assert m.rows == ("SUN: ON", "BUZZ: OFF", "PLACE: IN", "END ROUND")
+    m.window(True, 2, True, "tide")
+    assert m.rows == ("BUZZ: OFF", "PLACE: IN", "THEME: TIDE", "END ROUND")
 
 
 def test_tap_rows_and_timeouts():
@@ -43,6 +46,7 @@ def test_tap_rows_and_timeouts():
     y = T.MENU_ROWS_Y[2] + 1
     assert m.tap(10, y) == M.BUZZ and m.sel == M.BUZZ
     assert m.tap(20, 5) is None                                  # above the rows
+    m.next(30)
     m.next(30)
     m.next(30)                                                   # END ROUND, list scrolled
     m.select(30, M.END)
@@ -57,3 +61,19 @@ def test_tap_rows_and_timeouts():
     assert m.is_open
     m.tick(ticks_add(t, T.MENU_AUTOCLOSE_MS))
     assert not m.is_open
+
+
+def test_theme_row_names_the_theme_and_stays_open():
+    m = M.Menu()
+    m.open(0)
+    for k in range(4):
+        m.next(k)
+    assert m.sel == M.THEME and m.top == 1 and m.sub == "3^v"
+    assert m.select(10, M.THEME) == M.THEME and m.is_open        # steps the theme, stays open
+    for n in T.THEME_NAMES:
+        m.window(False, 0, False, n)
+        assert m.rows[3] == "THEME: " + T.THEME_LABELS[n] and len(m.rows[3]) <= 16
+    rows = m.rows
+    m.window(False, 0, False, T.THEME_NAMES[-1])
+    assert m.rows is rows                                        # unchanged: no new tuple
+    assert M.ROWS[M.THEME] == M.THEME_ROWS[T.THEME_DEFAULT]

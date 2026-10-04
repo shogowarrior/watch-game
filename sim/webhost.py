@@ -12,7 +12,8 @@ its filesystem and drives one ``TwoWatchSim`` from requestAnimationFrame:
 Same wiring as tests/test_episode.py: sim.World + sim.radio (per-packet
 RSSI) + sim.imu (MotionInfo), the games joined by ``sim.link.GameLink`` (each
 watch beacons at its own ``Game.beacon_hz``), one ``finder.game.Game`` and one
-``ui.renderer.Renderer`` + ``FrameCapture`` per watch. Physics runs in <= 50 ms
+``ui.themes.ThemedRenderer`` (following ``RenderParams.theme``, as on the watch)
++ ``FrameCapture`` per watch. Physics runs in <= 50 ms
 substeps, the logic at 10 Hz on sim-clock multiples of 100 ms, and each watch
 renders at its ``fps_cap`` (at most once per ``step`` call, at the end; while its
 screen is off the renderer runs without drawing, as app/runtime does, ui-spec §8).
@@ -27,6 +28,10 @@ up, so screen y = -world y). Page headings are degrees clockwise from north
     world_rad = radians(90 - page_deg)      page_deg = (90 - degrees(world_rad)) mod 360
 
 Start: A at (0, 0) facing east (+x), B at (35, 10) facing A.
+
+Themes (ui-spec §4A): each watch's MENU THEME row picks its theme, and
+``set_theme(i, name)`` does it from the page; like the theme saved on a
+watch, the choice survives ``reset``.
 
 Demo helpers (page settable attributes):
   * ``auto_pair`` (default True): the pairing handshake is played as if the
@@ -87,9 +92,10 @@ from sim.radio import profile as _profile, PROFILE_NAMES, INDOOR_PROFILES
 from sim.rng import Rng
 
 try:
-    from ui.renderer import Renderer, FrameCapture
+    from ui.renderer import FrameCapture
+    from ui.themes import ThemedRenderer
 except ImportError:          # CPython: framebuf is MicroPython-only, logic still runs
-    Renderer = None
+    ThemedRenderer = None
     FrameCapture = None
 try:
     import uctypes
@@ -136,7 +142,7 @@ def _r(v, n=1):
 
 
 class TwoWatchSim:
-    """Two ``Game`` + ``Renderer`` pairs on one sim world, stepped on a sim clock."""
+    """Two ``Game`` + ``ThemedRenderer`` pairs on one sim world, stepped on a sim clock."""
 
     def __init__(self, seed=1, profile="typical", imu="typical"):
         if profile not in PROFILE_NAMES:
@@ -146,9 +152,10 @@ class TwoWatchSim:
         self.imu = imu
         self.auto_turn = True
         self.auto_pair = True
-        if Renderer is not None:
+        self.games = None
+        if ThemedRenderer is not None:
             self.caps = (FrameCapture(), FrameCapture())
-            self.renderers = (Renderer(), Renderer())
+            self.renderers = (ThemedRenderer(follow=True), ThemedRenderer(follow=True))
             self.bufs = (self.caps[0].buf, self.caps[1].buf)
         else:
             self.caps = self.renderers = None
@@ -171,7 +178,11 @@ class TwoWatchSim:
                    math.atan2(START_A[1] - START_B[1], START_A[0] - START_B[0]), WALK_MPS, "B")
         self.world = World(a, b)
         self.sim = Sim(self.world, self.profile, self.seed, self.imu)
+        old = self.games
         self.games = (Game(MACS[0]), Game(MACS[1]))
+        if old is not None:                     # the theme stays, as saved on a watch
+            for i in (0, 1):
+                self.games[i].set_theme(old[i].theme)
         self.link = GameLink(self.games, MACS)
         self.tilt = [TILT_FLAT, TILT_FLAT]      # accelerometer tilt from flat, per watch
         self.face_up = [True, True]
@@ -222,6 +233,18 @@ class TwoWatchSim:
         self.world.obstacles = []
         self.sim.set_profile(name, Rng(self.seed).fork(100 + self._prof_n))
         self._walls_json = None
+
+    def set_theme(self, i, name):
+        """Watch i's field theme (a name in ``theme_names()``), as its MENU THEME
+        row would set it; the screen changes once the theme has loaded."""
+        if name not in T.THEME_NAMES:
+            raise ValueError("theme: one of %s" % ",".join(T.THEME_NAMES))
+        self.games[i].set_theme(name)
+
+    @staticmethod
+    def theme_names():
+        """The themes in MENU order, as a list (ui-spec §4A)."""
+        return list(T.THEME_NAMES)
 
     # ---- clock -------------------------------------------------------------------
     def step(self, dt_ms):
@@ -524,7 +547,7 @@ class TwoWatchSim:
             "cone_ms": cms, "cone_hit_pct": round(100.0 * self._cone_in_ms[i] / cms) if cms else None,
             "pkts_per_s": self.pkts_per_s[i], "haptic": hap,
             "steps": self.sim.imus[i].steps, "backlight": p.backlight,
-            "place": "IN" if g.indoor else "OUT",
+            "place": "IN" if g.indoor else "OUT", "theme": g.theme,
         }
 
     def constants_json(self):

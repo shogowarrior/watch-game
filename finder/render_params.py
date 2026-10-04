@@ -27,6 +27,8 @@ FIELDS = (
     "sweep",
     # output devices
     "haptic", "heartbeat", "heartbeat_every", "backlight", "sun", "fps_cap",
+    # look
+    "theme",
 )
 
 RenderParams = namedtuple("RenderParams", FIELDS)
@@ -44,6 +46,7 @@ DEFAULTS = {
     "sweep": None,
     "haptic": None, "heartbeat": None, "heartbeat_every": 1,
     "backlight": T.BACKLIGHT_NORMAL, "sun": False, "fps_cap": T.FPS_TARGET,
+    "theme": T.THEME_DEFAULT,
 }
 
 ZONE_SCREENS = T.ZONE_NAMES                 # FAR NEAR WARM HOT, index = zone
@@ -425,4 +428,6 @@ def validate(rp):
         e("sun: must be bool")
     if not _int(rp.fps_cap) or not T.FPS_CAP_MIN <= rp.fps_cap <= T.FPS_CAP_MAX:
         e("fps_cap: must be int %d..%d" % (T.FPS_CAP_MIN, T.FPS_CAP_MAX))
+    if rp.theme not in T.THEME_NAMES:
+        e("theme: must be one of %s" % " ".join(T.THEME_NAMES))
     return out

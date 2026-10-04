@@ -143,6 +143,8 @@ RenderParams = namedtuple("RenderParams", (
     "backlight",       # float 0..1
     "sun",             # bool: sun mode (ramp LUT lifted one stop, §8)
     "fps_cap",         # int 5..20: the frame lock is the fastest of 20, 10, 8, 7, 6, 5 at or under it (§4 rule 6)
+    # --- look ---
+    "theme",           # str: the field theme (§4A), one of tokens.themes.order; set by the MENU THEME row
 ))
 ```
 
@@ -161,6 +163,7 @@ RenderParams = namedtuple("RenderParams", (
 | `sweep` | SCANNING `ready` / `sweep` / `result`. In SCANNING `result` (fix), slot 0 is θ, the angle the best bin morphs into (no wedge is drawn), and `active_bin` is the best bin while its blink is on. In the DIRECTION `turn` phase it carries the pacer wedge: (pacer_deg, 12×None, None, False). None everywhere else |
 | `dist_band` | Always one of the six labels. Never a raw number. None in PAIRING, SEARCHING, SCANNING and FOUND |
 | `word` / `top_text` | Uppercase. Characters come from `tokens.typography.word.chars` / `label.chars` (`label` also for banners and menu rows). Length is checked in the logic, not truncated in the renderer |
+| `theme` | One of `ripple`, `sonar`, `tide`, `warp`, `arcade`, `fireflies` (`tokens.themes.order`), on every frame, the MENU's included. Only the MENU `THEME` row changes it (§4A Choosing). The renderer loads a new theme in steps while the old one keeps drawing (§4A rule 7), so for a few seconds on the watch the field can still show the previous theme |
 | `haptic` | One of the 9 named patterns (§7). The `HapticPlayer` (`finder/haptic_patterns.py`) plays it once and applies priority; the renderer returns only the heartbeats, locked to ring spawns |
 
 Example: WARM, locked arrow, getting warmer.
@@ -174,7 +177,7 @@ Example: WARM, locked arrow, getting warmer.
  "dist_band": "~10", "dist_stale": false, "word": null, "top_text": null, "banner": null,
  "status": [64, 71, 4, false, false], "menu_rows": null, "sweep": null,
  "haptic": null, "heartbeat": "DOUBLE", "heartbeat_every": 1, "backlight": 0.6, "sun": false,
- "fps_cap": 20}
+ "fps_cap": 20, "theme": "ripple"}
 ```
 
 **Simulator obligations.** The web simulator shows two top-view watches you can drag and rotate. To be valid for research it must:
@@ -216,7 +219,7 @@ Full-field brightness may not change by more than 2 ramp steps in 333 ms (`motio
 
 ## 4A. Themes
 
-A theme changes how the field looks, never what it tells the player. Ripple (§4) is the default; the others are Sonar, Tide, Warp, Arcade and Fireflies, in that order (`tokens.themes.order`). Status: built in `ui/themes/` and drawn by `ui.themes.ThemedRenderer` (previews, tests), not yet chosen from the MENU or wired into the game and the web simulator.
+A theme changes how the field looks, never what it tells the player. Ripple (§4) is the default; the others are Sonar, Tide, Warp, Arcade and Fireflies, in that order (`tokens.themes.order`). Status: built in `ui/themes/`; the watch and the web simulator draw every frame through `ui.themes.ThemedRenderer`, and players choose a theme from the MENU (Choosing, below). The simulator page has no theme picker of its own yet: its watches change theme through their MENU.
 
 **Shared rules (every theme)**
 
@@ -246,7 +249,7 @@ A theme changes how the field looks, never what it tells the player. Ripple (§4
 - **Arcade.** The screen is 8 px cells; a cell's ring number is its diamond (Manhattan) distance from the centre. Base: floor 0.6 (1.0 in sun mode), checker cells below 1.5 get +0.35, all times the vignette. Its cells change only on a 100 ms tick, which divides every zone period; the lens (open, close, rim colour), the hue crossfade, the menu dim and the calibrate fill's fade-out move per frame as in every theme, and a burst shows its front on its own frame. The core dot is the 16 px centre block and is never grey, also under a ghost front. *Live:* a diamond front three cells deep (levels 7, 4.6, 2.6, × (0.62 + 0.38·I)) leaves the lens on each ring spawn and moves out one cell a tick: it starts at the lens edge on the axes, and its diagonal sides come out from behind the lens over the next ticks. A ghost beat's front is grey at the live front's levels. The ring numbers from the lens edge out through the first 1 + 3·I that lie wholly outside the lens glow at 2.4 + 2·I (a diamond around the round lens). A burst ring is a front two cells deep (7, 5) moving two cells a tick. *Listening:* on each ring spawn a grey diamond (4, 2.5, 1.4, trail outward) enters at the corners and marches inward one cell every 2 ticks until it reaches the lens; grey on every listening screen, PAIRING looking included. *Still:* random cells outside the lens and the calibrate fill twinkle, each lit for 3 ticks (2, 3.5, 2) of every 8, at most 9 at a time. *Scan:* no new fronts; the ring numbers around the lens carry the live mirror at 2 + 4·I. *Found:* the two ring numbers outside the check disc swap between 5 and 3.5 every 4 ticks (marquee lights), and gold confetti blocks fall one cell a tick behind the check, never over the lens. Twinkles and confetti are not vignetted. Arcade shows the calibrate fill as a diamond of cells (level 4, its outer ring number at 6) that grows from the lens edge to the corners in the disc's time. The LUT steps between the 8 ramp stops.
 - **Fireflies.** Base: dark floor and a soft halo of 0.9·I (e^−(r/70 px)²; outside an open lens it starts at the halo's level at the lens edge); on a moment change floor and halo crossfade over 600 ms (in_out_cubic, like the field's levels, §5.3). *Live:* 5/9/14/22 fireflies (FAR–HOT) drift around the lens at radius (46 + 64·h)·(1 − 0.45·I) + 18 px, h a per-fly random number, so they come closer in as I rises. Each blinks once per P: it rises over 90 ms to its peak and then decays as e^(−t/260 ms), so in WARM and HOT a fly never quite goes out between beats; its peak comes (1 − sync)·h·P after the beat, sync 0.25/0.5/0.8/1.0, so in HOT they all flash together on the beat. Whether a beat is a ghost is read once per ring spawn and held until the next; a ghost beat blinks grey at 0.6 amplitude. The battery saver scales the blink by 0.7 (§8 pulse_amp), eased in and out over about 180 ms. *Listening:* three grey specks drift in from the edge to the lens over 7 s each, a third of a trip apart (grey on every listening screen, PAIRING looking included). *Still:* nine fireflies drift slowly at r 60–90 and glow 0.45 ± 0.25. *Scan:* they freeze where they are, dimmed to blink level 0.25. *Found:* 22 fireflies circle the check in gold at r 84 ± 10, breathing 0.5 ± 0.25 over 2.4 s, neighbours 0.3 rad apart; entering FOUND (not on a wake) they take the ring's places in their angular order and glide there from where they were over 400 ms (the gold crossfade), and the FOUND burst makes every fly blink once (not on a wake). Flies never draw on the lens, its rim or the core dot: a path that comes near is squeezed into a 24 px band outside it. When the lens opens, the flies near it are pushed out with its edge; when it closes they drift back in at no more than 30 px/s. During the calibrate fill they stay ahead of its edge, so the still flies leave the dish as it fills, and they come back in from beyond it when the fill ends.
 
-**Choosing a theme.** A MENU row `THEME: <NAME>` (labels RIPPLE, SONAR, TIDE, WARP, ARCADE, FIREFLIES; the longest, `THEME: FIREFLIES`, is 16 characters) steps to the next theme on select. The row shows the new name at once; the field behind the MENU changes when that theme has loaded (rule 7; about a second on the watch, longer the first time). The choice stays set across rounds and is saved on the watch, and the saved theme loads whole at boot, before the game loop starts. `RenderParams` will carry it as `theme`. None of this is wired yet (see Status above).
+**Choosing a theme.** The MENU row `THEME: <NAME>` (row 5; labels `tokens.themes.<name>.label`: RIPPLE, SONAR, TIDE, WARP, ARCADE, FIREFLIES; the longest, `THEME: FIREFLIES`, is 16 characters) steps to the next theme in `tokens.themes.order` on select, wrapping from FIREFLIES to RIPPLE. The MENU stays open and the row shows the new name at once; the field behind the MENU changes when that theme has loaded (rule 7; a few seconds on the watch, longest the first time a theme loads after boot), in the moment of the screen under the MENU (rule 2). Selecting it again before then goes straight to the newer choice (the load under way is dropped). The choice stays set across rounds (END ROUND keeps it) and is saved on the watch when the MENU closes with a theme other than the saved one (the file `/theme`; a write that fails is tried again at the next close). The saved theme loads whole at boot, before the game loop and its watchdog start, so the first frame already shows it; a missing or unknown saved name gives Ripple. `RenderParams.theme` (§3) carries the choice on every frame.
 
 ---
 
@@ -613,14 +616,15 @@ The game never dies silently (R-12), and a modal never takes over every glance.
 ### MENU (screen long-press ≥ 800 ms or button long-press 1.5 s; auto-closes after 8 s)
 
 - **Field:** frozen and dimmed (palette ×0.5, no rings; the FOUND standing wave stops breathing too). Haptics are paused, and so is a DIRECTION turn (see DIRECTION).
-- **Rows:** a scrolling list of 5 rows, 4 visible at a time (44 px pitch: x 24–215, y 32, 76, 120, 164; each h 40, `surface.toast`, `type.label`):
+- **Rows:** a scrolling list of 6 rows, 4 visible at a time (44 px pitch: x 24–215, y 32, 76, 120, 164; each h 40, `surface.toast`, `type.label`):
   1. `RESUME`
   2. `SUN: ON/OFF`
   3. `BUZZ: FULL/EVENTS/OFF`
   4. `PLACE: OUT/IN`: outdoors or indoors/crowded. Sets the path-loss exponent used to turn signal into distance (`calibrate.n` 2.6 / `n_indoor` 3.0, §5.8). It stays set across rounds.
-  5. `END ROUND`
+  5. `THEME: RIPPLE/SONAR/TIDE/WARP/ARCADE/FIREFLIES`: the look of the field (§4A Choosing). Select steps to the next theme; it stays set across rounds and is saved on the watch.
+  6. `END ROUND`
 
-  The list opens at the top (rows 1–4 visible). It scrolls so the selected row is always visible. A filled 6 px triangle in `text.secondary` at the list's right edge (x 207–213) marks more rows: pointing up at y 36–41 when rows are hidden above, pointing down at y 195–200 when rows are hidden below. `WALK TEST` (P2, not built) would be a 6th row; a `DEBUG` row (not built) would appear in dev builds only.
+  The list opens at the top (rows 1–4 visible). It scrolls so the selected row is always visible. A filled 6 px triangle in `text.secondary` at the list's right edge (x 207–213) marks more rows: pointing up at y 36–41 when rows are hidden above, pointing down at y 195–200 when rows are hidden below. `WALK TEST` (P2, not built) would be a 7th row; a `DEBUG` row (not built) would appear in dev builds only.
 - **Controls:** tap a visible row to select it. Swipe up shows the rows below, swipe down the rows above. Short press = next row (wraps, scrolling as needed), long press = select.
 - `END ROUND` asks `SURE? PRESS` and needs a second press within 3 s. Scrolling, selecting another row or moving the selection off `END ROUND` cancels the question, so the next press is an ordinary one again. Confirmed, the watch forgets the partner and returns to PAIRING `looking`.
 - **Partner left:** a watch past pairing (split countdown done, SEARCHING, FAR–HOT, SCANNING, FOUND, LINK-LOST) whose partner shows PAIRING (`looking`, `seen` or `confirmed`) for 2 s (END ROUND, the partner restarted, or it is pairing with another watch) leaves the round too: it returns to PAIRING `looking` with toast (warn) `FRIEND LEFT` and `NOPE`, and on battery the screen lights for 5 s (§8 Event wake). FOUND follows the partner into a new round only when the partner shows its split (`PAIRED`).

@@ -1,9 +1,9 @@
-"""MENU overlay state (ui-spec MENU): a 5-row list, 4 rows visible, that scrolls.
+"""MENU overlay state (ui-spec MENU): a 6-row list, 4 rows visible, that scrolls.
 
 The Game owns one ``Menu``. It opens and closes it, passes input on
 (``next`` / ``scroll`` / ``tap`` / ``select``) and applies the row action
-those return (``SUN``, ``BUZZ``, ``PLACE``, ``END`` once confirmed; ``RESUME``
-only closes). END ROUND asks first: the first select arms ``SURE? PRESS`` for
+those return (``SUN``, ``BUZZ``, ``PLACE``, ``THEME``, ``END`` once confirmed;
+``RESUME`` only closes). END ROUND asks first: the first select arms ``SURE? PRESS`` for
 ``MENU_CONFIRM_MS``; any other row, a swipe or moving off the row cancels it.
 The menu closes itself ``MENU_AUTOCLOSE_MS`` after the last input.
 
@@ -16,12 +16,13 @@ visible label changed.
 from finder.compat import ticks_add, ticks_diff
 from finder import tuning as T
 
-ROWS = ("RESUME", "SUN: OFF", "BUZZ: FULL", "PLACE: OUT", "END ROUND")
-RESUME, SUN, BUZZ, PLACE, END = 0, 1, 2, 3, 4      # row index = the action select returns
+ROWS = ("RESUME", "SUN: OFF", "BUZZ: FULL", "PLACE: OUT", "THEME: RIPPLE", "END ROUND")
+RESUME, SUN, BUZZ, PLACE, THEME, END = 0, 1, 2, 3, 4, 5   # row index = the action select returns
 VISIBLE = len(T.MENU_ROWS_Y)                       # rows on screen
 TOP_MAX = len(ROWS) - VISIBLE
 CONFIRM = "SURE? PRESS"
 BUZZ_ROWS = ("BUZZ: FULL", "BUZZ: EVENTS", "BUZZ: OFF")   # index = finder.game BUZZ_*
+THEME_ROWS = {n: "THEME: " + T.THEME_LABELS[n] for n in T.THEME_NAMES}   # ui-spec §4A Choosing
 
 
 class Menu:
@@ -110,13 +111,15 @@ class Menu:
         elif self._confirm_t is not None and ticks_diff(t_ms, self._confirm_t) >= T.MENU_CONFIRM_MS:
             self._confirm_t = None
 
-    def window(self, sun, buzz, indoor):
-        """Row labels for these settings, and the visible ``rows`` tuple (a new
-        tuple only when a visible label changed)."""
+    def window(self, sun, buzz, indoor, theme=T.THEME_DEFAULT):
+        """Row labels for these settings (``theme``: a name in
+        tuning.THEME_NAMES), and the visible ``rows`` tuple (a new tuple only
+        when a visible label changed)."""
         r = self._labels
         r[SUN] = "SUN: ON" if sun else "SUN: OFF"
         r[BUZZ] = BUZZ_ROWS[buzz]
         r[PLACE] = "PLACE: IN" if indoor else "PLACE: OUT"
+        r[THEME] = THEME_ROWS[theme]
         r[END] = CONFIRM if self._confirm_t is not None else ROWS[END]
         top = self.top
         v = self.rows

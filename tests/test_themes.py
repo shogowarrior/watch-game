@@ -14,6 +14,7 @@ tests/test_theme_<name>.py.
 import gc
 
 from finder import tuning as T
+from finder.render_params import replace as rp_replace
 from tests import Skip
 from ui import swap16
 
@@ -416,3 +417,94 @@ def test_dark_frames_wake_the_theme():
         r.frame(rt.params_at(phases, 600), None, rt.T0 + 600)     # screen off
         r.frame(rt.params_at(phases, 700), cap, rt.T0 + 700)
         assert r.theme.dirty == ALL, n
+
+
+def _themed(phases, t, name):
+    return rp_replace(rt.params_at(phases, t), theme=name)
+
+
+def test_follow_loads_the_params_theme_in_steps():
+    # the game's renderers follow RenderParams.theme (ui-spec §3, §4A Choosing):
+    # a new name loads one step per frame while the old theme keeps drawing; a
+    # newer name replaces a load under way; an unknown one is Ripple, no load
+    _need_fb()
+    cap = FrameCapture()
+    _, phases, run_ms = rt.fixture("hot")
+    r = ThemedRenderer(follow=True, overlays=False)
+    old = r.theme
+    t = 0
+    r.frame(_themed(phases, t, "sonar"), cap, rt.T0 + t)
+    assert r.loading == "sonar" and r.theme is old
+    t += 100
+    r.frame(_themed(phases, t, "tide"), cap, rt.T0 + t)        # changed its mind
+    assert r.loading == "tide" and r.theme is old
+    while r.loading is not None:
+        t += 100
+        r.frame(_themed(phases, t, "tide"), cap, rt.T0 + t)
+        assert r.loading is None or r.theme is old
+        assert t < 10000, "load never finished"
+    assert r.theme.name == "tide"
+    tide = r.theme
+    for name in ("tide", "sheen"):                               # same, then unknown
+        t += 100
+        r.frame(_themed(phases, t, name), cap, rt.T0 + t)
+    assert r.loading is None or r.loading == "ripple"
+    while r.loading is not None:
+        t += 100
+        r.frame(_themed(phases, t, "sheen"), cap, rt.T0 + t)
+    assert r.theme.name == "ripple" and r.theme is not tide
+    t += 100
+    r.frame(_themed(phases, t, "sheen"), cap, rt.T0 + t)
+    assert r.loading is None                                     # no reload every frame
+    f = ThemedRenderer("warp")                                   # previews: params ignored
+    f.frame(_themed(phases, 0, "arcade"), cap, rt.T0)
+    assert f.loading is None and f.theme.name == "warp"
+
+
+def test_follow_in_the_menu_starts_in_the_moment_under_it():
+    # a theme picked in the MENU (params.theme changes on a MENU frame) loads
+    # there and starts in the moment of the screen under the MENU (§4A rule 2)
+    _need_fb()
+    cap = FrameCapture()
+    phases = times = None
+    for it in rt.TRANSITIONS:
+        if it[0] == "menu_over_found":
+            phases, times = it[1], it[2]
+    for n in NAMES[1:]:
+        r = ThemedRenderer(follow=True, overlays=False)
+        name = "ripple"
+        for t in times:
+            if t > 1200:
+                break
+            p = rt.params_at(phases, t)
+            if p.screen == "MENU":
+                name = n
+            r.frame(rp_replace(p, theme=name), cap, rt.T0 + t)
+        t = 1200
+        while r.loading is not None:
+            t += 100
+            p = rp_replace(rt.params_at(phases, 1200), theme=n)
+            r.frame(p, cap, rt.T0 + t)
+        assert r.theme.name == n and p.screen == "MENU", (n, p.screen)
+        assert r.theme.moment(p) == M_FOUND, (n, r.theme.moment(p))
+
+
+def test_follow_frames_allocate_nothing():
+    # following params.theme costs one compare a frame: no allocation (rule 7)
+    _need_fb()
+    if not hasattr(gc, "mem_alloc"):
+        raise Skip("needs gc.mem_alloc (MicroPython)")
+    cap = FrameCapture()
+    _, phases, run_ms = rt.fixture("hot")
+    r = ThemedRenderer("tide", follow=True, overlays=False)
+    ps = [_themed(phases, k * 100, "tide") for k in range(8)]
+    for k in range(4):
+        r.frame(ps[k], cap, rt.T0 + k * 100)
+    for k in range(4, 8):
+        gc.collect()
+        gc.disable()
+        a0 = gc.mem_alloc()
+        r.frame(ps[k], cap, rt.T0 + k * 100)
+        grown = gc.mem_alloc() - a0
+        gc.enable()
+        assert grown == 0, (k, grown)

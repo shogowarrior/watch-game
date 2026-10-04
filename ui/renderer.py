@@ -786,22 +786,28 @@ class Renderer:
             self._snap(p, t)
         self._plan(p, t)
         self._palette(p, t)
+        if display is not self._disp:
+            self._disp = display
+            self._service = getattr(display, "service", None)
+        svc = self._service
+        self._field(svc)
+        self._strip(p, t, 0, self.fb)
+        if svc is not None:
+            svc()
+        bands = self.bands
+        for k in range(NB):
+            display.push_strip(k * BH, BH, bands[k])
+        return ev
+
+    def _field(self, svc):
+        """The field into the four bands, ``svc`` (display.service or None)
+        after each; ui/themes ThemedRenderer draws a theme here instead."""
         pal = self.field.pal
         arr = self.field.pal_arr
         m = self.map
         bands = self.bands
         fbs = self.band_fbs
-        if display is not self._disp:
-            self._disp = display
-            self._service = getattr(display, "service", None)
-        svc = self._service
         for k in range(NB):
             m.blit(k * BH, pal, arr, bands[k], fbs[k])
             if svc is not None:
                 svc()
-        self._strip(p, t, 0, self.fb)
-        if svc is not None:
-            svc()
-        for k in range(NB):
-            display.push_strip(k * BH, BH, bands[k])
-        return ev

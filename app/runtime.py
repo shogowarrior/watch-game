@@ -28,7 +28,8 @@ One ``step(now)`` does, in order:
   button  AXP202 PEK -> ``game.on_button`` (short / long; wakes when off)
   logic   every 100 ms: tracker + battery (every 10 s) -> ``game.tick``
           -> RenderParams; screen power; AXP202 shutdown only once
-          ``game.power_off``. A reading at or under BATT_WARN_PCT that is
+          ``game.power_off``; the MENU's theme choice saved when it closes
+          (app/settings.py, ``theme_file``). A reading at or under BATT_WARN_PCT that is
           lower than the game's value reaches the game only after
           ``BATT_LOW_READS`` such readings in a row (1 s apart), and a
           shutdown-level one never on USB; until then the game keeps its
@@ -38,6 +39,10 @@ One ``step(now)`` does, in order:
           fps at or under ``params.fps_cap`` (20, saver 10) that the loop's
           measured cost fits; each frame is drawn at its slot time, so motion
           steps evenly (ui-spec §4 rule 6). Bands -> ``display.push_strip``.
+          The renderer is ``ui.themes.ThemedRenderer``: ``begin`` loads the
+          saved theme whole (before ``run`` starts the watchdog), and a theme
+          chosen in the MENU (``params.theme``) loads one step per frame
+          while the old one keeps drawing (ui-spec §4A rule 7).
           With the screen off the renderer still runs state-only
           (``display=None``) so heartbeats keep their time grid (ui-spec §7).
           A frame takes ~80 ms on the watch, so the motor is serviced after
@@ -108,6 +113,7 @@ from finder import gestures as G
 from finder.game import Game
 from finder.haptic_patterns import HapticPlayer
 from finder.link import LinkMonitor, R_BAD, R_DUP
+from app import settings
 from app.pacer import FramePacer
 from hal.axp202 import EV_SHORT, EV_LONG
 from hal.bma423 import EV_WRIST_WEAR, FEAT_OK, FEAT_PENDING
@@ -184,8 +190,9 @@ class Runtime:
 
     def __init__(self, board, parts=PARTS, clock=None, sleep_ms=None, clock_us=None,
                  renderer=None, telemetry=None, gc_collect=None, z_sign=None, watchdog_ms=None,
-                 fps_log_ms=None):
+                 fps_log_ms=None, theme_file=settings.THEME_FILE):
         self.board = board
+        self.theme_file = theme_file          # the saved theme (None: neither read nor saved)
         self.watchdog_ms = watchdog_ms
         self.fps_log_ms = fps_log_ms
         self.log_line = print                 # the fps line's sink (tests swap it)
@@ -248,12 +255,12 @@ class Runtime:
             except OSError:
                 self.io_errors[S_BUTTON] += 1
         self._hdisp = None if self.display is None else _HapticDisplay(self, self.display)
+        tf = self.theme_file
+        theme = T.THEME_DEFAULT if tf is None else settings.load_theme(tf)
+        self._theme_saved = theme
+        self._menu_was = False
         if self.renderer is None:
-            try:
-                from ui.renderer import Renderer
-                self.renderer = Renderer()
-            except (ImportError, MemoryError) as e:
-                self.errors["renderer"] = e
+            self.renderer = self._make_renderer(theme)
         mac = None if self.radio is None else self.radio.mac
         if mac is not None and self.tele is not None:
             self.tele.set_mac(mac)            # the datagram ``mac`` (debug mode)
@@ -263,6 +270,7 @@ class Runtime:
             self.feed = ImuFeed(self.imu, z_sign=self.z_sign, out_hz=IMU_OUT_HZ)
         blank = None if self.feed is None else self.feed.blanked
         self.game = Game(mac, blank_fn=blank, t_ms=now)
+        self.game.set_theme(theme)
         if self.feed is not None:
             self.feed.on_tap = self._on_tap
         self.link = LinkMonitor(GAME_ID)
@@ -304,6 +312,34 @@ class Runtime:
         self.started = True
         self.running = True
         return self
+
+    def _make_renderer(self, theme):
+        """The ThemedRenderer with ``theme`` loaded whole (Ripple if that
+        theme fails to load); None (errors["renderer"]) without framebuf."""
+        try:
+            from ui.themes import ThemedRenderer
+            if ThemedRenderer is None:
+                raise ImportError("no framebuf")
+            try:
+                return ThemedRenderer(theme, follow=True)
+            except MemoryError:
+                raise
+            except Exception as e:  # noqa: BLE001 - a broken theme must not stop the game
+                self.errors["theme"] = e
+                return ThemedRenderer(T.THEME_DEFAULT, follow=True)
+        except (ImportError, MemoryError) as e:
+            self.errors["renderer"] = e
+            return None
+
+    def _save_theme(self):
+        """Save the MENU's theme choice when the MENU closes with a theme
+        other than the saved one (a failed write: again at the next close)."""
+        g = self.game
+        was = self._menu_was
+        self._menu_was = now_open = g.menu.is_open
+        if was and not now_open and g.theme != self._theme_saved and self.theme_file is not None:
+            if settings.save_theme(g.theme, self.theme_file):
+                self._theme_saved = g.theme
 
     # ---- main loop -----------------------------------------------------------------
     def run(self, max_ms=None):
@@ -649,6 +685,7 @@ class Runtime:
         p = g.tick(now)
         self.params = p
         self._fresh = True
+        self._save_theme()
         if self.feed is not None:
             try:
                 self.feed.set_fast(g.bump_armed())

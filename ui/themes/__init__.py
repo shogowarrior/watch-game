@@ -1,20 +1,24 @@
 """Themes (ui-spec §4A): six looks for the field, one game.
 
     from ui.themes import ThemedRenderer, NAMES
-    r = ThemedRenderer("tide")        # a Renderer whose field a theme draws
-    r.set_theme("warp")               # switch now (the next frame shows it whole)
-    r.queue_theme("sonar")            # switch in steps while the game runs
-    beats = r.frame(params, display, now)
+    r = ThemedRenderer("tide", follow=True)  # loads Tide whole (boot: before the watchdog)
+    beats = r.frame(params, display, now)    # follows params.theme, in steps
 
-``ThemedRenderer`` is the Renderer (ui/renderer.py) with two methods taken
-over: ``_palette`` asks the theme to build its frame instead of rebuilding
-the ripple palette, and ``frame`` lets the theme blit each band (and draw
-its own layer) where the renderer blits the ring map. Everything else, the
-field's state, ring schedule, heartbeats, the plan and every overlay, is the
-renderer's own. Ripple through it is pixel-identical to the plain Renderer
-(tests/test_themes.py). Not yet used by the game: the MENU row, the saved
-choice and ``RenderParams.theme`` come with the renderer hook (ui-spec §4A
-Status).
+    r = ThemedRenderer("warp")        # previews, tests: the theme is switched
+    r.set_theme("sonar")              # here, now (the next frame shows it whole) ...
+    r.queue_theme("arcade")           # ... or in steps, one per frame call
+
+``ThemedRenderer`` is the renderer the watch (app/runtime.py) and the web
+simulator (sim/webhost.py) draw with: the Renderer (ui/renderer.py) with
+``_palette`` taken over (the theme builds its frame instead of the ripple
+palette) and ``_field`` (the theme blits each band, and draws its own layer,
+where the renderer blits the ring map). Everything else, the field's state,
+ring schedule, heartbeats, the plan and every overlay, is the renderer's
+own. Ripple through it is pixel-identical to the plain Renderer
+(tests/test_themes.py). With ``follow`` (the game's renderers) each
+``frame`` call reads ``RenderParams.theme`` (ui-spec §3; the MENU THEME row
+sets it) and queues that theme when it differs from the last one asked for;
+without it (previews, tests) only ``set_theme`` and ``queue_theme`` switch.
 
 It also remembers the moment and the RenderParams of the last frame drawn
 outside the MENU (``m_live``, ``p_live``), so a theme keeps, or a theme made
@@ -40,7 +44,6 @@ modules still import, for their maths.
 """
 
 from finder import tuning as T
-from finder.compat import ticks_ms
 from ui.themes.base import moment_of
 
 try:
@@ -106,12 +109,14 @@ def make(name, r):
 class _ThemedRenderer(Renderer or object):
     """Renderer whose field is drawn by a theme (see the module docstring)."""
 
-    def __init__(self, theme=None, overlays=True):
+    def __init__(self, theme=None, overlays=True, follow=False):
         self.theme = None
         self.loading = None             # name of the theme queue_theme is loading
         self._load = None
         self._out = [None]
+        self._want = None               # the theme last asked for (params, set or queue)
         self.overlays = overlays
+        self.follow = follow            # frame() follows RenderParams.theme
         self.m_live = -1                # moment of the last frame drawn outside the MENU
         self.p_live = None              # and its RenderParams
         Renderer.__init__(self)
@@ -121,8 +126,10 @@ class _ThemedRenderer(Renderer or object):
         """Switch now, loading the theme whole; the next drawn frame is the
         new theme, whole. Cancels a queued switch. Unknown: Ripple."""
         name = known(name)
+        self._want = name
         self._load = None
         self.loading = None
+        self._out[0] = None
         if self.theme is not None and self.theme.name == name:
             return
         self.theme = None               # let the old one's buffers go first
@@ -134,6 +141,7 @@ class _ThemedRenderer(Renderer or object):
         step is the new theme, whole. A later call replaces a queued one;
         cheap to call every frame with the same name. Unknown: Ripple."""
         name = known(name)
+        self._want = name
         if name == self.loading:
             return
         self._out[0] = None
@@ -160,6 +168,10 @@ class _ThemedRenderer(Renderer or object):
         if self.theme is not None:
             self.theme.reset()
 
+    def _snap(self, p, t):
+        Renderer._snap(self, p, t)
+        self.theme.started = False      # the first drawn frame after a dark spell: a wake
+
     def _palette(self, p, t):
         # Renderer._palette's arguments, handed to the theme
         scr = self._scr
@@ -175,30 +187,10 @@ class _ThemedRenderer(Renderer or object):
         self.theme.build(p, t, core, rim, SAVER_VMAX if self._saver else V7,
                          SUN_LIFT if p.sun else 0)
 
-    def frame(self, p, display=None, now=None):
-        """Renderer.frame with the theme drawing the field (same clock,
-        events and band pushes), then one step of a queued theme load."""
-        t = ticks_ms() if now is None else now
-        ev = self._step(p, t)
-        if display is None:
-            self._dark = True
-            if self.theme is not None:
-                self.theme.started = False      # the next drawn frame is a wake
-            if self._load is not None:
-                self._load_step()
-            return ev
-        if self._dark:
-            self._dark = False
-            self._snap(p, t)
-        self._plan(p, t)
-        self._palette(p, t)
+    def _field(self, svc):
         th = self.theme
         bands = self.bands
         fbs = self.band_fbs
-        if display is not self._disp:
-            self._disp = display
-            self._service = getattr(display, "service", None)
-        svc = self._service
         for k in range(NB):
             th.blit(k * BH, bands[k], fbs[k])
             if svc is not None:
@@ -207,15 +199,25 @@ class _ThemedRenderer(Renderer or object):
             th.draw(self.fb)
             if svc is not None:
                 svc()
+
+    def _strip(self, p, t, y0, fb, h=240):     # h: Renderer._strip default (W)
         if self.overlays:
-            self._strip(p, t, 0, self.fb)
-        if svc is not None:
-            svc()
-        for k in range(NB):
-            display.push_strip(k * BH, BH, bands[k])
+            Renderer._strip(self, p, t, y0, fb, h)
+
+    def frame(self, p, display=None, now=None):
+        """Renderer.frame with the theme drawing the field (same clock,
+        events and band pushes), then one step of a queued theme load. With
+        ``follow``, a ``p.theme`` other than the last theme asked for is
+        queued first."""
+        if self.follow:
+            w = p.theme
+            if w != self._want:
+                self.queue_theme(w)
+                self._want = w
+        ev = Renderer.frame(self, p, display, now)
         if self._load is not None:
-            if svc is not None:
-                svc()
+            if display is not None and self._service is not None:
+                self._service()
             self._load_step()
         return ev
 

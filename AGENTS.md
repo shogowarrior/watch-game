@@ -31,6 +31,7 @@ over their USB cables or over Wi-Fi.
 | `app/runtime.py` | The watch main loop `Runtime.step(now)`: radio, imu, touch, button, logic (10 Hz), render, tx, haptic, gc. |
 | `app/pacer.py` | `FramePacer`: the frame lock (20, 10, 8, 7, 6, 5 fps from measured cost), slot times for even motion, the serial fps line's counters. |
 | `app/imu_feed.py` | BMA423 FIFO (100 Hz mg) -> `MotionTracker` at 25 Hz in g, plus the bump spike detector. |
+| `app/settings.py` | Settings kept on flash: the MENU's theme choice in `/theme` (read at boot, written when the MENU closes). |
 | `app/telemetry.py` | JSONL telemetry for field tests (`session()`; main.py turns it on when `/tele` exists). In debug mode its `sink` (a `hal/debuglink.py` link) sends each record, plus an `rp` record (the `RenderParams`), as one line on USB or one UDP datagram on Wi-Fi. |
 | `hal/` | The only code that touches hardware. See `hal/README.md` (drivers, gotchas, bench tools). |
 | `hal/pins.py` | GPIO map, bus ids, addresses, clock limits. V1 only. |
@@ -55,7 +56,7 @@ over their USB cables or over Wi-Fi.
 | `finder/menu.py` | `Menu`: the MENU list (rows, scroll, END ROUND confirm, auto-close). |
 | `finder/render_params.py` | `RenderParams`, the only thing the renderer reads (ui-spec §3). |
 | `ui/` | Frame renderer: `renderer.py` (draws the whole 240x240 frame, pushes it as 4 bands of 240x60), `field.py` (ripple palette), `glyphs.py`, `text.py`, `font.py`. Colours in `ui/__init__.py` are byte-swapped RGB565. |
-| `ui/themes/` | Field themes (ui-spec §4A): `base.py` (the contract and shared helpers), one module per theme (`ripple`, `sonar`, `tide`, `warp`, `arcade`, `fireflies`), `ThemedRenderer` in `__init__.py`. Built and tested, not yet chosen from the MENU or wired into the game. |
+| `ui/themes/` | Field themes (ui-spec §4A): `base.py` (the contract and shared helpers), one module per theme (`ripple`, `sonar`, `tide`, `warp`, `arcade`, `fireflies`), `ThemedRenderer` in `__init__.py`: the renderer the watch and the web simulator draw with (`follow=True`: it loads `RenderParams.theme`, chosen with the MENU THEME row, in steps). |
 | `sim/` | Two-watch simulator: `world.py`, `radio.py` (RSSI profiles clean/typical/harsh/indoor, per-watch beacon period), `imu.py`, `accel_synth.py`, `scenarios.py`, `rng.py`, `link.py` (`GameLink`: beacon hand-off between two Games), `Sim`; `webhost.py` drives the browser sim. |
 | `native/` | Arduino and ESP-IDF ports (PlatformIO), work in progress: a shared C++ core (the game logic of `finder/`, checked call for call against traces of the Python tests; the renderer of `ui/`, checked against `tests/snapshot_crc.json`; display, PMU and IMU sequences from `hal/`) and the display benchmark both builds run; the main loop and the game builds are next. See `native/README.md`; `tests/test_native.py` runs its host tests. |
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). Its **Simulator \| Real watches** toggle shows the real watches in debug mode. |
@@ -218,7 +219,7 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
     exponent from `tokens.json` (`calibrate.n` 2.6 outdoors, `n_indoor` 3.0 indoors
     or in crowds) via `Game.set_place(indoor)`. One exponent cannot fit both
     (docs/estimation/bakeoff.md section 6). Players switch it with the MENU row
-    `PLACE: OUT/IN` (the menu is a 5-row list, 4 visible, that scrolls).
+    `PLACE: OUT/IN` (the menu is a 6-row list, 4 visible, that scrolls).
 
 ## Specs and decisions
 

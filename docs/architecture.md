@@ -26,8 +26,8 @@ Rules that keep the layers apart:
 - `finder/` never reads hardware or the clock by itself: every call takes a
   `t_ms` (ticks ms, compared only with `ticks_diff`). That is what lets one fake
   clock drive two games in the simulator and in `tests/test_episode.py`.
-- The renderer reads **only** `RenderParams` (runes, menu rows and sun mode are
-  fields too). It never sees estimator internals. `RenderParams` is
+- The renderer reads **only** `RenderParams` (runes, menu rows, sun mode and
+  the field theme are fields too). It never sees estimator internals. `RenderParams` is
   JSON-serialisable (`to_dict` / `from_dict`). In debug mode (below) the watch
   sends it (5 Hz on Wi-Fi, about once a second on USB) and the web page draws
   it with the same renderer. No replay tool exists yet (R-08, R-14 in
@@ -85,7 +85,7 @@ flowchart LR
   ARROW --> RP
   PAIR --> RP
   MENU --> RP
-  RP --> REND["ui.renderer.Renderer<br/>whole frame, 4 bands of 240x60"]
+  RP --> REND["ui.themes.ThemedRenderer (a ui.renderer.Renderer)<br/>whole frame, 4 bands of 240x60"]
   REND --> DISP
   REND -->|heartbeats| PLAYER --> MOTOR
   RP -.->|haptic| PLAYER
@@ -154,7 +154,11 @@ stages in order:
    field is coloured
    from a quarter of the ring map, eight pixels a pass mirrored left-right
    and top-bottom (a viper kernel on the watch, checked against the framebuf
-   path when the renderer starts; elsewhere a framebuf palette blit). With the screen off it runs with
+   path when the renderer starts; elsewhere a framebuf palette blit). The
+   renderer is `ui.themes.ThemedRenderer`: the field is drawn by the theme
+   `params.theme` names (ui-spec §4A; Ripple is the ring field above), and a
+   newly chosen theme loads one step per frame while the old one keeps
+   drawing. With the screen off it runs with
    `display=None`, so ring and heartbeat timing continue. It returns only the
    heartbeat names, locked to ring spawns.
 7. **tx**: when due, `game.fill_beacon` fills the 16-byte beacon (seq, own and
@@ -239,7 +243,7 @@ repeatable runs.
   `sim/link.py` (`GameLink`: each watch beacons at its own `Game.beacon_hz`,
   and beacons are packed and unpacked through `finder.proto`), and plays a
   round to FOUND.
-- `sim/webhost.py` (`TwoWatchSim`) does the same with a `Renderer` +
+- `sim/webhost.py` (`TwoWatchSim`) does the same with a `ThemedRenderer` +
   `FrameCapture` and a `HapticPlayer` per watch (nothing is drawn while a
   screen is off, as on the watch). `web/sim/index.html` loads MicroPython WebAssembly,
   steps it from `requestAnimationFrame` and blits both 240x240 frames straight

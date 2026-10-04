@@ -246,13 +246,19 @@ FIXTURES = [
                                banner=("BACK IN RANGE", "info", False))),
                       (50, hunt(1, dist_band="~20",
                                 banner=("BACK IN RANGE", "info", False)))], 700),
-    # menu_rows: Menu.rows (finder/menu.py), a 4-row window into the 5-row list
+    # menu_rows: Menu.rows (finder/menu.py), a 4-row window into the 6-row list
     ("menu", [(0, hunt(2, dist_band="~10")),
               (1000, dict(_menu, sub="1v", menu_rows=MENU_ROWS))], 1800),
     ("menu_scrolled", [(0, hunt(2, dist_band="~10")),
-                       (1000, dict(_menu, sub="2^",
-                                   menu_rows=("SUN: OFF", "BUZZ: FULL", "PLACE: IN",
+                       (1000, dict(_menu, sub="1^",
+                                   menu_rows=("BUZZ: FULL", "PLACE: IN", "THEME: RIPPLE",
                                               "END ROUND")))], 1800),
+    # the THEME row (ui-spec §4A Choosing) on its longest label; this renderer
+    # draws Ripple whatever ``theme`` says (docs/design/themes/ for the others)
+    ("menu_theme", [(0, hunt(2, dist_band="~10")),
+                    (1000, dict(_menu, sub="3^v", theme="fireflies",
+                                menu_rows=("SUN: OFF", "BUZZ: FULL", "PLACE: OUT",
+                                           "THEME: FIREFLIES")))], 1800),
 ]
 
 

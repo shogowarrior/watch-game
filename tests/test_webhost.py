@@ -192,7 +192,7 @@ def test_swipe_scrolls_the_menu_and_place_shows_in_telemetry():
     assert g.menu_open and g.menu.top == 0
     s.swipe(0, True)                         # up: rows below come into view
     s.step(100)
-    assert g.menu.top == 1 and s.telemetry(0)["sub"] == "0^"
+    assert g.menu.top == 1 and s.telemetry(0)["sub"] == "0^v"
     for _ in range(20):
         s.step(50)                           # (touch burst filter: 3 touches in 1 s)
     s.swipe(0, False)
@@ -205,6 +205,29 @@ def test_swipe_scrolls_the_menu_and_place_shows_in_telemetry():
     assert s.telemetry(0)["place"] == "OUT" and s.telemetry(1)["place"] == "IN"
     s.set_profile("clean")
     assert s.telemetry(0)["place"] == "OUT" and s.telemetry(1)["place"] == "OUT"
+
+
+def test_theme_set_from_the_page_or_menu_survives_reset():
+    s = TwoWatchSim()
+    s.step(200)
+    assert s.theme_names() == list(T.THEME_NAMES) and s.telemetry(0)["theme"] == "ripple"
+    s.set_theme(0, "fireflies")
+    s.step(200)
+    assert s.telemetry(0)["theme"] == "fireflies" and s.telemetry(1)["theme"] == "ripple"
+    assert s._params[0].theme == "fireflies"
+    try:
+        s.set_theme(1, "sheen")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+    s.reset(2)                                # like the theme saved on a watch
+    s.step(200)
+    assert s.telemetry(0)["theme"] == "fireflies" and s.telemetry(1)["theme"] == "ripple"
+    if s.renderers is not None:               # MicroPython: the screen follows once loaded
+        for _ in range(80):
+            s.step(100)
+        assert s.renderers[0].theme.name == "fireflies"
+        assert s.renderers[1].theme.name == "ripple"
 
 
 def test_page_touches_feed_the_burst_filter():
@@ -374,7 +397,7 @@ def test_cone_score_follows_the_true_bearing():
 
 def _end_round(s, i):
     s.button(i, True); s.step(200)              # MENU
-    for _ in range(4):                          # down to END ROUND
+    for _ in range(5):                          # down to END ROUND
         s.button(i); s.step(200)
     s.button(i, True); s.step(200)              # SURE? PRESS
     s.button(i); s.step(100)                    # confirm

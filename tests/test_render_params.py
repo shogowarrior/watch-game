@@ -16,7 +16,7 @@ SPEC_EXAMPLE = (
     ' "dist_band": "~10", "dist_stale": false, "word": null, "top_text": null, "banner": null,'
     ' "status": [64, 71, 4, false, false], "menu_rows": null, "sweep": null,'
     ' "haptic": null, "heartbeat": "DOUBLE", "heartbeat_every": 1, "backlight": 0.6,'
-    ' "sun": false, "fps_cap": 20}'
+    ' "sun": false, "fps_cap": 20, "theme": "ripple"}'
 )
 
 
@@ -38,7 +38,7 @@ def _has(viol, field):
 
 
 def test_fields_and_namedtuple():
-    assert len(FIELDS) == 35 and len(set(FIELDS)) == 35
+    assert len(FIELDS) == 36 and len(set(FIELDS)) == 36
     assert set(DEFAULTS) == set(FIELDS)
     rp = make_params()
     assert isinstance(rp, tuple) and len(rp) == len(FIELDS)
@@ -159,6 +159,9 @@ def test_valid_other_screens():
     assert validate(rp) == [], validate(rp)
     rp = make_params(screen="MENU", sub="2", ramp="grey",
                      menu_rows=("RESUME", "SUN: ON", "BUZZ: EVENTS", "PLACE: IN"))
+    assert validate(rp) == [], validate(rp)
+    rp = make_params(screen="MENU", sub="2^", ramp="grey", theme="fireflies",
+                     menu_rows=("BUZZ: FULL", "PLACE: OUT", "THEME: FIREFLIES", "END ROUND"))
     assert validate(rp) == [], validate(rp)
     rp = _zone_frame(1, status=(80, 80, 3, True, True), sun=True)   # unreliable: pinned
     assert validate(rp) == [], validate(rp)
@@ -308,6 +311,8 @@ def test_violations_detected():
         ("heartbeat_every", replace(base, heartbeat_every=3)),
         ("backlight", replace(base, backlight=2.0)),
         ("fps_cap", replace(base, fps_cap=30)),
+        ("theme", replace(base, theme="sheen")),
+        ("theme", replace(base, theme=None)),
         ("t_ms", replace(base, t_ms=-1)),
         ("top_text", replace(base, sub="turn", glyph="arrow", arrow_deg=30.0, cone_deg=20.0,
                              arrow_style="solid_a", sweep=(30.0, (None,) * 12, None, False),

@@ -225,6 +225,7 @@ class Game:
         self.battery = battery
         self.sun = False
         self.buzz = BUZZ_FULL
+        self.theme = T.THEME_DEFAULT  # field theme (set_theme): survives END ROUND
         self.params = None
         self.howto = HT.HowTo()
         self._howto_known = False     # cards opened or a round started since power-on
@@ -251,6 +252,15 @@ class Game:
         """Outdoor (default) or indoor/crowded: sets the path-loss exponent (tokens calibrate.n / n_indoor)."""
         self.indoor = bool(indoor)
         self.est.set_exponent(T.PATH_LOSS_N_INDOOR if self.indoor else T.PATH_LOSS_N)
+
+    def set_theme(self, name):
+        """Field theme (ui-spec §4A Choosing): a name in tuning.THEME_NAMES,
+        anything else the default. The runtime sets the saved one at boot
+        and saves the MENU's choice; RenderParams.theme carries it."""
+        self.theme = T.THEME_DEFAULT
+        for n in T.THEME_NAMES:
+            if n == name:
+                self.theme = n        # the tuning constant itself (cheap compares downstream)
 
     def reset(self, t_ms):
         """Everything back to PAIRING ``looking`` (forget the partner)."""
@@ -788,7 +798,7 @@ class Game:
                 self._peer_sweep = False
             self._set_expected(t_ms)
         self.state_byte = self._state_byte(t_ms)
-        self.menu.window(self.sun, self.buzz, self.indoor)
+        self.menu.window(self.sun, self.buzz, self.indoor, self.theme)
         p = self._params(t_ms)
         if self._toast == T_PRESS_2X and p.word is not None:
             self._toast = None        # BUMP!, HOLD STILL or an arrow word took the slot (§8)
@@ -1438,6 +1448,9 @@ class Game:
             self.buzz = (self.buzz + 1) % len(MENU.BUZZ_ROWS)
         elif act == MENU.PLACE:
             self.set_place(not self.indoor)
+        elif act == MENU.THEME:
+            names = T.THEME_NAMES
+            self.theme = names[(names.index(self.theme) + 1) % len(names)]
         elif act == MENU.END:
             self.reset(t_ms)           # END ROUND confirmed: forget the partner
 
@@ -1884,4 +1897,5 @@ class Game:
             status=status, menu_rows=rows, sweep=sweep,
             haptic=haptic, heartbeat=hb, heartbeat_every=every,
             backlight=self._backlight(t_ms),
-            fps_cap=T.SAVER_FPS if self.saver else T.FPS_TARGET, sun=self.sun)
+            fps_cap=T.SAVER_FPS if self.saver else T.FPS_TARGET, sun=self.sun,
+            theme=self.theme)

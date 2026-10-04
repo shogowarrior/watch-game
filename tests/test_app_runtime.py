@@ -2420,3 +2420,145 @@ def test_found_lights_face_down_panels_for_10s():
     assert all(rt.screen_is_on and rt.bl_level > 0.0 for rt in rts)
     run_to(ft + T.FOUND_LIT_MS + 300)
     assert all(rt.display.asleep and rt.game.mode == M_FOUND for rt in rts)
+
+
+def test_theme_file_reads_and_writes_names_only():
+    """app/settings.py: the saved theme is one name; anything else reads as
+    the default, and a write that fails says so (ui-spec §4A Choosing)."""
+    import os
+    from app import settings
+    from finder import tuning as T
+    d = _tmpdir()
+    p = d + "/_theme_test"
+    try:
+        assert settings.load_theme(p) == T.THEME_DEFAULT          # no file
+        assert settings.save_theme("arcade", p)
+        n = settings.load_theme(p)
+        assert n == "arcade" and n is T.THEME_NAMES[4]            # the constant itself
+        for junk in ("ARCADE", "", "sheen\n", "x" * 100):
+            with open(p, "w") as f:
+                f.write(junk)
+            assert settings.load_theme(p) == T.THEME_DEFAULT, junk
+        with open(p, "w") as f:
+            f.write(" warp\n")
+        assert settings.load_theme(p) == "warp"                   # whitespace trimmed
+    finally:
+        os.remove(p)
+        if d != ".":
+            os.rmdir(d)
+    assert not settings.save_theme("tide", "nodir/theme")
+
+
+def test_saved_theme_is_set_at_begin_and_saved_when_the_menu_closes():
+    """The runtime gives the game the saved theme before the loop starts; a
+    theme picked in the MENU is written when the MENU closes, only when it
+    differs from the saved one, and a failed write is tried at the next close."""
+    import os
+    from app import settings
+    from app.runtime import Runtime
+    d = _tmpdir()
+    p = d + "/_theme_rt"
+    save = settings.save_theme
+    writes = []
+    fail = [False]
+
+    def spy(name, path):
+        writes.append(name)
+        return False if fail[0] else save(name, path)
+    try:
+        assert save("tide", p)
+        clock = Clock(0)
+        rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                     gc_collect=lambda: None, theme_file=p)
+        rt.begin(0)
+        g = rt.game
+        assert g.theme == "tide"
+        settings.save_theme = spy
+        t = [100]
+
+        def logic():
+            rt._stage_logic(t[0])
+            t[0] += 100
+        logic()
+        assert rt.params.theme == "tide"
+        g.on_button(t[0], True)                 # MENU
+        logic()
+        for _ in range(4):
+            g.on_button(t[0])                   # down to THEME
+        g.on_button(t[0], True)                 # tide -> warp
+        logic()
+        assert g.menu_open and g.theme == "warp" and not writes   # not while it is open
+        fail[0] = True                          # the flash refuses the first write
+        g.on_button(t[0])
+        g.on_button(t[0])                       # THEME -> END ROUND -> RESUME
+        g.on_button(t[0], True)                 # RESUME closes the MENU
+        logic()
+        assert not g.menu_open and writes == ["warp"] and settings.load_theme(p) == "tide"
+        logic()
+        assert writes == ["warp"]               # once per close, not every tick
+        fail[0] = False
+        g.on_button(t[0], True)                 # open and close again: tried again
+        logic()
+        g.on_button(t[0], True)                 # RESUME
+        logic()
+        assert writes == ["warp", "warp"] and settings.load_theme(p) == "warp"
+        g.on_button(t[0], True)                 # no change: no write
+        logic()
+        g.on_button(t[0], True)
+        logic()
+        assert writes == ["warp", "warp"]
+    finally:
+        settings.save_theme = save
+        os.remove(p)
+        if d != ".":
+            os.rmdir(d)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None, theme_file=None)
+    rt.begin(0)
+    assert rt.game.theme == "ripple"            # no file: the default, nothing written
+
+
+def test_runtime_renderer_loads_the_saved_theme_whole():
+    """Without an injected renderer the runtime makes the ThemedRenderer,
+    following params.theme, with the saved theme already loaded (before
+    ``run`` starts the watchdog); a theme that fails to load falls back to
+    Ripple and is reported."""
+    import os
+    from app import settings
+    from app.runtime import Runtime
+    try:
+        import framebuf  # noqa: F401
+    except ImportError:
+        from tests import Skip
+        raise Skip("framebuf: the renderer is MicroPython-only")
+    d = _tmpdir()
+    p = d + "/_theme_mk"
+    try:
+        settings.save_theme("arcade", p)
+        clock = Clock(0)
+        rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, gc_collect=lambda: None,
+                     theme_file=p)
+        rt.begin(0)
+        r = rt.renderer
+        assert r.theme.name == "arcade" and r.loading is None and r.follow
+        assert rt.game.theme == "arcade" and "renderer" not in rt.errors
+        import ui.themes as TH
+        real = TH.make
+
+        def broken(name, rr):
+            if name == "warp":
+                raise ValueError("bad theme")
+            return real(name, rr)
+        TH.make = broken
+        try:
+            settings.save_theme("warp", p)
+            rt2 = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, gc_collect=lambda: None,
+                          theme_file=p)
+            rt2.begin(0)
+        finally:
+            TH.make = real
+        assert rt2.renderer.theme.name == "ripple" and isinstance(rt2.errors["theme"], ValueError)
+    finally:
+        os.remove(p)
+        if d != ".":
+            os.rmdir(d)

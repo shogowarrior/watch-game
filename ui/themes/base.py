@@ -379,7 +379,7 @@ class Theme:
         """Advance the theme clock to ``t``: ``dt`` = ms since the last drawn
         frame, at most DT_MAX (0 in MENU, where the field is frozen);
         ``wake`` on the first frame (after ``__init__``, ``reset()`` or a
-        dark spell, ui/themes ThemedRenderer.frame) or after a gap over
+        dark spell, ui/themes ThemedRenderer._snap) or after a gap over
         WAKE_MS: snap eased state, report everything."""
         d = ticks_diff(t, self.t)
         if not self.started or d < 0 or d > WAKE_MS:
