@@ -273,6 +273,7 @@ class Game:
         self._last_trend = 0
         self._last_trend_t = None
         self.lost_trend = 0       # last trend at link loss (LINK_LOST hint / mark)
+        self._lost_hint = False   # LINK_LOST: GO BACK / KEEP ON shown (latched per episode)
         self._left_t = None       # partner back in PAIRING since
         self._held = None         # event haptic held while the MENU is open
         self._hz = self.meter.expected_hz
@@ -758,7 +759,8 @@ class Game:
         other hint showing); the round's first FAR says ``FASTER IS CLOSER``."""
         if self.arrow is not None or not self._hint_free():
             return
-        if self._teach_far and self.px.zone == FAR:
+        if (self._teach_far and self.px.zone == FAR and not self._peer_sweep
+                and not self.menu.is_open):
             self._teach_far = False
             self._hint_set(t_ms, T_FASTER_CLOSER)
         else:
@@ -870,7 +872,8 @@ class Game:
                     self._hint = None
                 if z == FAR or z == NEAR:
                     self._scan_hint(t_ms)
-        if self._teach_far and z == FAR and self._hint is None and not self._peer_sweep:
+        if (self._teach_far and z == FAR and self._hint is None and not self._peer_sweep
+                and not self.menu.is_open):
             self._scan_hint(t_ms)     # the first FAR, once FIND YOUR FRIEND has gone
         # hidden by the MENU or SAVER ON: the pacer must not run unseen (clock pauses)
         self._update_arrow(t_ms, True, self.menu.is_open or self._inter_until is not None)
@@ -1215,6 +1218,7 @@ class Game:
         self._last_trend_t = None
         self.bump_ready = False
         self._hint = None
+        self._lost_hint = False
         self._emit(t_ms, "LOST")
         self._light(t_ms, T.EVENT_LIT_MS)
         self.est.reset()
@@ -1223,6 +1227,11 @@ class Game:
 
     def _tick_lost(self, t_ms):
         self._update_arrow(t_ms, False)
+        if not self._lost_hint:
+            el = self.peer.age(t_ms)
+            el = ticks_diff(t_ms, self.mode_t) + T.LINK_LOST_AFTER_MS if el is None else el
+            # from the last packet; once shown it stays (a stray packet takes nothing back)
+            self._lost_hint = el >= T.LOST_HINT_AFTER_MS
         if self.peer.live3(t_ms) and self.est.dist_m is not None and not self._peer_gone():
             self._update_px(t_ms)
             if self.px.zone is not None:
@@ -1236,9 +1245,7 @@ class Game:
             return _B_FRIEND_OFF
         if pv.battery is not None and pv.battery <= T.BATT_BANNER_PCT:
             return _B_FRIEND_LOW
-        el = pv.age(t_ms)
-        el = ticks_diff(t_ms, self.mode_t) + T.LINK_LOST_AFTER_MS if el is None else el
-        if el < T.LOST_HINT_AFTER_MS:
+        if not self._lost_hint:
             return _B_SIGNAL_LOST
         return _B_KEEP_ON if self.lost_trend > 0 else _B_GO_BACK
 

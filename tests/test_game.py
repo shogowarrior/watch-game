@@ -2854,3 +2854,48 @@ def test_link_lost_banner_has_no_running_clock():
     assert hint[0].t_ms - t0 >= T.LOST_HINT_AFTER_MS                 # from the last packet
     assert lost[0].banner is lost[1].banner                          # built once, not per tick
     assert hint[0].banner is hint[-1].banner and len(hint) > 1
+
+
+def test_link_lost_hint_stays_after_a_stray_packet():
+    r = paired_rig(d=20.0)
+    r.state = SC_NEAR
+    r.run(2000)
+    r.run(25000, packets=False)
+    assert r.p.banner == ("LOST: GO BACK", "warn", True)
+    r.packet()                                  # one stray packet: no relink (needs 3 in 2 s)
+    ps = r.run(5000, packets=False)
+    assert r.g.mode == M_LINK_LOST
+    assert all(p.banner == ("LOST: GO BACK", "warn", True) for p in ps), [p.banner for p in ps]
+
+
+def test_faster_is_closer_waits_for_a_friend_scan_to_end():
+    r = paired_rig(d=40.0)
+    r.activity = ACT_WALK
+    r.state = SC_SCANNING
+    r.flags = proto.F_SWEEP                     # the friend sweeps as FIND YOUR FRIEND ends
+    t0 = r.g.round_t0
+    r.run(8000)
+    tops = [p.top_text for p in r.params if p.t_ms >= t0]
+    assert "FASTER IS CLOSER" not in tops and r.g._teach_far, tops
+    r.state = SC_FAR
+    r.flags = 0
+    r.run(5000)
+    tops = [p.top_text for p in r.params if p.t_ms >= t0]
+    assert "FASTER IS CLOSER" in tops
+    # entering the first FAR from NEAR while the friend sweeps: kept for later
+    n = paired_rig(d=20.0)
+    n.activity = ACT_WALK
+    n.state = SC_NEAR
+    n.run(5000)
+    assert n.p.screen == "NEAR" and n.g._teach_far
+    n.state = SC_SCANNING
+    n.flags = proto.F_SWEEP
+    n.est.fixed = 45.0
+    t1 = n.t
+    n.run(4000)
+    assert n.p.screen == "FAR" and n.g._teach_far
+    assert all(p.top_text != "FASTER IS CLOSER" for p in n.params if p.t_ms > t1)
+    n.state = SC_FAR
+    n.flags = 0
+    n.run(T.HINT_CHIP_MS + 2000)                # after the entry's TAP TO SCAN
+    assert any(p.top_text == "FASTER IS CLOSER" for p in n.params if p.t_ms > t1)
