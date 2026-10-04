@@ -48,7 +48,7 @@ def _deg(r):
 
 
 def _text_ok(s):
-    """§12: no zone words, no metres/dBm/degrees (the 10M+ LOST timer excepted)."""
+    """§12: no zone words, no metres/dBm/degrees."""
     if s is None:
         return True
     for w in s.replace(",", " ").replace("?", " ").split(" "):
@@ -59,7 +59,7 @@ def _text_ok(s):
     i = 0
     n = len(s)
     while i < n - 1:
-        if s[i] in "0123456789" and s[i + 1] == "M" and not s.startswith("10M+", i - 1):
+        if s[i] in "0123456789" and s[i + 1] == "M":
             return False
         i += 1
     return True

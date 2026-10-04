@@ -85,20 +85,46 @@ _found = dict(screen="FOUND", zone=3, ramp="gold", intensity=1.0, speed_px_s=0,
               pulse_period_ms=1200, glow_r_px=90, glyph="check", top_text="TIME 12:48",
               status=STATUS_OFF)
 _result = dict(_scan, sub="result", glyph="turn", intensity=0.6, glow_r_px=12)
+# how-to cards keep the looking field: inward listening rings, never live (§6 PAIRING)
+_howto = dict(_pair, sub="howto", ring_live=False)
+HOWTO = (dict(_howto, glyph="runes", runes=RUNES, top_text="HOW TO PLAY 1/4", word="PAIR UP"),
+         dict(_howto, glyph="countdown", countdown=30, top_text="HOW TO PLAY 2/4",
+              word="SPLIT UP"),
+         dict(_howto, glyph="chevrons", trend=1, top_text="HOW TO PLAY 3/4",
+              word="GET CLOSER"),
+         dict(_howto, glyph="bump", bump_icons=0, top_text="HOW TO PLAY 4/4", word="BUMP!"))
 
 FIXTURES = [
     # no partner yet, so Game sends ring_live False; inward rings are
     # listening rings all the same (§4 rule 4), never ghosts
-    ("pairing_looking", [(0, dict(_pair, sub="looking", top_text="PAIR", word="LOOKING",
+    ("pairing_looking", [(0, dict(_pair, sub="looking", top_text="START OTHER WATCH", word="LOOKING",
                                   ring_live=False))], 2000),
+    # 5 s into looking: the hint toast, once (§6 PAIRING)
+    ("pairing_looking_hint", [(0, dict(_pair, sub="looking", top_text="START OTHER WATCH",
+                                       word="LOOKING", ring_live=False,
+                                       banner=("SWIPE: HOW TO PLAY", "info", False)))], 2000),
+    ("pairing_howto_1", [(0, HOWTO[0])], 2000),
+    ("pairing_howto_2", [(0, HOWTO[1])], 2000),
+    ("pairing_howto_3", [(0, HOWTO[2])], 2000),
+    ("pairing_howto_4", [(0, HOWTO[3])], 2000),
     ("pairing_seen", [(0, dict(_pair, sub="seen", speed_px_s=0, wavelength_px=0, runes=RUNES,
-                               top_text="SAME RUNES?", word="TAP = YES"))], 1200),
+                               top_text="SAME RUNES?", word="BUMP = YES"))], 1200),
+    # a bump only this watch felt: the felt-it toast keeps the question visible (§6 PAIRING)
+    ("pairing_bump_one", [(0, dict(_pair, sub="seen", speed_px_s=0, wavelength_px=0,
+                                   runes=RUNES, top_text="SAME RUNES?", word="BUMP = YES",
+                                   banner=("ONLY YOU FELT IT", "info", False)))], 1200),
     ("pairing_confirmed", [(0, dict(_pair, sub="confirmed", speed_px_s=0, wavelength_px=0,
-                                    runes=RUNES, top_text="WAITING", word="WAITING"))], 1200),
+                                    runes=RUNES, top_text="WAITING FOR FRIEND",
+                                    word="YOU'RE IN"))], 1200),
     ("pairing_calibrate", [(0, dict(_cal, countdown=3)), (1000, dict(_cal, countdown=2))], 1500),
     ("pairing_split", [(0, hunt(1, screen="PAIRING", sub="split", glyph="countdown",
                                 countdown=24, top_text="NO PEEKING", word="SPLIT UP",
                                 heartbeat=None))], 2000),
+    # every split start raises the NEW ROUND toast over SPLIT UP (§6 PAIRING)
+    ("pairing_split_new_round", [(0, hunt(1, screen="PAIRING", sub="split", glyph="countdown",
+                                          countdown=30, top_text="NO PEEKING", word="SPLIT UP",
+                                          heartbeat=None,
+                                          banner=("NEW ROUND", "info", False)))], 1000),
     ("pairing_split_tap", [(0, hunt(1, screen="PAIRING", sub="split", glyph="countdown",
                                     countdown=21, top_text="TAP WHEN READY", word="SPLIT UP",
                                     heartbeat=None))], 2000),
@@ -115,10 +141,19 @@ FIXTURES = [
                             speed_px_s=-36, pulse_period_ms=3200, wavelength_px=115,
                             glow_r_px=18, ring_live=False, glyph="seeker", word="SEARCHING",
                             status=STATUS_OFF))], 2500),
+    # the round's hunt begins with no partner heard yet: the goal, for 4 s
+    ("searching_round_start", [(0, dict(screen="SEARCHING", zone=None, ramp="grey",
+                                        intensity=0.15, speed_px_s=-36, pulse_period_ms=3200,
+                                        wavelength_px=115, glow_r_px=18, ring_live=False,
+                                        glyph="seeker", word="SEARCHING",
+                                        top_text="FIND YOUR FRIEND", status=STATUS_OFF))], 2500),
     ("far_glow_status", [(0, hunt(0, dist_band="~40", status=(64, 71, 4, True, False)))], 1500),
     # sun mode (§8): floor >= 1.0 and the ramp LUT lifted one stop
     ("far_glow_sun", [(0, hunt(0, dist_band="~40", sun=True))], 1500),
     ("far_hint", [(0, hunt(0, dist_band="60+", intensity=0.03, top_text="TAP TO SCAN"))], 1500),
+    # the round's first FAR teaches the ripple tempo instead of TAP TO SCAN
+    ("far_teach", [(0, hunt(0, dist_band="60+", intensity=0.05,
+                            top_text="FASTER IS CLOSER"))], 1500),
     ("far_ghost_rings", [(0, hunt(0, dist_band="~40", ring_live=False))], 1500),
     ("near_warmer", [(0, hunt(1, glyph="chevrons", trend=1, dist_band="~20"))], 1500),
     ("near_warmer_strong", [(0, hunt(1, glyph="chevrons", trend=1, trend_strong=True,
@@ -132,9 +167,19 @@ FIXTURES = [
     ("warm_arrow_walk_steady", [(0, hunt(2, sub="walk", glyph="arrow", arrow_deg=0,
                                          cone_deg=31, arrow_style="solid_b", trend=0,
                                          dist_band="~10"))], 1500),
-    ("hot_glow", [(0, hunt(3, dist_band="~5", top_text="LOOK AROUND"))], 1500),
-    ("hot_bump_ready", [(0, hunt(3, dist_band="<3", word="BUMP!", top_text="TAP WATCHES"))],
-     1500),
+    ("hot_glow", [(0, hunt(3, dist_band="~5", top_text="LOOK UP"))], 1500),
+    # a tap in HOT does nothing: the toast says what does (§8 Ignored taps)
+    ("hot_ignored_tap", [(0, hunt(3, dist_band="~5",
+                                  banner=("PRESS 2X TO SCAN", "info", False)))], 1500),
+    # the bump view (§6 HOT): bump_icons bit 0 you lit, bit 1 the friend lit, bit 2 friend grey
+    ("hot_bump_ready", [(0, hunt(3, dist_band="<3", glyph="bump", bump_icons=0, word="BUMP!",
+                                 top_text="BUMP WRISTS"))], 1500),
+    ("hot_bump_only_you", [(0, hunt(3, dist_band="<3", glyph="bump", bump_icons=1,
+                                    word="BUMP!", top_text="ONLY YOU FELT IT"))], 1500),
+    ("hot_bump_friend_felt", [(0, hunt(3, dist_band="<3", glyph="bump", bump_icons=2,
+                                       word="BUMP!", top_text="FRIEND FELT IT"))], 1500),
+    ("hot_bump_wait_friend", [(0, hunt(3, dist_band="<3", glyph="bump", bump_icons=4,
+                                       top_text="FRIEND NOT READY"))], 1500),
     ("hot_arrow_solid_a", [(0, hunt(3, sub="walk", glyph="arrow", arrow_deg=20, cone_deg=18,
                                     arrow_style="solid_a", dist_band="~5"))], 1500),
     ("direction_reveal", [(0, hunt(2, sub="reveal", glyph="arrow", arrow_deg=120, cone_deg=22,
@@ -158,7 +203,14 @@ FIXTURES = [
     ("found_celebrate", [(0, dict(_found, sub="celebrate", word="FOUND", burst=True,
                                   haptic="FOUND")),
                          (50, dict(_found, sub="celebrate", word="FOUND"))], 450),
-    ("found_result", [(0, dict(_found, sub="result", word="TAP=AGAIN"))], 2500),
+    # result: FOUND and the round time in gold, until a button press (§6 FOUND)
+    ("found_result", [(0, dict(_found, sub="result", word="FOUND 1:48",
+                               top_text="BUTTON: PLAY AGAIN"))], 2500),
+    ("found_ignored_tap", [(0, dict(_found, sub="result", word="FOUND 1:48",
+                                    top_text="BUTTON: PLAY AGAIN",
+                                    banner=("PRESS THE BUTTON", "info", False)))], 1500),
+    ("found_result_long", [(0, dict(_found, sub="result", word="FOUND12:48",
+                                    top_text="BUTTON: PLAY AGAIN"))], 2500),
     ("scan_ready_flat", [(0, dict(_scan, sub="ready", glyph="countdown", countdown=3,
                                   top_text="HOLD AT CHEST", word="TURN RIGHT"))], 1500),
     ("scan_ready_tilted", [(0, dict(_scan, sub="ready", glyph="countdown", countdown=2,
@@ -179,11 +231,11 @@ FIXTURES = [
     # no fix: the Game returns to the zone screen at once and raises the toast
     ("scan_result_no_fix", [(0, hunt(2, dist_band="~10",
                                      banner=("NO FIX, TRY AGAIN", "info", False)))], 1500),
-    ("link_lost", [(0, dict(_lost, banner=("LOST 0:12", "warn", True)))], 2500),
+    ("link_lost", [(0, dict(_lost, banner=("SIGNAL LOST", "warn", True)))], 2500),
     # The LAST chip's last-trend mark (§6 LINK-LOST): drawn from ``trend``,
     # the last trend before the loss (§3).
     ("link_lost_last_trend", [(0, dict(_lost, trend=1,
-                                       banner=("LOST 0:27 KEEP ON", "warn", True)))], 2500),
+                                       banner=("LOST: KEEP ON", "warn", True)))], 2500),
     ("link_lost_friend_off", [(0, dict(_lost,
                                        banner=("FRIEND IS OFF", "critical", True)))], 2500),
     ("low_battery_saver", [(0, hunt(1, glyph="battery", word="SAVER ON",

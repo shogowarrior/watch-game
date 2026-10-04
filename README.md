@@ -77,16 +77,17 @@ reboots into the game. To play:
 3. **Split up.** A 30 s countdown gives you time to hide.
 4. **Hunt.** Follow the glow. Tap the screen to run a direction scan, then turn
    slowly on the spot as the screen guides you.
-5. **Find.** When the screen says `BUMP!`, tap watches. Tap again for a new round.
+5. **Find.** When the screen says `BUMP!`, bump wrists. Press the side button for a new round.
 
 ## Controls
 
 | Input | Action |
 |---|---|
-| Tap the centre | Start a direction scan (not in HOT, where the screen is for knocking watches: press the side button twice there), or cancel one; confirm runes when pairing; lock the arrow while turning; new round after FOUND |
-| Side button, short press | Same as a tap on the current screen, except in HOT: one press is your half of the fallback bump, and two presses within 1 s start a scan. When the screen is off, it only wakes it |
+| Tap the centre | Start a direction scan (not in HOT, where the screen is for knocking watches: press the side button twice there), or cancel one; confirm runes when pairing; lock the arrow while turning. Where a tap does nothing, some screens say what does (SWIPE: HOW TO PLAY while it looks for the other watch, PRESS 2X TO SCAN in HOT, PRESS THE BUTTON on FOUND) |
+| Swipe left or right (while it looks for the other watch) | Flip through four how-to cards; swipe past the last one or press the button to close them. They close by themselves when the other watch is found |
+| Side button, short press | Same as a tap on the current screen, except in HOT: one press is your half of the fallback bump, and two presses within 1 s start a scan; on FOUND it starts the next round. When the screen is off, or lit by an event while your wrist stayed down, it only wakes it |
 | Touch and hold (0.8 s) or button hold (1.5 s) | Menu: resume, sun mode, buzz mode (full / events / off), place (outdoors / indoors, changes how signal turns into distance), end round. A short press moves to the next row (it wraps) and a swipe scrolls; tap a row, or hold again, to choose it. END ROUND asks SURE? PRESS: press again within 3 s to confirm. The menu closes by itself after 8 s without input |
-| Raise your wrist | Screen on. On battery, lower your wrist for 10 s and the screen goes off (on USB power it stays on), but the game keeps running and buzzing |
+| Raise your wrist | Screen on. On battery, lower your wrist for 10 s and the screen goes off (on USB power it stays on), but the game keeps running and buzzing. On battery the screen also lights for a few seconds when you get close, when BUMP! appears, when the signal drops and when your friend leaves, and for 10 s at FOUND |
 | Bump watches (in HOT) | Found! Fallback: both press the button within 3 s |
 
 **Safe boot:** double-press or hold the side button within the first second after

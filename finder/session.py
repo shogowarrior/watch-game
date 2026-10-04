@@ -57,12 +57,18 @@ def screen_code(name):
     return SCREENS.index(name)
 
 
-def fmt_mss(ms):
-    """``m:ss`` up to 9:59, then ``10M+`` (LINK_LOST timer)."""
-    s = ms // 1000 if ms > 0 else 0
-    if s > T.LOST_TIMER_MAX_S:
-        return "10M+"
-    return "%d:%02d" % (s // 60, s % 60)
+def fmt_found(s):
+    """FOUND result word for a round of ``s`` seconds (ui-spec §6 FOUND):
+    ``FOUND m:ss`` up to 9:59, then ``FOUNDmm:ss`` (no space), and ``FOUND 1H+``
+    past the 99:59 cap. At most 10 type.word characters, and never an ``M``
+    for minutes (the readout's ``M`` means metres)."""
+    if s < 0:
+        s = 0
+    if s <= T.FOUND_WORD_MSS_MAX_S:
+        return "FOUND %d:%02d" % (s // 60, s % 60)
+    if s <= T.FOUND_TIME_MAX_S:
+        return "FOUND%d:%02d" % (s // 60, s % 60)
+    return "FOUND 1H+"
 
 
 class MotionSnap:

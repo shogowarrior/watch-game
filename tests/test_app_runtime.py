@@ -2376,3 +2376,47 @@ def test_fps_line_off_by_default():
     rt.log_line = lines.append
     rt.run(max_ms=12000)
     assert lines == []
+
+
+def test_found_lights_face_down_panels_for_10s():
+    """ui-spec §8 Event wake: both wrists down, both panels asleep; the bump's
+    FOUND wakes both panels and lights them for FOUND_LIT_MS, then they sleep."""
+    fakes.install()
+    from hal.radio import SimRadio
+    from hal.axp202 import EV_SHORT
+    from finder.game import BUZZ_OFF, M_FOUND
+    from finder import tuning as T
+    clock = Clock(0)
+    ra = SimRadio(MAC_A, seed=11).begin()
+    rb = SimRadio(MAC_B, seed=22).begin()
+    ra.connect(rb, rssi=-50)
+    t0 = 16000
+    spikes = ((2000, 100000, -2000), (t0, 2, 3000))   # face down from 2 s; the knock
+    a = _watch(clock, ra, imu_spikes=spikes, buttons=((1000, EV_SHORT),))
+    b = _watch(clock, rb, imu_spikes=spikes, buttons=((1100, EV_SHORT),))
+    rts = (a, b)
+    for rt in rts:
+        rt.begin(0)
+        rt.game.pair.split_s = 1
+        rt.game.buzz = BUZZ_OFF
+
+    def run_to(t_end):
+        while clock.now < t_end:
+            w = 1000
+            for rt in rts:
+                d = rt.step(clock.now)
+                if d < w:
+                    w = d
+            clock.sleep(w if w > 0 else 1)
+
+    run_to(t0 - 100)
+    assert all(rt.display.asleep and not rt.screen_is_on for rt in rts)
+    run_to(t0 + 600)
+    for rt in rts:
+        assert rt.game.mode == M_FOUND and rt.screen_is_on and not rt.display.asleep
+        assert rt.bl_level > 0.0
+    ft = max(rt.game.found_t for rt in rts)
+    run_to(ft + T.FOUND_LIT_MS - 200)
+    assert all(rt.screen_is_on and rt.bl_level > 0.0 for rt in rts)
+    run_to(ft + T.FOUND_LIT_MS + 300)
+    assert all(rt.display.asleep and rt.game.mode == M_FOUND for rt in rts)

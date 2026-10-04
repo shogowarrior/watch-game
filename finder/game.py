@@ -2,7 +2,7 @@
 
     PAIRING (looking/seen/confirmed/calibrate/split) -> SEARCHING | FAR..HOT
     FAR..HOT (+ DIRECTION arrow overlay, + trend chevrons) <-> SCANNING
-    HOT --bump--> FOUND --tap/press--> PAIRING split (new round)
+    HOT --bump--> FOUND --press--> PAIRING split (new round)
     FAR..HOT/SCANNING --5 s silence--> LINK_LOST --3 packets/2 s--> zone
     past pairing --partner in PAIRING for 2 s--> PAIRING looking
     MENU is an overlay over any screen; LOW-BATTERY is a modifier.
@@ -33,17 +33,33 @@ waits up to KNOCK_WAIT_MS after the spike: if the partner reports a spike
 within BUMP_WINDOW_MS of it, it was a knock and the gesture does nothing; if
 not, a finger made the spike and the gesture runs (ui-spec §6, §8). A touch
 in HOT never starts a scan (a knock whose spike was missed or blanked would
-disarm the bump; the button scans there). The accelerometer samples fast in FOUND too, so knocks that go on
-after FOUND never start a new round.
+disarm the bump; the button scans there). FOUND stays until a button press
+(``result``: ``FOUND 1:48`` and BUTTON: PLAY AGAIN): a tap does nothing there.
+The accelerometer samples fast in FOUND too, so a knock's touch is still told
+from a finger's.
+
+Bump-ready in HOT shows the bump view (glyph ``bump``, ``bump_icons``): your
+watch and the friend's light for BUMP_LIT_MS after each counted spike, and the
+friend's is grey while its screen cannot count a bump (``_friend_ready``: heard
+within PEER_FRESH_MS and showing HOT or FOUND, the test ``_check_found`` runs);
+``BUMP!`` and the bump-ready DOUBLE wait for it. A spike the other watch did
+not report within BUMP_WINDOW_MS gets ONLY YOU FELT IT / FRIEND FELT IT
+KNOCK_WAIT_MS after it, in HOT (top chip) and PAIRING seen/confirmed (toast)
+(ui-spec §6 HOT).
+
+In PAIRING looking, sideways swipes flip four how-to cards (``finder.howto``,
+sub ``howto``); a tap or press that does nothing raises a toast naming what
+works there, KNOCK_WAIT_MS after the touch and never for a knock (§8 Ignored
+taps).
 
 Choices where the spec is silent (all starting values):
   * the expected partner beacon rate mirrors the partner's ``beacon_hz``
     (scan > saver > HOT > normal); after a rate change the lower of the old and
     new rates is expected for one delivery window, so the 5 s meter never
     reports a false drop while it still holds packets sent at the old rate
-  * the LINK_LOST GO BACK / KEEP ON hint uses the last non-zero trend if it
-    is at most 30 s old at link loss (``lost_trend``), else 0; it is forgotten
-    on relink, a new round and SEARCHING
+  * the LINK_LOST ``LOST: GO BACK`` / ``LOST: KEEP ON`` hint uses the last
+    non-zero trend if it is at most 30 s old at link loss (``lost_trend``),
+    else 0; it is forgotten on relink, a new round and SEARCHING
   * event haptics raised under the MENU are held (highest priority wins) and
     played when it closes; heartbeats are simply skipped. A toast raised
     during the sweep, and the SAVER ON interstitial raised during a scan,
@@ -60,9 +76,15 @@ Choices where the spec is silent (all starting values):
   * ``ready`` cancels silently after SCAN_READY_DOWN_MS not flat or 15 s without
     completing, so an accidental tap never pins the screen on and 20 Hz
     beacons; the screen stays on in ``ready`` only while face-up
+  * an event wake's hold (``_lit_until``, §8) belongs to the screen, not the
+    round: it survives END ROUND, FRIEND LEFT and a new round. HOT entry and
+    bump-ready light the screen on every entry; a watch that follows its
+    partner into a new round gets no wake
   * the split READY tap (beacon flag ``F_READY``) is final and counts only
     before GO; the partner's flag counts only while its beacon state is
     PAIRED (calibrate/split), and each new split starts with both cleared
+  * the how-to card state never reaches the beacon; the HOT ignored-tap toast
+    reads the previous tick's RenderParams (it shows only over the readout)
 
 Not yet wired (need a RenderParams contract change in finder/render_params.py
 and ui/renderer.py first): the 3 % BYE inward ring at -120 px/s (outside the
@@ -75,11 +97,12 @@ from finder import tuning as T
 from finder.haptic_patterns import (BlankWindow, TOTAL_MS, stronger, MODE_FULL as BUZZ_FULL,
                                      MODE_OFF as BUZZ_OFF)
 from finder import proto
-from finder.render_params import RenderParams, wavelength
+from finder.render_params import RenderParams, wavelength, BI_ME, BI_FRIEND, BI_FRIEND_OFF
 from finder.estimators import make as _make_est
 from finder.estimators.base import ACT_STILL
 from finder.gestures import (TAP as G_TAP, LONG_PRESS as G_LONG_PRESS,
-                             SWIPE_U as G_SWIPE_U, SWIPE_D as G_SWIPE_D)
+                             SWIPE_U as G_SWIPE_U, SWIPE_D as G_SWIPE_D,
+                             SWIPE_L as G_SWIPE_L, SWIPE_R as G_SWIPE_R)
 from finder.proximity import (Proximity, DeliveryMeter, DELIVERY_WINDOW_MS,
                               FAR, NEAR, WARM, HOT)
 from finder.scan import ScanSession, R_CANCEL
@@ -87,7 +110,8 @@ from finder.scan import READY as SCAN_READY, SWEEP as SCAN_SWEEP
 from finder import arrow as A
 from finder import menu as MENU
 from finder import pairing as P
-from finder.session import (MotionSnap, PeerView, LiveMirror, screen_code, fmt_mss,
+from finder import howto as HT
+from finder.session import (MotionSnap, PeerView, LiveMirror, screen_code, fmt_found,
                             TAP_KEEP_MS, SC_MASK, SC_PAIRING, SC_HOT, SC_FOUND, SC_PAIRED,
                             SC_BYE, ST_PRESS, ST_GOODBYE, ST_CONFIRMED, ST_TAP_HOT)
 
@@ -113,19 +137,42 @@ SCAN_READY_MAX_MS = 15000  # scan ``ready`` never flat within this: silent cance
 W_SEARCHING = "SEARCHING"
 W_WALK_ABOUT = "WALK ABOUT"
 W_HOLD_STILL = "HOLD STILL"
+W_YOURE_IN = "YOU'RE IN"
 W_BUMP = "BUMP!"
+W_BUMP_YES = "BUMP = YES"
 W_FOUND = "FOUND"
-W_AGAIN = "TAP=AGAIN"
 W_SAVER = "SAVER ON"
 W_BYE = "BYE"
+T_START_OTHER = "START OTHER WATCH"
+T_WAITING_FRIEND = "WAITING FOR FRIEND"
+T_NEW_ROUND = "NEW ROUND"
+T_FIND_FRIEND = "FIND YOUR FRIEND"
+T_FASTER_CLOSER = "FASTER IS CLOSER"
 T_TAP_TO_SCAN = "TAP TO SCAN"
-T_LOOK_AROUND = "LOOK AROUND"
-T_TAP_WATCHES = "TAP WATCHES"
+T_LOOK_UP = "LOOK UP"
+T_BUMP_WRISTS = "BUMP WRISTS"
+T_FRIEND_NOT_READY = "FRIEND NOT READY"
+T_ONLY_YOU = "ONLY YOU FELT IT"
+T_FRIEND_FELT = "FRIEND FELT IT"
 T_FRIEND_SCANNING = "FRIEND SCANNING"
 T_BACK = "BACK IN RANGE"
 T_FRIEND_OFF = "FRIEND IS OFF"
 T_FRIEND_LOW = "FRIEND LOW BATTERY"
 T_FRIEND_LEFT = "FRIEND LEFT"
+T_PLAY_AGAIN = "BUTTON: PLAY AGAIN"
+T_SIGNAL_LOST = "SIGNAL LOST"
+T_SWIPE_HOWTO = HT.HINT
+T_PRESS_2X = "PRESS 2X TO SCAN"
+T_PRESS_BUTTON = "PRESS THE BUTTON"
+T_LOST_GO_BACK = "LOST: GO BACK"
+T_LOST_KEEP_ON = "LOST: KEEP ON"
+
+# LINK_LOST banners: fixed words, built once (no running clock, ui-spec §6 LINK-LOST)
+_B_FRIEND_OFF = (T_FRIEND_OFF, "critical", True)
+_B_FRIEND_LOW = (T_FRIEND_LOW, "warn", True)
+_B_SIGNAL_LOST = (T_SIGNAL_LOST, "warn", True)
+_B_GO_BACK = (T_LOST_GO_BACK, "warn", True)
+_B_KEEP_ON = (T_LOST_KEEP_ON, "warn", True)
 
 _FP = T.FIELD_PAIRING_LOOKING
 _FS = T.FIELD_SEARCHING
@@ -179,6 +226,8 @@ class Game:
         self.sun = False
         self.buzz = BUZZ_FULL
         self.params = None
+        self.howto = HT.HowTo()
+        self._howto_known = False     # cards opened or a round started since power-on
         # battery ladder: survives END ROUND
         self._bat_level = 100
         self._inter_until = None
@@ -186,12 +235,14 @@ class Game:
         self._bye_t = None
         self.goodbye_left = 0
         self.power_off = False
-        # screen power: survives END ROUND and a partner leaving (the wrist decides)
+        # screen power: survives END ROUND and a partner leaving (the wrist and event wakes decide)
         self.screen_on = True
         self._wake_t = t_ms
         self._down_since = None
         self._fu_prev = True
         self.usb = False              # on USB power: screen kept on (set_usb)
+        self._lit_until = None        # event wake: lit whatever the tilt until then (§8)
+        self._unseen = False          # an event lit a dark screen; the wrist not raised since
         self.reset(t_ms)
 
     # ---- lifecycle ---------------------------------------------------------------
@@ -232,9 +283,11 @@ class Game:
         self._toast_until = None  # None while the toast waits to be seen
         self._hint = None
         self._hint_until = t_ms
+        self._teach_far = False   # FASTER IS CLOSER still due this round (first FAR)
         self._last_trend = 0
         self._last_trend_t = None
         self.lost_trend = 0       # last trend at link loss (LINK_LOST hint / mark)
+        self._lost_hint = False   # LINK_LOST: GO BACK / KEEP ON shown (latched per episode)
         self._left_t = None       # partner back in PAIRING since
         self._held = None         # event haptic held while the MENU is open
         self._hz = self.meter.expected_hz
@@ -244,6 +297,25 @@ class Game:
         self._br_since = None
         self.bump_ready = False
         self._br_fired = False
+        self._felt_on = False     # in a felt-it context (HOT, PAIRING seen/confirmed)
+        self._felt_t0 = t_ms      # ... since: older spikes are never judged
+        self._fm = None           # own spike waiting for its verdict
+        self._fq = None           # partner spike waiting for its verdict
+        self._fm_seen = None      # last own / partner spike already looked at
+        self._fq_seen = None
+        self._fq_conf = False     # PAIRING: the partner had confirmed when _fq was taken
+        self._touch_t = None      # last finger landing
+        self._spike_touched = None  # last own spike a finger landing went with (§6 PAIRING)
+        self._felt = None         # HOT felt-it chip text
+        self.howto.reset()
+        self._look_t = None       # PAIRING looking since (the SWIPE: HOW TO PLAY hint)
+        self._howto_hinted = False
+        self._howto_shut = None   # the cards closed by themselves at (press guard)
+        self._ign_s = None        # ignored-tap toast waiting out the knock wait
+        self._ign_td = 0          # ... for the touch that landed then
+        self._ign_knock = False   # ... a partner spike (or in HOT, ours) made it a knock
+        self._ign_t = None        # last ignored-tap toast raised
+        self._felt_until = t_ms
         self._still_since = None
         self._still_done = False
         self._peer_sweep = False
@@ -252,6 +324,7 @@ class Game:
         self.round_t0 = None
         self.found_t = None
         self._time_text = None
+        self._found_word = None
         self._lost_zone = None
         self._lost_band = None
         self._lost_i = 0.0
@@ -319,6 +392,8 @@ class Game:
             return False
         self._spike_t = t_ms
         self.bump_t = t_ms
+        if self._touch_t is not None and _knock(t_ms, self._touch_t):
+            self._spike_touched = t_ms
         self.taps = (self.taps + 1) & 7
         self._tap_hot = self.mode == M_HUNT and self.px.zone == HOT
         return True
@@ -326,7 +401,8 @@ class Game:
     def bump_armed(self):
         """True while a bump spike can count: HOT (FOUND, §6) and PAIRING
         seen / confirmed (a matched bump confirms both), and in FOUND, where
-        knocks that go on must be seen to drop their touches (§8). The IMU
+        knocks that go on must be seen so a knock's touch is told from a
+        finger's (§8). The IMU
         samples fast enough to see a knock only then (app/imu_feed.py)."""
         m = self.mode
         if m == M_HUNT:
@@ -342,6 +418,7 @@ class Game:
     def on_touch_down(self, t_ms):
         """A finger lands (every touch, even one the gesture recognizer drops): it
         counts toward the rain/sleeve burst filter."""
+        self._note_touch(t_ms)
         if (self.screen_on and not self.power_off and self._touch_block is None
                 and ticks_diff(t_ms, self._wake_t) >= T.WAKE_TOUCH_IGNORE_MS):
             self._touch_burst(t_ms)
@@ -360,6 +437,7 @@ class Game:
         if not self.screen_on or self.power_off or self._bye_t is not None:
             return
         td = t_ms if t_down is None else t_down
+        self._note_touch(td)
         self._resolve_held(t_ms, True)
         s = self._spike_t
         if _knock(s, td):           # a knock or a finger's own spike (§8)
@@ -367,6 +445,11 @@ class Game:
                 self._held_g = (code, x, y, td, s)  # waits for the partner's word
             return
         self._gesture(t_ms, code, x, y, td)
+
+    def _note_touch(self, td):
+        self._touch_t = td
+        if _knock(self._spike_t, td):
+            self._spike_touched = self._spike_t
 
     def _peer_spiked(self, s):
         """The partner reported a spike within BUMP_WINDOW_MS of our spike ``s``."""
@@ -402,6 +485,11 @@ class Game:
         if mn.is_open and (code == G_SWIPE_U or code == G_SWIPE_D):
             mn.scroll(t_ms, 1 if code == G_SWIPE_U else -1)
             return
+        if code == G_SWIPE_L or code == G_SWIPE_R:
+            if (not mn.is_open and self.mode == M_PAIRING and self.pair.sub == P.LOOKING
+                    and self._inter_until is None and not self._inter_pending):
+                self._howto_flip(1 if code == G_SWIPE_L else -1)
+            return
         if code != G_TAP:
             return
         if mn.is_open:
@@ -411,7 +499,8 @@ class Game:
         dy = y - T.CENTER[1]
         if dx * dx + dy * dy > T.TAP_R_MAX_PX * T.TAP_R_MAX_PX:
             return
-        self._primary(t_ms, False)
+        if not self._primary(t_ms, False):
+            self._ignored(t_ms, td)
 
     def on_button(self, t_ms, long=False):
         """Side button: short = primary action (wake only when off), long = MENU."""
@@ -423,12 +512,15 @@ class Game:
         if self._bye_t is not None:
             return                # shutting down: BYE only
         self._input(t_ms)
+        if self._unseen and not long:
+            self._unseen = False  # lit by an event, wrist still down: a look (§8)
+            return
         if long:
             self._long_press(t_ms)
         elif self.menu.is_open:
             self._menu_apply(t_ms, self.menu.next(t_ms))
-        else:
-            self._primary(t_ms, True)
+        elif not self._primary(t_ms, True):
+            self._ignored(t_ms, t_ms)
 
     def _touch_burst(self, t_ms):
         """Rain/sleeve filter: >= 3 touch-downs in 1 s block touches for 2 s."""
@@ -437,22 +529,31 @@ class Game:
         if tr.full_within(t_ms, T.TOUCH_BURST_WINDOW_MS):
             self._touch_block = ticks_add(t_ms, T.TOUCH_BURST_IGNORE_MS)
             tr.clear()
+            self._ign_s = None        # a burst is no deliberate tap
 
     def _primary(self, t_ms, button):
+        """The tap / short-press action of this screen; False if it did nothing
+        (an ignored tap or press, §8 Ignored taps)."""
         m = self.mode
         if m == M_PAIRING:
             pr = self.pair
+            if (pr.sub == P.LOOKING or pr.sub == P.SEEN) and self._howto_shown(t_ms):
+                if button:
+                    self.howto.reset()      # a press closes the cards; it never confirms
+                return True                 # runes the player has not seen (§6 PAIRING)
             if pr.sub == P.SPLIT:
                 pr.set_ready(t_ms)
-            else:
-                pr.confirm(t_ms)
-        elif m == M_HUNT:
+                if pr.ready and self._toast == T_NEW_ROUND:
+                    self._toast = None      # its READY word shows at once (§6 Round start)
+                return True
+            return pr.confirm(t_ms)
+        if m == M_HUNT:
             a = self.arrow
             if a is not None and a.tap():
-                return
+                return True
             if self.px.zone == HOT:
                 if not button:
-                    return        # HOT: the screen is where watches knock (§8)
+                    return False  # HOT: the screen is where watches knock (§8)
                 pt = self._press_t
                 pv = self.peer
                 if (pt is not None and 0 <= ticks_diff(t_ms, pt) <= T.HOT_SCAN_PRESS_MS
@@ -461,13 +562,108 @@ class Game:
                     self._start_scan(t_ms)
                 else:
                     self._press_t = t_ms  # fallback bump press
-                return
+                return True
             self._start_scan(t_ms)
-        elif m == M_SCANNING:
-            self.scan.cancel(t_ms)
+            return True
+        if m == M_SCANNING:
+            return self.scan.cancel(t_ms)
+        if m == M_FOUND:              # the button only: a tap or a knock never skips the result
+            if button and ticks_diff(t_ms, self.found_t) >= T.FOUND_CELEBRATE_MS:
+                self._new_round(t_ms)
+                return True
+        return False
+
+    # ---- how-to cards and ignored taps (ui-spec §6 PAIRING, §8) ---------------------
+    def _howto_shown(self, t_ms):
+        """A card is open, was on the last frame, or closed by itself moments
+        ago: a press or tap then is about the card, not the runes."""
+        if self.howto.open:
+            return True
+        p = self.params
+        if p is not None and p.sub == "howto":
+            return True
+        s = self._howto_shut
+        return s is not None and ticks_diff(t_ms, s) < T.HOWTO_PRESS_GUARD_MS
+
+    def _howto_flip(self, d):
+        if self.howto.flip(d):        # just opened: the hint has done its job
+            self._howto_known = True
+            if self._toast == T_SWIPE_HOWTO:
+                self._toast = None
+            if self._ign_s == T_SWIPE_HOWTO:
+                self._ign_s = None
+
+    def _howto_close(self, t_ms):
+        if self.howto.open:
+            self.howto.reset()
+            self._howto_shut = t_ms
+
+    def _ignored_text(self, t_ms):
+        """The toast an ignored tap or press raises on this screen, or None."""
+        if self._inter_until is not None or self._inter_pending:
+            return None               # SAVER ON owns the screen
+        m = self.mode
+        if m == M_PAIRING:
+            if self.pair.sub == P.LOOKING and not self.howto.open:
+                return T_SWIPE_HOWTO
+        elif m == M_HUNT:
+            p = self.params           # only over the readout (no word, no banner)
+            if (self.px.zone == HOT and p is not None and p.word is None
+                    and p.banner is None and p.dist_band is not None):
+                return T_PRESS_2X
         elif m == M_FOUND:
             if ticks_diff(t_ms, self.found_t) >= T.FOUND_CELEBRATE_MS:
-                self._new_round(t_ms)
+                return T_PRESS_BUTTON
+        return None
+
+    def _ignored(self, t_ms, td):
+        """A deliberate tap or press that did nothing: its toast waits out the
+        knock wait (``_resolve_ignored``); at most one per IGNORED_TOAST_GAP_MS."""
+        s = self._ign_t
+        if s is not None and ticks_diff(t_ms, s) < T.IGNORED_TOAST_GAP_MS:
+            return
+        if self._ign_s is not None:
+            return
+        s = self._ignored_text(td)    # judged where the finger landed: a held celebrate tap stays silent
+        if s is not None:
+            self._ign_s = s
+            self._ign_td = td
+            self._ign_knock = False
+
+    def _resolve_ignored(self, t_ms):
+        """Raise a waiting ignored-tap toast KNOCK_WAIT_MS after its touch landed,
+        unless it was a knock: a partner spike in the knock window (or in HOT our
+        own, which the felt-it check speaks for), latched as reports arrive."""
+        s = self._ign_s
+        if s is None:
+            return
+        td = self._ign_td
+        if _knock(self.peer.tap_t, td) or (self.mode == M_HUNT and _knock(self._spike_t, td)):
+            self._ign_knock = True
+        if ticks_diff(t_ms, td) < T.KNOCK_WAIT_MS:
+            return
+        self._ign_s = None
+        if (self._ign_knock or self._toast is not None or self.menu.is_open
+                or not self.screen_on or self._bye_t is not None
+                or self._ignored_text(t_ms) != s):
+            return
+        self._ign_t = t_ms
+        self._toast_set(s, "info")
+        if s == T_SWIPE_HOWTO:
+            self._howto_hinted = True
+
+    def _drop_stale_ignored(self):
+        """An ignored-tap or hint toast still up when its screen no longer calls
+        for it is dropped (§8 Ignored taps). PRESS 2X TO SCAN also goes when a
+        word takes the bottom slot (``tick`` checks the frame); every way out of
+        FOUND replaces or clears PRESS THE BUTTON already."""
+        s = self._toast
+        if s == T_SWIPE_HOWTO:
+            if self.mode != M_PAIRING or self.pair.sub != P.LOOKING:
+                self._toast = None
+        elif s == T_PRESS_2X:
+            if self.mode != M_HUNT or self.px.zone != HOT:
+                self._toast = None
 
     def _input(self, t_ms):
         self._input_t = t_ms
@@ -477,6 +673,30 @@ class Game:
         self._wake_t = t_ms
         self._input_t = t_ms
         self._down_since = None
+        self._unseen = False
+
+    def _light(self, t_ms, ms, critical_ok=False):
+        """Event wake (ui-spec §8): the screen lights now and stays lit ``ms``
+        whatever the tilt. A dark screen wakes as on a wrist raise (boost,
+        300 ms touch filter) but keeps its wrist-down clock, so a wrist that
+        stayed lowered goes dark when the hold ends, and it counts as unseen
+        until the wrist is raised (a short press only wakes it). A later event
+        extends the hold, never shortens it. At <= 5 % only FOUND
+        (``critical_ok``) lights the screen (LOW-BATTERY: haptics carry the
+        game); nothing while shutting down."""
+        if self.power_off or self._bye_t is not None:
+            return
+        if not critical_ok and self._critical():
+            return
+        if not self.screen_on:
+            self.screen_on = True
+            self._unseen = True
+            self._wake_t = t_ms
+        self._input_t = t_ms
+        u = ticks_add(t_ms, ms)
+        s = self._lit_until
+        if s is None or ticks_diff(u, s) > 0:
+            self._lit_until = u
 
     # ---- haptics / toasts --------------------------------------------------------
     def blanked(self, t_ms):
@@ -506,6 +726,17 @@ class Game:
         self._hint = text
         self._hint_until = ticks_add(t_ms, T.HINT_CHIP_MS)
 
+    def _hint_text(self, t_ms):
+        """The hint chip still showing, or None."""
+        h = self._hint
+        return h if h is not None and ticks_diff(self._hint_until, t_ms) > 0 else None
+
+    def _hint_free(self):
+        """No hint showing, or only TAP TO SCAN (which may restart): a hint
+        never cuts another short, except LOOK UP on entering HOT (§6 FAR)."""
+        h = self._hint
+        return h is None or h == T_TAP_TO_SCAN
+
     def _show_pending(self, t_ms):
         """Start a waiting toast or SAVER ON interstitial once it can be seen: not
         under the MENU, a toast not during the sweep, the interstitial not in a scan."""
@@ -518,6 +749,7 @@ class Game:
         if self._inter_pending and not scanning:
             self._inter_pending = False
             self._inter_until = ticks_add(t_ms, T.BATT_INTERSTITIAL_MS)
+            self.howto.reset()        # SAVER ON is never merged with a card
 
     # ---- per tick ----------------------------------------------------------------
     def tick(self, t_ms):
@@ -543,11 +775,14 @@ class Game:
                 self._tick_found(t_ms)
             elif m == M_LINK_LOST:
                 self._tick_lost(t_ms)
+            self._update_felt(t_ms)
+            self._drop_stale_ignored()
             self.menu.tick(t_ms)
             h = self._held
             if h is not None and not self.menu.is_open:
                 self._held = None
                 self._emit(t_ms, h)
+            self._resolve_ignored(t_ms)
             self._show_pending(t_ms)
             if self.mode != M_HUNT:
                 self._peer_sweep = False
@@ -555,6 +790,11 @@ class Game:
         self.state_byte = self._state_byte(t_ms)
         self.menu.window(self.sun, self.buzz, self.indoor)
         p = self._params(t_ms)
+        if self._toast == T_PRESS_2X and p.word is not None:
+            self._toast = None        # BUMP!, HOLD STILL or an arrow word took the slot (§8)
+            if self._ign_t == t_ms:
+                self._ign_t = None    # raised this tick, never shown: no gap spent
+            p = self._params(t_ms)
         self.params = p
         return p
 
@@ -565,10 +805,15 @@ class Game:
             self._toast = None
         if self._hint is not None and ticks_diff(self._hint_until, t_ms) <= 0:
             self._hint = None
+        if self._felt is not None and ticks_diff(self._felt_until, t_ms) <= 0:
+            self._felt = None
         s = self._inter_until
         if s is not None and ticks_diff(s, t_ms) <= 0:
             self._inter_until = None
         self._blank.expire(t_ms)
+        s = self._lit_until
+        if s is not None and ticks_diff(s, t_ms) <= 0:
+            self._lit_until = None
         s = self._touch_block
         if s is not None and ticks_diff(s, t_ms) <= 0:
             self._touch_block = None
@@ -576,6 +821,16 @@ class Game:
         s = self._spike_t
         if s is not None and ticks_diff(t_ms, s) > KNOCK_KEEP_MS:
             self._spike_t = None
+        s = self._touch_t
+        if s is not None and ticks_diff(t_ms, s) > KNOCK_KEEP_MS:
+            self._touch_t = None
+        s = self._ign_t
+        if s is not None and ticks_diff(t_ms, s) >= T.IGNORED_TOAST_GAP_MS:
+            self._ign_t = None
+        s = self._howto_shut
+        if s is not None and ticks_diff(t_ms, s) >= T.HOWTO_PRESS_GUARD_MS:
+            self._howto_shut = None
+        self._look_t = _cap(t_ms, self._look_t)
         s = self._unrel_t
         if s is not None and ticks_diff(t_ms, s) >= UNRELIABLE_PIN_MS:
             self._unrel_t = None
@@ -598,6 +853,7 @@ class Game:
         self._down_since = _cap(t_ms, self._down_since)
         self._still_since = _cap(t_ms, self._still_since)
         self._br_since = _cap(t_ms, self._br_since)
+        self._felt_t0 = _cap(t_ms, self._felt_t0)
         self._hold_t = _cap(t_ms, self._hold_t)
         self.peer.expire(t_ms, STALE_MS)
         self.meter.expire(t_ms)       # rolls the delivery window: its stamp never wraps either
@@ -644,8 +900,15 @@ class Game:
         self.lost_trend = 0
 
     def _scan_hint(self, t_ms):
-        """``TAP TO SCAN`` for 4 s on entering FAR or NEAR (no arrow shown)."""
-        if self.arrow is None:
+        """``TAP TO SCAN`` for 4 s on entering FAR or NEAR (no arrow shown, no
+        other hint showing); the round's first FAR says ``FASTER IS CLOSER``."""
+        if self.arrow is not None or not self._hint_free():
+            return
+        if (self._teach_far and self.px.zone == FAR and not self._peer_sweep
+                and not self.menu.is_open):
+            self._teach_far = False
+            self._hint_set(t_ms, T_FASTER_CLOSER)
+        else:
             self._hint_set(t_ms, T_TAP_TO_SCAN)
 
     def _peer_gone(self):
@@ -664,6 +927,7 @@ class Game:
             self.reset(t_ms)
             self._toast_set(T_FRIEND_LEFT, "warn")
             self._emit(t_ms, "NOPE")
+            self._light(t_ms, T.EVENT_LIT_MS)
 
     # PAIRING
     def _tick_pairing(self, t_ms):
@@ -674,9 +938,20 @@ class Game:
         if pr.sub in (P.SEEN, P.CONFIRMED) and self._bump_match(t_ms):
             self._consume_bump()
             pr.bump(t_ms)
+        was = pr.sub
         self._emit(t_ms, pr.update(t_ms))
         if pr.toast:
-            self._toast_set(pr.toast, "info")
+            self._toast_set(pr.toast, "info")       # CAL SKIPPED keeps the slot
+        elif was == P.CALIBRATE and pr.sub == P.SPLIT:
+            self._toast_set(T_NEW_ROUND, "info")
+        if pr.sub == P.LOOKING:
+            self._looking_hint(t_ms)
+        else:                                       # the partner is seen: the cards close
+            self._look_t = None
+            self._howto_hinted = False
+            self._howto_close(t_ms)
+            if pr.sub == P.CALIBRATE:
+                self._howto_known = True
         if pr.p1m is not None and pr.p1m != self._p1m:
             self._p1m = pr.p1m
             self.est.calibrate(pr.p1m)
@@ -685,10 +960,30 @@ class Game:
             self._update_px(t_ms)
         elif pr.sub == P.DONE:
             self.round_t0 = t_ms
+            self._teach_far = True
+            if self._toast == T_NEW_ROUND:
+                self._toast = None                  # the split ended early: not into the hunt
+            self._hint_set(t_ms, T_FIND_FRIEND)     # before the zone hint: HOT's LOOK UP wins
             if self.peer.live3(t_ms) and self.px.zone is not None and not self._peer_gone():
                 self._enter_hunt(t_ms, False)
             else:
                 self._enter_searching(t_ms)
+
+    def _looking_hint(self, t_ms):
+        """SWIPE: HOW TO PLAY once, HOWTO_HINT_MS into a looking spell, until the
+        cards were opened or a round started since power-on; never over another
+        toast, under the MENU or SAVER ON, or with the screen off (§6 PAIRING)."""
+        if self._look_t is None:
+            self._look_t = t_ms
+            return
+        if (self._howto_hinted or self._howto_known or self.howto.open
+                or ticks_diff(t_ms, self._look_t) < T.HOWTO_HINT_MS):
+            return
+        if (self.screen_on and self._toast is None and not self.menu.is_open
+                and self._bye_t is None and self._inter_until is None
+                and not self._inter_pending):
+            self._howto_hinted = True
+            self._toast_set(T_SWIPE_HOWTO, "info")
 
     # SEARCHING
     def _enter_searching(self, t_ms):
@@ -717,7 +1012,7 @@ class Game:
         if z == FAR or z == NEAR:
             self._scan_hint(t_ms)
         elif z == HOT:
-            self._hint_set(t_ms, T_LOOK_AROUND)
+            self._enter_hot(t_ms)
         self._br_since = None
         self.bump_ready = False
         self._br_fired = False
@@ -737,21 +1032,32 @@ class Game:
                 self._burst = True
                 self._emit(t_ms, "CLOSER")
                 if z == HOT:
-                    self._hint_set(t_ms, T_LOOK_AROUND)
+                    self._enter_hot(t_ms)
                 elif z == NEAR:
                     self._scan_hint(t_ms)
             else:
                 self._emit(t_ms, "FARTHER")
-                if self._hint == T_LOOK_AROUND:
+                if self._hint == T_LOOK_UP:
                     self._hint = None
                 if z == FAR or z == NEAR:
                     self._scan_hint(t_ms)
+        if (self._teach_far and z == FAR and self._hint is None and not self._peer_sweep
+                and not self.menu.is_open):
+            self._scan_hint(t_ms)     # the first FAR, once FIND YOUR FRIEND has gone
         # hidden by the MENU or SAVER ON: the pacer must not run unseen (clock pauses)
         self._update_arrow(t_ms, True, self.menu.is_open or self._inter_until is not None)
         self._update_bump_ready(t_ms)
+        a = self.arrow
+        if self.bump_ready and a is not None and a.glyph == "arrow" and a.sub == "walk":
+            self.arrow = None         # the bump view takes it, silently (§6 HOT)
         self._update_still_hint(t_ms)
         self._update_peer_scan(t_ms)
         self._check_found(t_ms)
+
+    def _enter_hot(self, t_ms):
+        """HOT entry: LOOK UP for 4 s; on battery the screen lights (§8)."""
+        self._hint_set(t_ms, T_LOOK_UP)
+        self._light(t_ms, T.EVENT_LIT_MS)
 
     def _update_arrow(self, t_ms, link_ok, hidden=False):
         a = self.arrow
@@ -775,9 +1081,10 @@ class Game:
                 self._br_since = t_ms
             if ticks_diff(t_ms, self._br_since) >= T.BUMP_READY_HOLD_MS:
                 self.bump_ready = True
-                if not self._br_fired:
-                    self._br_fired = True
+                if not self._br_fired and self._friend_ready(t_ms):
+                    self._br_fired = True     # "bump now": once both can count it
                     self._emit(t_ms, "DOUBLE")
+                    self._light(t_ms, T.EVENT_LIT_MS)
         else:
             self._br_since = None
             self.bump_ready = False
@@ -788,7 +1095,7 @@ class Game:
         if z != HOT and self.arrow is None and self.me.activity == ACT_STILL:
             if self._still_since is None:
                 self._still_since = t_ms
-            elif (not self._still_done
+            elif (not self._still_done and self._hint_free()
                   and ticks_diff(t_ms, self._still_since) >= T.HINT_STILL_MS):
                 self._still_done = True
                 self._hint_set(t_ms, T_TAP_TO_SCAN)
@@ -832,14 +1139,117 @@ class Game:
         pt = self._press_t
         return pt is not None and 0 <= ticks_diff(t_ms, pt) <= T.FALLBACK_PRESS_WINDOW_MS
 
+    def _friend_ready(self, t_ms):
+        """The partner's watch can count a bump: heard within PEER_FRESH_MS and
+        its screen in HOT or FOUND (the bump rule's own test, ui-spec §6 HOT)."""
+        pv = self.peer
+        if not pv.fresh(t_ms):
+            return False
+        ps = pv.screen
+        return ps == SC_HOT or ps == SC_FOUND
+
+    def _my_spiked(self, q):
+        """Our last counted spike is within BUMP_WINDOW_MS of the partner's ``q``."""
+        m = self.bump_t
+        return m is not None and -T.BUMP_WINDOW_MS <= ticks_diff(m, q) <= T.BUMP_WINDOW_MS
+
+    def _felt_ctx(self):
+        m = self.mode
+        if m == M_HUNT:
+            return self.px.zone == HOT
+        return m == M_PAIRING and (self.pair.sub == P.SEEN or self.pair.sub == P.CONFIRMED)
+
+    def _update_felt(self, t_ms):
+        """ONLY YOU FELT IT / FRIEND FELT IT: a spike the other watch did not
+        report within BUMP_WINDOW_MS, judged KNOCK_WAIT_MS after it, so players
+        learn how firm a bump must be (ui-spec §6 HOT). In HOT touches play no
+        part. In PAIRING a spike a touch went with gets no verdict: an own spike
+        with a finger landing in the knock window, or a partner spike after
+        which its confirm turns on (judged FELT_CONFIRM_GRACE_MS later), was a
+        confirming tap or a screen knock (§6 PAIRING)."""
+        if not self._felt_ctx():
+            if self._felt_on:
+                self._felt_on = False
+                self._fm = self._fq = self._felt = None
+                if self._toast == T_ONLY_YOU or self._toast == T_FRIEND_FELT:
+                    self._toast = None
+            return
+        m = self.bump_t
+        pv = self.peer
+        q = pv.tap_t
+        if not self._felt_on:
+            self._felt_on = True
+            self._felt_t0 = t_ms
+            self._fm_seen = m
+            self._fq_seen = q
+        hot = self.mode == M_HUNT
+        if m != self._fm_seen:
+            self._fm_seen = m
+            if (m is not None and ticks_diff(m, self._felt_t0) >= 0
+                    and not self._peer_spiked(m)):
+                self._fm = m
+        if q != self._fq_seen:
+            if (q is None or ticks_diff(q, self._felt_t0) < 0
+                    or ticks_diff(t_ms, q) > BUMP_FRESH_MS):
+                self._fq_seen = q     # none, or too old: never judged
+            elif pv.tap_hot or not hot:
+                self._fq_seen = q
+                if not self._my_spiked(q):
+                    self._fq = q
+                    self._fq_conf = self.pair.peer_confirmed
+            # else its ST_TAP_HOT can trail the tap count by a beacon: look again
+        fm = self._fm
+        if fm is not None:
+            if self._peer_spiked(fm):
+                self._fm = None
+            elif ticks_diff(t_ms, fm) >= T.KNOCK_WAIT_MS:
+                self._fm = None       # HOT: FRIEND NOT READY already says why
+                if hot:
+                    if self._friend_ready(t_ms):
+                        self._felt_say(t_ms, T_ONLY_YOU)
+                elif fm != self._spike_touched:
+                    self._felt_say(t_ms, T_ONLY_YOU)
+        fq = self._fq
+        if fq is not None:
+            if self._my_spiked(fq):
+                self._fq = None
+            elif hot:
+                if ticks_diff(t_ms, fq) >= T.KNOCK_WAIT_MS:
+                    self._fq = None
+                    self._felt_say(t_ms, T_FRIEND_FELT)
+            elif ticks_diff(t_ms, fq) >= T.KNOCK_WAIT_MS + T.FELT_CONFIRM_GRACE_MS:
+                self._fq = None
+                if self._fq_conf or not self.pair.peer_confirmed:
+                    self._felt_say(t_ms, T_FRIEND_FELT)
+
+    def _felt_say(self, t_ms, text):
+        if self.mode == M_HUNT:
+            self._felt = text
+            self._felt_until = ticks_add(t_ms, T.TOAST_MS)
+        else:
+            self._toast_set(text, "info")
+
+    def _bump_icons(self, t_ms, ready):
+        """``bump_icons`` for the bump view: who felt the last knock (lit for
+        BUMP_LIT_MS), and whether the friend's watch can count one."""
+        v = 0
+        m = self.bump_t
+        if m is not None and self._tap_hot and 0 <= ticks_diff(t_ms, m) < T.BUMP_LIT_MS:
+            v = BI_ME
+        if not ready:
+            return v | BI_FRIEND_OFF
+        pv = self.peer
+        q = pv.tap_t
+        if q is not None and pv.tap_hot and 0 <= ticks_diff(t_ms, q) < T.BUMP_LIT_MS:
+            v |= BI_FRIEND
+        return v
+
     def _check_found(self, t_ms):
         px = self.px
         pv = self.peer
-        if px.zone != HOT or not pv.fresh(t_ms):
+        if px.zone != HOT or not self._friend_ready(t_ms):
             return
         ps = pv.screen
-        if ps != SC_HOT and ps != SC_FOUND:
-            return
         if self._tap_hot and pv.tap_hot and self._bump_match(t_ms):
             self._consume_bump()
             self._enter_found(t_ms)
@@ -866,9 +1276,11 @@ class Game:
         self._burst = True
         self._emit(t_ms, "FOUND")
         s = 0 if self.round_t0 is None else ticks_diff(t_ms, self.round_t0) // 1000
-        if s > 99 * 60 + 59:
-            s = 99 * 60 + 59
+        self._found_word = fmt_found(s)
+        if s > T.FOUND_TIME_MAX_S:
+            s = T.FOUND_TIME_MAX_S
         self._time_text = "TIME %d:%02d" % (s // 60, s % 60)
+        self._light(t_ms, T.FOUND_LIT_MS, True)
 
     def _tick_found(self, t_ms):
         pv = self.peer
@@ -884,7 +1296,9 @@ class Game:
         self._forget_trend()
         self._hint = None
         self._press_t = None
+        self._ign_s = None
         self._consume_bump()
+        self._toast_set(T_NEW_ROUND, "info")
 
     # SCANNING
     def _start_scan(self, t_ms):
@@ -974,13 +1388,20 @@ class Game:
         self._last_trend_t = None
         self.bump_ready = False
         self._hint = None
+        self._lost_hint = False
         self._emit(t_ms, "LOST")
+        self._light(t_ms, T.EVENT_LIT_MS)
         self.est.reset()
         px.rearm()
         self._update_arrow(t_ms, False)
 
     def _tick_lost(self, t_ms):
         self._update_arrow(t_ms, False)
+        if not self._lost_hint:
+            el = self.peer.age(t_ms)
+            el = ticks_diff(t_ms, self.mode_t) + T.LINK_LOST_AFTER_MS if el is None else el
+            # from the last packet; once shown it stays (a stray packet takes nothing back)
+            self._lost_hint = el >= T.LOST_HINT_AFTER_MS
         if self.peer.live3(t_ms) and self.est.dist_m is not None and not self._peer_gone():
             self._update_px(t_ms)
             if self.px.zone is not None:
@@ -991,15 +1412,12 @@ class Game:
     def _lost_banner(self, t_ms):
         pv = self.peer
         if pv.goodbye:
-            return (T_FRIEND_OFF, "critical", True)
+            return _B_FRIEND_OFF
         if pv.battery is not None and pv.battery <= T.BATT_BANNER_PCT:
-            return (T_FRIEND_LOW, "warn", True)
-        el = pv.age(t_ms)
-        el = ticks_diff(t_ms, self.mode_t) + T.LINK_LOST_AFTER_MS if el is None else el
-        s = "LOST " + fmt_mss(el)
-        if el >= T.LOST_HINT_AFTER_MS:
-            s += " KEEP ON" if self.lost_trend > 0 else " GO BACK"
-        return (s, "warn", True)
+            return _B_FRIEND_LOW
+        if not self._lost_hint:
+            return _B_SIGNAL_LOST
+        return _B_KEEP_ON if self.lost_trend > 0 else _B_GO_BACK
 
     # MENU
     def _long_press(self, t_ms):
@@ -1056,11 +1474,15 @@ class Game:
         self._fu_prev = fu
         if not self.screen_on:
             return
+        if not self._lowered():
+            self._unseen = False  # the wrist is up: an event-lit screen has been seen
         if self.usb or not self._lowered() or self._keep_on():
             self._down_since = None
             return
         if self._down_since is None:
             self._down_since = t_ms
+        if self._lit_until is not None:
+            return                # event wake: lit whatever the tilt; the clock runs on (§8)
         lim = T.BATT_SCREEN_OFF_MS if self._critical() else T.WRIST_DOWN_MS
         if ticks_diff(t_ms, self._down_since) >= lim:
             self.screen_on = False
@@ -1087,6 +1509,7 @@ class Game:
             lv = self._bat_level
             if b <= T.BATT_SHUTDOWN_PCT:
                 self.menu.close()         # shutting down: BYE is shown, NOPE plays
+                self.howto.reset()
                 if self.mode == M_SCANNING:
                     self.scan.cancel(t_ms)    # and no sweep (20 Hz, F_SWEEP) runs on
                 self._bye_t = t_ms
@@ -1245,6 +1668,7 @@ class Game:
         hb = None
         every = 1
         runes = None
+        bump = None
         if m == M_PAIRING:
             pr = self.pair
             sub = pr.sub
@@ -1254,14 +1678,20 @@ class Game:
             if sub == P.LOOKING:
                 speed = ls
                 period = lp
-                top = "PAIR"
-                word = "LOOKING"
+                live = False                       # no partner yet: no live rings
+                c = self.howto.card
+                if c:
+                    sub = "howto"
+                    top, word, glyph, runes, cd, trend, bump = HT.CARDS[c - 1]
+                else:
+                    top = T_START_OTHER
+                    word = "LOOKING"
             elif sub == P.SEEN:
                 top = "SAME RUNES?"
-                word = "TAP = YES"
+                word = W_BUMP_YES
             elif sub == P.CONFIRMED:
-                top = "WAITING"
-                word = "WAITING"
+                top = T_WAITING_FRIEND
+                word = W_YOURE_IN
             elif sub == P.CALIBRATE:
                 glyph = "countdown"
                 cd = pr.countdown
@@ -1299,6 +1729,7 @@ class Game:
             live = False
             word = W_WALK_ABOUT if ticks_diff(t_ms, self.mode_t) >= T.SEARCHING_WALK_ABOUT_MS \
                 else W_SEARCHING
+            top = self._hint_text(t_ms)      # FIND YOUR FRIEND as the round starts
         elif m == M_HUNT:
             z = px.zone
             zone = z
@@ -1315,7 +1746,12 @@ class Game:
                 glow = T.FIELD_SCAN_SWEEP_GLOW_R     # the live-mirror halo (§5.7)
                 if self.mirror.value is not None:
                     inten = self.mirror.value
-            if a is not None and a.glyph == "arrow":
+            arrow_on = a is not None and a.glyph == "arrow"
+            ready = self._friend_ready(t_ms)
+            if self.bump_ready and not arrow_on:
+                glyph = "bump"               # a walk arrow was dropped for it (§6 HOT)
+                bump = self._bump_icons(t_ms, ready)
+            elif arrow_on:
                 glyph = "arrow"
                 adeg = a.arrow_deg
                 cone = a.cone_deg
@@ -1332,13 +1768,19 @@ class Game:
                         top = T_FRIEND_SCANNING
                     if word is None:
                         word = W_HOLD_STILL
+                if top is None and self._felt is not None:
+                    top = self._felt
                 if self.bump_ready:
-                    if word is None:
-                        word = W_BUMP
-                    if top is None:
-                        top = T_TAP_WATCHES
-                if top is None and self._hint is not None and ticks_diff(self._hint_until, t_ms) > 0:
-                    top = self._hint
+                    if not ready:
+                        if top is None:
+                            top = T_FRIEND_NOT_READY
+                    else:
+                        if word is None:
+                            word = W_BUMP
+                        if top is None:
+                            top = T_BUMP_WRISTS
+                if top is None:
+                    top = self._hint_text(t_ms)
         elif m == M_SCANNING:
             sc = self.scan
             sub = sc.sub
@@ -1370,8 +1812,12 @@ class Game:
             period = T.FOUND_PERIOD_MS
             glow = T.GLOW_R_FOUND
             glyph = "check"
-            top = self._time_text
-            word = W_FOUND if sub == "celebrate" else W_AGAIN
+            if sub == "celebrate":
+                top = self._time_text
+                word = W_FOUND
+            else:
+                top = T_PLAY_AGAIN
+                word = self._found_word
         elif m == M_LINK_LOST:
             ramp, _, speed, period, glow, _ = _FL
             zone = self._lost_zone
@@ -1387,6 +1833,7 @@ class Game:
         if iu is not None and ticks_diff(iu, t_ms) > 0 and m != M_SCANNING:
             glyph = "battery"
             adeg = cone = style = None
+            bump = None
             if sub in ("reveal", "turn", "walk"):
                 sub = None
             sweep = None
@@ -1411,6 +1858,7 @@ class Game:
             sub = self.menu.sub
             rows = self.menu.rows
             runes = None
+            bump = None
             glyph = "glow"
             adeg = cone = style = None
             trend = 0
@@ -1431,7 +1879,7 @@ class Game:
             wavelength_px=wavelength(speed, period), glow_r_px=glow,
             ring_live=live, burst=self._burst,
             glyph=glyph, arrow_deg=adeg, cone_deg=cone, arrow_style=style,
-            trend=trend, trend_strong=strong, countdown=cd, runes=runes,
+            trend=trend, trend_strong=strong, countdown=cd, runes=runes, bump_icons=bump,
             dist_band=band, dist_stale=stale, word=word, top_text=top, banner=banner,
             status=status, menu_rows=rows, sweep=sweep,
             haptic=haptic, heartbeat=hb, heartbeat_every=every,

@@ -48,6 +48,7 @@ over their USB cables or over Wi-Fi.
 | `finder/scan.py` | `ScanSession`: guided 360° turn, circular-harmonic fit of raw RSSI vs body angle. |
 | `finder/arrow.py` | DIRECTION arrow lifecycle (reveal, turn, lock, walk, expire). |
 | `finder/pairing.py` | PAIRING sub-states, runes, 1 m calibration, split countdown. |
+| `finder/howto.py` | How-to cards over PAIRING looking (card table, swipe flips; UI state only). |
 | `finder/session.py` | Beacon state byte, partner view, bump timing. |
 | `finder/gestures.py` `haptic_patterns.py` | Touch gesture recognizer; the 9 haptic patterns and their player. |
 | `finder/game.py` | `Game`: the state machine. Inputs in, `RenderParams` out (read its docstring). |

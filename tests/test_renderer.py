@@ -227,7 +227,8 @@ def test_renderer_tables_match_tuning():
         assert R.SCREENS[name] == sid == T.SCREENS.index(name), name
     for name, gid in (("glow", R.G_GLOW), ("seeker", R.G_SEEKER), ("chevrons", R.G_CHEV),
                       ("arrow", R.G_ARROW), ("countdown", R.G_COUNT), ("turn", R.G_TURN),
-                      ("check", R.G_CHECK), ("runes", R.G_RUNES), ("battery", R.G_BATT)):
+                      ("check", R.G_CHECK), ("runes", R.G_RUNES), ("battery", R.G_BATT),
+                      ("bump", R.G_BUMP)):
         assert R.GLYPHS[name] == gid, name
     assert R.G_DOTS == len(T.GLYPHS)
     # copy the renderer keys on that lives in finder/game.py
@@ -774,6 +775,31 @@ def _level_probe():
     return probe, orig, means
 
 
+LOOK_KW = dict(rs._pair, sub="looking", top_text="START OTHER WATCH", word="LOOKING",
+               ring_live=False)
+
+
+def test_howto_cards_keep_the_looking_field():
+    """A card changes only the centre glyph and its iris (§6 PAIRING howto)."""
+    _need_fb()
+    r = Renderer()
+    cap = FrameCapture()
+    t = 0
+    while t < 1000:
+        _fr(r, make_params(t_ms=T0 + t, **LOOK_KW), cap)
+        t += 50
+    f = r.field
+    look = (f.fl, f.gl, f.pu)
+    for k, want in enumerate((T.IRIS_R["runes"], T.IRIS_R["scan"], T.IRIS_R["chevrons"],
+                              T.IRIS_R["bump"])):        # countdown: as scan (§2)
+        for _ in range(12):
+            ev = _fr(r, make_params(t_ms=T0 + t, **rs.HOWTO[k]), cap)
+            t += 50
+            assert not ev, ev                   # no heartbeat, no haptic
+        assert (f.fl, f.gl, f.pu) == look, (k, (f.fl, f.gl, f.pu), look)
+        assert f.iris_to == want, (k, f.iris_to, want)
+
+
 def test_flash_limit_across_transitions():
     # §4 / §11: no full-field change > 2 ramp steps in 333 ms. The calibrate
     # fill and the FOUND standing wave used to switch off in one frame.
@@ -791,7 +817,9 @@ def test_flash_limit_across_transitions():
                  (2000, dict(cal, countdown=1)), (3000, split)],
                 [(0, HOT_KW), (1000, dict(FOUND_KW, burst=True)), (1050, FOUND_KW),
                  (4000, hot_split)],
-                [(0, FOUND_KW), (3000, split)]):
+                [(0, FOUND_KW), (3000, split)],
+                [(0, LOOK_KW)] + [(400 * (k + 1), rs.HOWTO[k]) for k in range(4)]
+                + [(2000, LOOK_KW)]):
             del means[:]
             r = Renderer()
             cap = FrameCapture()
@@ -860,7 +888,7 @@ def test_hint_chip_outranks_pinned_status():
     cap = FrameCapture()
     r = Renderer()
     _fr(r, make_params(t_ms=T0, **_warm(status=(15, 80, 4, True, False),
-                                         top_text="TAP WATCHES")), cap)
+                                         top_text="BUMP WRISTS")), cap)
     assert r.top == T_CHIP
     _fr(r, make_params(t_ms=T0 + 50, **dict(rs._lost, status=(15, 80, 0, True, False))), cap)
     assert r.top == T_STATUS                          # strip outranks LAST
@@ -872,7 +900,7 @@ def test_sticky_banner_rises_once():
     r = Renderer()
     dys = []
     for k in range(60):
-        s = "LOST 0:%02d" % (k // 20)
+        s = "SIGNAL LOST" if k < 30 else "LOST: GO BACK"   # the hint swaps in place
         _fr(r, make_params(t_ms=T0 + 50 * k, **dict(rs._lost, banner=(s, "warn", True))), cap)
         dys.append(r.bot_dy)
     assert dys[0] == 12 and max(dys[5:]) == 0, dys
@@ -1068,7 +1096,8 @@ def test_no_allocation_steady_frames():
         dict(MENU_KW, sub="2^v"),
         _warm(sub="walk", glyph="arrow", arrow_deg=0, cone_deg=31, arrow_style="solid_b",
               trend=0),
-    )
+        dict(HOT_KW, glyph="bump", bump_icons=5, top_text="FRIEND NOT READY"),
+    ) + rs.HOWTO
     # float params are converted once per params object and heartbeat event
     # lists are reused, so a steady frame loop allocates nothing
     for kw in cases:
@@ -1180,6 +1209,58 @@ def test_wake_wedge_at_current_angle():
     assert got == list(gl._wedge)
 
 
+def test_bump_view_colours_per_state():
+    # §6 HOT bump view: each icon ready / lit / grey, rays follow (ui/glyphs.draw_bump)
+    _need_fb()
+    from ui import GREY
+    ready = (PROX[6], BG_IRIS, PROX[4])
+    lit = (PROX[7], PROX[7], PROX[6])
+    off = (GREY[5], BG_IRIS, GREY[3])
+    for bits, me, friend, ray in ((0, ready, ready, PROX[6]), (1, lit, ready, PROX[7]),
+                                  (2, ready, lit, PROX[7]), (4, ready, off, GREY[5]),
+                                  (5, lit, off, PROX[7])):
+        r = Renderer()
+        cap = FrameCapture()
+        _run(r, cap, dict(HOT_KW, glyph="bump", bump_icons=bits), 400)
+        b = cap.buf
+        assert r.field.iris == T.IRIS_R["bump"], bits
+        got = ((_px(b, 82, 118), _px(b, 100, 118), _px(b, 100, 90)),
+               (_px(b, 157, 118), _px(b, 140, 118), _px(b, 140, 90)))
+        assert got == (me, friend), (bits, got)
+        assert _px(b, 120, 69) == ray and _px(b, 119, 118) == BG_IRIS, bits
+
+
+def test_bump_view_hides_a_walk_arrow_at_once():
+    # the arrow is not dropped, only covered: no expire shrink under the bump view
+    _need_fb()
+    r = Renderer()
+    cap = FrameCapture()
+    walk = dict(HOT_KW, sub="walk", glyph="arrow", arrow_deg=20, cone_deg=18,
+                arrow_style="solid_a")
+    _run(r, cap, walk, 600)
+    assert r.arrow
+    _fr(r, make_params(t_ms=T0 + 650, **dict(HOT_KW, glyph="bump", bump_icons=0)), cap)
+    from ui.renderer import G_BUMP
+    assert not r.arrow and r.g == G_BUMP
+
+
+def test_bump_view_allocates_nothing_as_icons_change():
+    _need_fb()
+    r = Renderer()
+    cap = FrameCapture()
+    ps = [make_params(t_ms=T0 + 50 * k, **dict(HOT_KW, glyph="bump",
+                                               bump_icons=(0, 1, 2, 4, 5)[(k // 4) % 5]))
+          for k in range(80)]
+    for k in range(30):
+        _fr(r, ps[k], cap)
+    gc.collect()
+    a0 = gc.mem_alloc()
+    for k in range(30, 80):
+        _fr(r, ps[k], cap)
+    grown = gc.mem_alloc() - a0
+    assert grown < 512, grown
+
+
 def test_glyph_culling_boxes_cover_glyphs():
     # G_Y0/G_Y1 are typed in, the glyph geometry comes from tokens: a box
     # that stops covering its glyph clips it at a strip edge
@@ -1194,8 +1275,8 @@ def test_glyph_culling_boxes_cover_glyphs():
     y0, y1 = R.G_Y0, R.G_Y1
     for name, phases, run_ms in cases:
         rs.render_fixture(r, a, name, phases, run_ms)
-        R.G_Y0 = (0,) * 10
-        R.G_Y1 = (240,) * 10
+        R.G_Y0 = (0,) * len(y0)
+        R.G_Y1 = (240,) * len(y1)
         try:
             rs.render_fixture(r, b, name, phases, run_ms)
         finally:
@@ -1222,3 +1303,30 @@ def test_fixtures_match_snapshots():
         if crc.get(name) != binascii.crc32(cap.buf):
             stale.append(name)
     assert not stale, "re-render the snapshots (python3 tools/render_snapshots.py): %s" % stale
+
+
+def test_found_words_are_gold_and_other_words_on_found_are_not():
+    """ui-spec §6 FOUND: FOUND and the result word FOUND m:ss in accent.found;
+    the SAVER ON interstitial word over FOUND stays text.primary."""
+    _need_fb()
+    from ui import ACC_FOUND, TEXT_PRI
+    cap = FrameCapture()
+
+    def colours(kw):
+        r = Renderer()
+        _run(r, cap, kw, 600)
+        acc = pri = 0
+        for y in range(190, 222):
+            for x in range(28, 212):
+                c = _px(cap.buf, x, y)
+                acc += c == ACC_FOUND
+                pri += c == TEXT_PRI
+        return acc, pri
+
+    for w, top in (("FOUND", "TIME 1:48"), ("FOUND 1:48", "BUTTON: PLAY AGAIN"),
+                   ("FOUND12:48", "BUTTON: PLAY AGAIN"), ("FOUND 1H+", "BUTTON: PLAY AGAIN")):
+        acc, pri = colours(dict(FOUND_KW, sub="result" if top[0] == "B" else "celebrate",
+                                word=w, top_text=top))
+        assert acc > 100 and pri == 0, (w, acc, pri)
+    acc, pri = colours(dict(FOUND_KW, glyph="battery", word="SAVER ON"))
+    assert pri > 100 and acc == 0, (acc, pri)

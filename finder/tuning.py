@@ -6,7 +6,7 @@ Plain constants only; blocks marked 'ui-spec only' come from ui-spec.md.
 """
 
 TOKENS_VERSION = '0.2.0'
-TOKENS_HASH = 'f493c57ee22979da'
+TOKENS_HASH = '565e855ef67038c4'
 
 # ---- Zones (thresholds.zones_m): boundary k is between zone k and k+1
 ZONE_FAR = 0
@@ -484,7 +484,15 @@ THEME_PARAMS = {
 CENTER = (120, 120)
 TOP_SLOT = (12, 12, 216, 24)
 BOTTOM_SLOT = (24, 186, 192, 40)
-IRIS_R = {'none': 0, 'chevrons': 44, 'arrow': 64, 'scan': 64, 'runes': 92, 'seeker': 44}
+IRIS_R = {
+    'none': 0,
+    'chevrons': 44,
+    'arrow': 64,
+    'scan': 64,
+    'runes': 92,
+    'seeker': 44,
+    'bump': 64,
+}
 BEAM_R = 60
 SWEEP_R_INNER = 70
 SWEEP_R_OUTER = 110
@@ -572,6 +580,12 @@ RUNES = (
     ('cross', (('line', (0, -20), (0, 20)), ('line', (-20, 0), (20, 0)))),
     ('moon', (('disc', 0, 0, 18), ('cut_disc', 7, -4, 15))),
 )
+BUMP_WATCH_DX = (-20, 20)  # bump view: your watch left, the friend's right
+BUMP_BODY = (34, 40, -22, 7, 4)  # (w, h, y, r, stroke): the stroke's path-centre rect
+BUMP_STRAP = (20, 14, -36, 18)  # (w, h, y_top, y_bottom)
+# ((x0, y0), (x1, y1)) per ray
+BUMP_RAYS = (((-7, -44), (-12, -51)), ((0, -46), (0, -55)), ((7, -44), (12, -51)))
+BUMP_RAY_STROKE = 4  # round caps
 LINK_BARS = (4, 2, (4, 7, 10, 13))  # (w, gap, heights)
 LINK_Q_MAX = 4  # status link bars 0..count
 
@@ -581,13 +595,13 @@ SCREENS = (
     'PAIRING', 'SEARCHING', 'FAR', 'NEAR', 'WARM', 'HOT', 'FOUND', 'SCANNING',
     'LINK_LOST', 'MENU',
 )
-SUBS_PAIRING = ('looking', 'seen', 'confirmed', 'calibrate', 'split')
+SUBS_PAIRING = ('looking', 'seen', 'confirmed', 'calibrate', 'split', 'howto')
 SUBS_SCANNING = ('ready', 'sweep', 'result')
 SUBS_DIRECTION = ('reveal', 'turn', 'walk')  # FAR..HOT sub (or None)
 SUBS_FOUND = ('celebrate', 'result')
 GLYPHS = (
     'glow', 'seeker', 'chevrons', 'arrow', 'countdown', 'turn', 'check', 'runes',
-    'battery',
+    'battery', 'bump',
 )
 BANNER_SEVERITIES = ('info', 'warn', 'critical')
 HEARTBEATS = ('TICK', 'DOUBLE')
@@ -648,6 +662,8 @@ PAIR_READY_HINT_MS = 5000  # split: chip TAP WHEN READY from 5 s in
 PAIR_READY_LEFT_S = 3  # split: both ready -> the countdown jumps to 3
 CAL_GATE_WINDOW_MS = 1000  # RSSI sd over 1 s > unstable_sd pauses the fill
 SEARCHING_WALK_ABOUT_MS = 45000
+HOWTO_HINT_MS = 5000  # PAIRING looking: SWIPE: HOW TO PLAY toast once after this
+HOWTO_PRESS_GUARD_MS = 600  # a press or tap this soon after the cards closed only closes
 KNOCK_TOUCH_BEFORE_MS = 300  # a touch whose touch-down a counted spike precedes by up to this
 KNOCK_TOUCH_AFTER_MS = 100  # ... or follows by up to this may be a knock's (§8) ...
 # ... so it waits this long after the spike for the partner's: a knock spikes both watches, a finger only its own
@@ -656,8 +672,13 @@ BUMP_ODR_HZ = 800  # accelerometer rate while a bump can count
 BUMP_REFRACTORY_MS = 200
 BUMP_READY_HOLD_MS = 1500  # band <3 held 1.5 s
 BUMP_READY_BAND = 0  # index of '<3'
+BUMP_LIT_MS = 1000  # HOT bump view: a counted spike lights its watch icon this long
+# PAIRING: a friend's felt-it verdict waits KNOCK_WAIT_MS + this for its confirm (a confirming tap gets none)
+FELT_CONFIRM_GRACE_MS = 400
 HOT_SCAN_PRESS_MS = 1000  # HOT: 2nd short press within this starts a scan (§8)
 FOUND_CELEBRATE_MS = 2000
+FOUND_TIME_MAX_S = 5999  # TIME chip m:ss caps at 99:59 (§6 FOUND)
+FOUND_WORD_MSS_MAX_S = 599  # FOUND word: m:ss up to 9:59, then FOUNDmm:ss, FOUND 1H+ past the cap
 PARTNER_LEFT_MS = 2000  # partner in PAIRING this long: it left (§6 MENU)
 BATT_SHUTDOWN_PCT = 3
 BATT_INTERSTITIAL_MS = 2500
@@ -665,17 +686,19 @@ BATT_SCREEN_OFF_MS = 3000  # 5 %: screen off 3 s after lowering (LOW-BATTERY)
 BYE_WORD_MS = 2000
 GOODBYE_BEACONS = 3
 GOODBYE_GRACE_MS = 1000  # power off this long after the BYE word (§6 LOW-BATTERY)
-LOST_TIMER_MAX_S = 599  # m:ss up to 9:59, then 10M+
-LOST_HINT_AFTER_MS = 20000  # GO BACK / KEEP ON
+LOST_HINT_AFTER_MS = 20000  # LOST: GO BACK / KEEP ON, from the last packet
 WAKE_BOOST_MS = 3000
+FOUND_LIT_MS = 10000  # entering FOUND holds the screen lit this long (§8 event wake)
+EVENT_LIT_MS = 5000  # HOT entry, bump-ready, LINK-LOST, FRIEND LEFT: lit this long (§8)
 WRIST_DOWN_MS = 10000  # on battery: screen off once lowered this long (§8)
 WRIST_DOWN_DEG = 60  # lowered: tilted more than this from face-up
 SCAN_READY_DOWN_MS = 2000  # scan ready: cancels once not flat this long
 IDLE_DIM_MS = 30000
 IDLE_DIM_BACKLIGHT = 0.35  # ui-spec §8: face-up > 30 s with no input
 STATUS_AFTER_WAKE_MS = 3000
-HINT_CHIP_MS = 4000  # TAP TO SCAN / LOOK AROUND
+HINT_CHIP_MS = 4000  # top-slot hint chips (TAP TO SCAN, LOOK UP, FIND YOUR FRIEND, ...)
 HINT_STILL_MS = 6000  # TAP TO SCAN after 6 s still with no arrow
+IGNORED_TOAST_GAP_MS = 5000  # an ignored-tap toast at most once per this (§8)
 TAP_MIN_MS = 60
 TAP_MAX_MS = 400
 TAP_MOVE_PX = 12
