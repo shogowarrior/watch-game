@@ -9,6 +9,7 @@
 
 #include "check.h"
 #include "golden.h"
+#include "hm/game.h"
 #include "hm/render_params.h"
 
 namespace rp_ = hm::render_params;
@@ -80,7 +81,8 @@ bool set_field(RenderParams& rp, const std::string& tok) {
       rp.runes = rp_::Runes{(int32_t)p.size(), {}};
       for (size_t i = 0; i < p.size(); i++) rp.runes->ids[i] = (int32_t)num(p[i]);
     }
-  } else if (k == "dist_band") return rp_::band_from_name(none(v) ? nullptr : v.c_str(), &rp.dist_band);
+  } else if (k == "bump_icons") rp.bump_icons = opt_i(v);
+  else if (k == "dist_band") return rp_::band_from_name(none(v) ? nullptr : v.c_str(), &rp.dist_band);
   else if (k == "dist_stale") rp.dist_stale = num(v);
   else if (k == "word") rp.word = text(v);
   else if (k == "top_text") rp.top_text = text(v);
@@ -264,7 +266,7 @@ TEST(test_render_params_make_wavelength_arrow_style_like_python) {
       styles++;
     }
   }
-  CHECK(makes == 10 && waves == 16 && styles == 19);
+  CHECK(makes == 11 && waves == 16 && styles == 19);
 }
 
 TEST(test_render_params_validate_like_python) {
@@ -295,8 +297,11 @@ TEST(test_render_params_validate_like_python) {
     }
   }
   CHECK(next == got.size());
-  CHECK(cases == 165 && errors == 190);
+  CHECK(cases == 203 && errors == 218);
 }
+
+// test_bump_icons_rules: the word validate checks is the game's.
+static_assert(rp_::streq(hm::game::W_BUMP, rp_::W_BUMP) && rp_::BUMP_ICONS_MAX == 5, "W_BUMP or BUMP_ICONS_MAX");
 
 TEST(test_render_params_defaults_are_a_valid_searching_frame) {
   const RenderParams rp = rp_::make_params();

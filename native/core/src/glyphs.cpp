@@ -1,6 +1,8 @@
 // Port of ui/glyphs.py's drawing; its import-time geometry is in ui_tables.h.
 #include "hm/glyphs.h"
 
+#include "hm/render_params.h"
+
 namespace hm {
 namespace ui {
 
@@ -15,6 +17,26 @@ constexpr int SW_R0 = T::SWEEP_R_INNER, SW_R1 = T::SWEEP_R_OUTER;
 // keyline arc angles: 2 px beside a radial side is +1.0 deg at r 112, +1.7 at r 68
 constexpr int KEY_OUT[4] = {-16, -5, 5, 16};
 constexpr int KEY_IN[4] = {-17, -6, 6, 17};
+
+// HOT bump view: BUMP_BODY is (w, h, y, r, stroke), the stroke's path-centre
+// rect; the outer rect is the stroke, the inner one the iris fill
+constexpr int BB_W = T::BUMP_BODY[0], BB_H = T::BUMP_BODY[1], BB_Y = T::BUMP_BODY[2], BB_R = T::BUMP_BODY[3];
+constexpr int BB_S = T::BUMP_BODY[4], BH = BB_S / 2;
+constexpr int BODY_Y0 = CY + BB_Y - BH, BODY_Y1 = BODY_Y0 + BB_H + BB_S - 1;   // rows, inclusive
+constexpr int BS_W = T::BUMP_STRAP[0], BS_H = T::BUMP_STRAP[1];
+constexpr int BUMP_STRAP_Y[2] = {CY + T::BUMP_STRAP[2], CY + T::BUMP_STRAP[3]};
+constexpr int BR = T::BUMP_RAY_STROKE / 2;
+constexpr int caps_y(bool top) {
+  int v = U::BUMP_CAPS[1];
+  for (int k = 3; k < (int)(sizeof U::BUMP_CAPS / sizeof U::BUMP_CAPS[0]); k += 2) {
+    if (top ? U::BUMP_CAPS[k] < v : U::BUMP_CAPS[k] > v) v = U::BUMP_CAPS[k];
+  }
+  return v;
+}
+constexpr int RAY_Y0 = CY + caps_y(true) - BR, RAY_Y1 = CY + caps_y(false) + BR;   // rows, inclusive
+// per icon state: 0 ready, 1 lit (its spike counted), 2 off (cannot count)
+constexpr uint16_t BW_STROKE[3] = {(uint16_t)PROX[6], (uint16_t)PROX[7], (uint16_t)GREY[5]};
+constexpr uint16_t BW_STRAP[3] = {(uint16_t)PROX[4], (uint16_t)PROX[6], (uint16_t)GREY[3]};
 
 inline int deg360(int deg) { return (int)floormod(deg, 360); }
 
@@ -174,6 +196,32 @@ void draw_rune(FrameBuffer& fb, int rid, int cx, uint16_t c) {
         break;
       default:   // R_CUT
         fb.ellipse(x, y, r, r, BG_IRIS, true);
+    }
+  }
+}
+
+// ---- HOT bump view ------------------------------------------------------------------
+void draw_bump(FrameBuffer& fb, int32_t bits) {
+  namespace rp = hm::render_params;
+  const int y0 = fb.y0(), y1 = fb.y1();
+  for (int k = 0; k < 2; k++) {
+    const int st = bits & (1 << k) ? 1 : (k == 1 && (bits & rp::BI_FRIEND_OFF) ? 2 : 0);
+    const int dx = T::BUMP_WATCH_DX[k];
+    for (int sy : BUMP_STRAP_Y) {
+      if (sy < y1 && sy + BS_H > y0) fb.fill_rect(CX + dx - BS_W / 2, sy, BS_W, BS_H, BW_STRAP[st]);
+    }
+    if (BODY_Y0 < y1 && BODY_Y1 >= y0) {
+      rrect(fb, CX + dx - (BB_W + BB_S) / 2, BODY_Y0, BB_W + BB_S, BB_H + BB_S, BB_R + BH, BW_STROKE[st]);
+      if (st != 1) {   // lit: stroke and fill are one colour
+        rrect(fb, CX + dx - (BB_W - BB_S) / 2, CY + BB_Y + BH, BB_W - BB_S, BB_H - BB_S, BB_R - BH, BG_IRIS);
+      }
+    }
+  }
+  if (RAY_Y0 < y1 && RAY_Y1 >= y0) {
+    const uint16_t c = bits & (rp::BI_ME | rp::BI_FRIEND) ? PROX[7] : (bits & rp::BI_FRIEND_OFF ? GREY[5] : PROX[6]);
+    for (const int16_t* q : U::BUMP_RAYS) fb.poly(CX, CY, q, 4, c, true);
+    for (int k = 0; k < (int)(sizeof U::BUMP_CAPS / sizeof U::BUMP_CAPS[0]); k += 2) {
+      fb.ellipse(CX + U::BUMP_CAPS[k], CY + U::BUMP_CAPS[k + 1], BR, BR, c, true);
     }
   }
 }

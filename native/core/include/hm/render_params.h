@@ -7,9 +7,9 @@
 //
 // Python None: sub, glyph, arrow_style, haptic and heartbeat are the enum's
 // NONE; every other field the Python lets be None (zone, wavelength_px,
-// arrow_deg, cone_deg, countdown, runes, dist_band, word, top_text, banner and
-// its text, status.partner_pct, menu_rows and each row, sweep, each sweep bin
-// and active_bin) is a std::optional.
+// arrow_deg, cone_deg, countdown, runes, bump_icons, dist_band, word, top_text,
+// banner and its text, status.partner_pct, menu_rows and each row, sweep, each
+// sweep bin and active_bin) is a std::optional.
 // Python allows any type in any field; validate() here checks every rule the
 // typed fields can break (not the "must be bool/int/str" ones).
 #pragma once
@@ -28,7 +28,7 @@ namespace render_params {
 
 namespace hp = hm::haptic_patterns;
 
-constexpr int N_FIELDS = 34;
+constexpr int N_FIELDS = 35;
 extern const char* const FIELDS[N_FIELDS];
 
 // T::SCREENS order.
@@ -37,13 +37,13 @@ constexpr int N_SCREENS = 10;
 // Every sub: SUBS_PAIRING, SUBS_SCANNING, SUBS_DIRECTION, SUBS_FOUND ("result"
 // once), then the 16 MENU subs (visible row 0..3, then "^" and/or "v" marks).
 enum class Sub : int8_t {
-  NONE = -1, LOOKING, SEEN, CONFIRMED, CALIBRATE, SPLIT, READY, SWEEP, RESULT, REVEAL, TURN, WALK, CELEBRATE,
+  NONE = -1, LOOKING, SEEN, CONFIRMED, CALIBRATE, SPLIT, HOWTO, READY, SWEEP, RESULT, REVEAL, TURN, WALK, CELEBRATE,
   MENU_0, MENU_LAST = MENU_0 + 15,
 };
-constexpr int N_SUBS = 28;
+constexpr int N_SUBS = 29;
 // T::GLYPHS order.
-enum class Glyph : int8_t { NONE = -1, GLOW, SEEKER, CHEVRONS, ARROW, COUNTDOWN, TURN, CHECK, RUNES, BATTERY };
-constexpr int N_GLYPHS = 9;
+enum class Glyph : int8_t { NONE = -1, GLOW, SEEKER, CHEVRONS, ARROW, COUNTDOWN, TURN, CHECK, RUNES, BATTERY, BUMP };
+constexpr int N_GLYPHS = 10;
 // T::ARROW_STYLES order.
 enum class ArrowStyle : int8_t { NONE = -1, SOLID_A, SOLID_B, OUTLINE };
 constexpr int N_ARROW_STYLES = 3;
@@ -99,6 +99,12 @@ constexpr Ramp ramp_of(const char* s) {
 // T.ZONE_HEARTBEAT (tuning.h has ZONE_HEARTBEAT_0..2 as strings and notes _3 as None).
 constexpr hp::Haptic ZONE_HEARTBEAT[4] = {hp::TICK, hp::TICK, hp::DOUBLE, hp::NONE};
 constexpr int MENU_VISIBLE = sizeof(T::MENU_ROWS_Y) / sizeof(T::MENU_ROWS_Y[0]);   // rows on screen
+// bump_icons bits (HOT bump view, ui-spec §6 HOT)
+constexpr int32_t BI_ME = 1;                                // your watch counted a spike in the last 1 s
+constexpr int32_t BI_FRIEND = 2;                            // the friend's reported spike, in the last 1 s
+constexpr int32_t BI_FRIEND_OFF = 4;                        // the friend's watch cannot count a bump (grey)
+constexpr int32_t BUMP_ICONS_MAX = BI_ME | BI_FRIEND_OFF;   // 6 and 7 never occur (bits 1 and 2 exclude)
+constexpr const char* W_BUMP = "BUMP!";                     // hm::game's W_BUMP (tests check)
 
 // A str of up to TEXT_MAX chars: more than any slot allows, so validate can
 // still flag an over-long one (longer input is cut). None is std::nullopt.
@@ -175,6 +181,7 @@ struct RenderParams {
   bool trend_strong = false;
   std::optional<int32_t> countdown;
   std::optional<Runes> runes;
+  std::optional<int32_t> bump_icons;   // BI_* bits
   // text slots
   std::optional<int32_t> dist_band;   // index into T::BAND_LABELS
   bool dist_stale = false;

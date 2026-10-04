@@ -67,6 +67,11 @@ constexpr uint16_t RUNE_COL = TEXT_PRI;
 constexpr uint16_t RUNE_WAIT = LINE_SUBTLE;
 constexpr uint16_t RUNE_OK = T::RAMP_SWAPPED_GREEN[7];
 
+// ---- HOT bump view (tokens.glyphs.bump_watches) ----------------------------------
+// Two watch icons, yours left and the friend's right, with 3 rays above; bits
+// is RenderParams.bump_icons. Each part is skipped on strips it misses.
+void draw_bump(FrameBuffer& fb, int32_t bits);
+
 // ---- sweep wedge, bins ------------------------------------------------------------
 struct Wedge {
   int16_t w[16], key[16];   // 30 deg sector r 70..110 and its 2 px bg.base keyline

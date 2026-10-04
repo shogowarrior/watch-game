@@ -5,11 +5,12 @@ on valid frames and on a case for every rule the C++ types can break.
 A field token is ``name=value`` (see ``tok``): None is ``n``, bools 0/1, a
 space in text ``_``, tuple items joined by ``|`` (sweep bins by ``/``).
 
-    make <field tokens given to make_params> -> <all 34 field tokens>
+    make <field tokens given to make_params> -> <all 35 field tokens>
     validate <field tokens that differ from DEFAULTS, wavelength_px always> -> <count>
     error <message>          (one line per violation, in order, after its validate line)
 """
 
+from finder import howto as HT
 from finder import render_params as RP
 from finder import tuning as T
 
@@ -45,7 +46,7 @@ def val(k, v):
         return _flt(v)
     if k in ("ring_live", "burst", "trend_strong", "dist_stale", "sun"):
         return _bool(v)
-    if k in ("t_ms", "zone", "pulse_period_ms", "trend", "countdown", "heartbeat_every", "fps_cap"):
+    if k in ("t_ms", "zone", "pulse_period_ms", "trend", "countdown", "bump_icons", "heartbeat_every", "fps_cap"):
         assert v is None or (isinstance(v, int) and not isinstance(v, bool)), (k, v)
         return _int(v)
     if k in ("word", "top_text"):
@@ -131,6 +132,7 @@ MAKES = (
          banner=(None, "critical", False), menu_rows=("A", None), runes=(1,)),
     dict(screen="SEARCHING", sub="turn", sweep=(330.0, (None,) * 12, None, True), glyph="arrow",
          arrow_deg=300.0, cone_deg=59.9, arrow_style="outline", status=(80, 80, 3, True, True)),
+    dict(screen="HOT", zone=3, glyph="bump", bump_icons=5, word="BUMP!", dist_band="<3"),
 )
 
 WAVELENGTHS = ((-36.0, 3200), (40.0, 2400), (56.0, 1600), (80.0, 1000), (120.0, 500), (0.0, 1000),
@@ -188,6 +190,13 @@ def validate_cases():
         out.append(zone_frame(0, top_text=s))
     for s in ("NO FIX, TRY AGAIN", "LOST 0:27 GO BACK", "BATTERY 5%"):
         out.append(zone_frame(0, banner=(s, "info", False)))
+    look = dict(LOOK, sub="looking", glyph="runes", top_text="START OTHER WATCH", word="LOOKING")
+    out += [card(k) for k in (1, 2, 3, 4)]
+    out.append(RP.make_params(**dict(look, banner=("SWIPE: HOW TO PLAY", "info", False))))
+    hot = dict(glyph="bump", dist_band="<3")
+    out += [zone_frame(3, bump_icons=v, **hot) for v in range(RP.BUMP_ICONS_MAX + 1)]
+    out += [zone_frame(3, bump_icons=0, word="BUMP!", top_text="BUMP WRISTS", **hot),
+            zone_frame(3, bump_icons=1, word="BUMP!", **hot)]
     # violations (tests/test_render_params.py, the representable ones, plus every other branch)
     out += [
         R(base, sub="sweep"), R(base, screen="MENU", sub="walk"), R(base, screen="SEARCHING", sub="reveal"),
@@ -259,6 +268,20 @@ def validate_cases():
         R(base, heartbeat_every=2), R(base, heartbeat=None, heartbeat_every=0), R(_hot(), heartbeat="DOUBLE"),
         R(base, backlight=2.0), R(base, backlight=-0.5), R(base, fps_cap=30), R(base, fps_cap=4),
         R(base, haptic="LOST"),
+        # howto cards and the bump view (tests/test_render_params.py)
+        RP.make_params(**dict(look, glyph="chevrons")), RP.make_params(**dict(look, ring_live=True)),
+        RP.make_params(**dict(look, speed_px_s=40.0, pulse_period_ms=2400, wavelength_px=96.0)),
+        RP.make_params(**dict(LOOK, sub="split", glyph="countdown", countdown=20, trend=1)),
+        card(1, ring_live=True), card(1, speed_px_s=40.0, pulse_period_ms=2400, wavelength_px=96.0),
+        card(1, glyph="check", runes=None), card(3, trend_strong=True), card(3, trend=-1),
+        card(1, runes=None), card(2, word=None), card(1, top_text=None), card(4, bump_icons=None),
+        card(2, glyph="seeker", countdown=None), card(3, trend=1, glyph="countdown", countdown=5),
+        card(4, bump_icons=4, word="BUMP!", ring_live=True),
+        zone_frame(3, bump_icons=6, **hot), zone_frame(3, bump_icons=7, **hot),
+        zone_frame(3, bump_icons=-1, **hot), zone_frame(3, glyph="bump", dist_band="<3"),
+        zone_frame(3, bump_icons=0, dist_band="<3"), zone_frame(2, bump_icons=0, glyph="bump"),
+        zone_frame(3, bump_icons=0, sub="walk", **hot), zone_frame(3, bump_icons=4, word="BUMP!", **hot),
+        RP.make_params(screen="SEARCHING", glyph="bump", bump_icons=4, word="BUMP!", sub="turn"),
         # many at once
         RP.make_params(screen="FAR", sub="sweep", zone=5, ramp="gold", intensity=2.0, speed_px_s=400.0,
                        pulse_period_ms=50, glow_r_px=200.0, glyph="chevrons", arrow_deg=500.0, trend=4,
@@ -272,6 +295,19 @@ def validate_cases():
 
 def _hot():
     return zone_frame(3)
+
+
+LOOK = dict(screen="PAIRING", zone=None, ramp="green", intensity=0.1, speed_px_s=-30.0,
+            pulse_period_ms=3000, wavelength_px=90.0, glow_r_px=30.0, ring_live=False)
+
+
+def card(k, **kw):
+    """The howto card k (finder/howto.py CARDS) over PAIRING looking."""
+    top, word, glyph, runes, cd, trend, bump = HT.CARDS[k - 1]
+    d = dict(LOOK, sub="howto", top_text=top, word=word, glyph=glyph, runes=runes,
+             countdown=cd, trend=trend, bump_icons=bump)
+    d.update(kw)
+    return RP.make_params(**d)
 
 
 def lines():
