@@ -13,6 +13,14 @@
 
 namespace sf {
 
+// Draws and sends one frame its own way (for example through LVGL) from this
+// frame's field palette and the ring map; returns with the last pixels queued,
+// as St7789::push_strip does.
+struct FrameDrawer {
+  virtual ~FrameDrawer() = default;
+  virtual void frame(const uint16_t* pal, const uint8_t* ring_map) = 0;
+};
+
 struct BenchHost {
   const char* variant;      // e.g. "arduino-lovyangfx"
   const char* framework;    // e.g. "arduino-esp32 2.0.17"
@@ -21,6 +29,7 @@ struct BenchHost {
   I2c& i2c0;                // AXP202 + BMA423
   ImuTask& imu;
   void (*backlight)(bool on);
+  FrameDrawer* drawer = nullptr;   // nullptr: the bench's own strip loop
 };
 
 class Bench {

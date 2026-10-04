@@ -1,0 +1,82 @@
+// Display and motion-sensor benchmark on Arduino-ESP32, one env per graphics
+// library (bench_env.h). Steps and log lines are the shared ones in native/core (sf::Bench).
+#include <Arduino.h>
+#include <Wire.h>
+#include <esp_arduino_version.h>
+
+#include "bench_env.h"
+#include "sf/esp32.h"
+
+namespace {
+
+// I2C0 (AXP202, BMA423) through Wire; reads stay within Wire's 128-byte buffer.
+struct WireI2c : sf::I2c {
+  bool write(uint8_t addr, uint8_t reg, const uint8_t* d, size_t n) override {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write(d, n);
+    return Wire.endTransmission() == 0;
+  }
+  bool read(uint8_t addr, uint8_t reg, uint8_t* d, size_t n) override {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((uint16_t)addr, n, true) != n) return false;
+    for (size_t i = 0; i < n; i++) d[i] = (uint8_t)Wire.read();
+    return true;
+  }
+};
+
+char framework[96];
+sf::esp::EspClock clock_;
+WireI2c i2c0;
+sf::esp::CoreImuTask imu;
+bool ready = false;
+
+sf::Bench& bench() {
+  BenchEnv& env = bench_env();
+  static sf::BenchHost host{env.variant, framework, clock_, env.lcd, i2c0, imu, sf::esp::backlight, env.drawer};
+  static sf::Bench b(host);
+  return b;
+}
+
+}  // namespace
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  snprintf(framework, sizeof framework, "arduino-esp32_%d.%d.%d_idf_%s_%s", ESP_ARDUINO_VERSION_MAJOR,
+           ESP_ARDUINO_VERSION_MINOR, ESP_ARDUINO_VERSION_PATCH, esp_get_idf_version(), bench_env().library);
+  // Install the I2C driver from core 0 so its interrupt runs beside the sensor
+  // task, not the renderer (as the ESP-IDF build does).
+  static volatile bool wire_ok = false, wire_done = false;
+  xTaskCreatePinnedToCore(
+      [](void*) {
+        wire_ok = Wire.begin(21, 22, 400000);
+        wire_done = true;
+        vTaskDelete(nullptr);
+      },
+      "sf_wire", 4096, nullptr, 5, nullptr, 0);
+  while (!wire_done) delay(1);
+  if (!wire_ok) {
+    sf::logf("SF error what=i2c_bus");
+    return;
+  }
+  if (!bench_env().lcd.begin(sf::Bench::CLOCKS[0])) {
+    sf::logf("SF error what=spi_bus");
+    return;
+  }
+  ready = bench().setup();
+  if (ready) bench().run();
+}
+
+void loop() {
+  // After the run: the HOT field at 20, 30 and 60 fps in turn, 10 s each, for the eye.
+  static const int targets[] = {20, 30, 60};
+  static int i = 0;
+  if (!ready) {
+    delay(1000);
+    return;
+  }
+  bench().show(sf::Bench::CLOCKS[1], targets[i++ % 3], 10);
+}

@@ -51,6 +51,7 @@ void Bench::frame(const FieldParams& p, ticks_t t, bool push, bool wait_each) {
   // One frame: the field state, then each strip blitted and (optionally) pushed
   // while the previous one is still on the wire.
   scene_.step(p, t);
+  if (push && h_.drawer) return h_.drawer->frame(field_.pal, ring_map);
   if (push) panel_.begin_frame();
   for (int s = 0; s < NS; s++) {
     uint16_t* buf = strips[s & 1];

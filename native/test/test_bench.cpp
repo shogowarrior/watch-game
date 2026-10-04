@@ -143,3 +143,29 @@ TEST(test_bench_runs_every_step) {
     }
   }
 }
+
+TEST(test_bench_drawer_sends_the_timed_frames) {
+  // With a runtime's own drawer (LVGL), every timed frame goes through it with the
+  // field's palette and the ring map, and the bench sends no strips of its own.
+  struct CountDrawer : sf::FrameDrawer {
+    int frames = 0;
+    const uint8_t* map = nullptr;
+    void frame(const uint16_t* pal, const uint8_t* m) override {
+      CHECK(pal != nullptr);
+      frames++;
+      map = m;
+    }
+  } drawer;
+  sft::FakeClock clock;
+  sft::FakeLcd lcd(clock);
+  sft::FakeI2c i2c;
+  sft::FakeImuTask imu;
+  sf::BenchHost host{"host", "g++", clock, lcd, i2c, imu, no_backlight, &drawer};
+  static sf::Bench bench(host);
+  CHECK(bench.setup());
+  const size_t ops = lcd.ops.size();
+  bench.show(40000000, 30, 1);
+  CHECK(drawer.frames == 30 || drawer.frames == 31);   // slot 31 (30 x 33,333 us) starts inside the second
+  CHECK(drawer.map && drawer.map[0] == 168);    // the corner's ring index
+  CHECK(lcd.ops.size() == ops);
+}
