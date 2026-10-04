@@ -628,7 +628,7 @@ def test_steady_frames_allocate_nothing():
     # hard rule 2: once a moment's first frames are drawn a frame allocates
     # nothing (the floor and glow targets used to come back as a tuple)
     _need_fb()
-    import gc
+    import micropython
     r = _renderer()
     cap = FrameCapture()
     for fx in ("near", "warm_arrow"):                # the renderer's one-off buffers (events)
@@ -640,14 +640,19 @@ def test_steady_frames_allocate_nothing():
         ps = [rt.params_at(phases, t) for t in range(0, run_ms + 1, rt.STEP_MS)]
         r.reset()
         for n in range(len(ps)):
-            gc.collect()
-            gc.disable()
-            a0 = gc.mem_alloc()
-            r.frame(ps[n], cap, rt.T0 + n * rt.STEP_MS)
-            grown = gc.mem_alloc() - a0
-            gc.enable()
-            if n >= 3:
-                assert grown == 0, (fx, n, grown)
+            if n < 3:
+                r.frame(ps[n], cap, rt.T0 + n * rt.STEP_MS)
+                continue
+            ok = False              # heap locked: any allocation raises at once
+            micropython.heap_lock()
+            try:
+                r.frame(ps[n], cap, rt.T0 + n * rt.STEP_MS)
+                ok = True
+            except MemoryError:
+                pass
+            finally:
+                micropython.heap_unlock()
+            assert ok, (fx, n, "allocated")
 
 
 # ---- drawing -------------------------------------------------------------------------

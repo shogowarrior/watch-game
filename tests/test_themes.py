@@ -11,8 +11,6 @@ theme's own field layer. Theme-specific behaviour is tested in
 tests/test_theme_<name>.py.
 """
 
-import gc
-
 from finder import tuning as T
 from finder.render_params import replace as rp_replace
 from tests import Skip
@@ -25,6 +23,7 @@ except ImportError:
     HAVE_FB = False
 
 if HAVE_FB:
+    import micropython
     from tools import render_themes as rt
     from ui.renderer import FrameCapture, Renderer
     from ui.themes import NAMES, ThemedRenderer, make
@@ -48,17 +47,45 @@ def _luma(c):
     return (299 * ((n >> 11) << 3) + 587 * (((n >> 5) & 63) << 2) + 114 * ((n & 31) << 3)) // 1000
 
 
+_LUMA = []                   # [bytearray(65536)]: _luma of every swapped RGB565 value
+
+
 def _mean_luma(buf):
+    """Mean luma of every 7th pixel (a table lookup per pixel: the contract
+    calls this on every frame of every theme, so it must cost less than the
+    frame it checks)."""
+    if not _LUMA:
+        lut = bytearray(65536)
+        for c in range(65536):
+            lut[c] = _luma(c)
+        _LUMA.append(lut)
+    lut = _LUMA[0]
     s = 0
-    n = 0
     for o in range(0, W * W * 2, 14):            # every 7th pixel
-        s += _luma(buf[o] | (buf[o + 1] << 8))
-        n += 1
-    return s // n
+        s += lut[buf[o] | (buf[o + 1] << 8)]
+    return s // ((W * W * 2 + 13) // 14)
+
+
+def _frame_locked(r, p, cap, now):
+    """Draw one frame with the heap locked; False if it tried to allocate.
+    Any allocation raises MemoryError at once, so this checks hard rule 2
+    per frame for free (gc.mem_alloc walks the whole heap: two calls cost
+    more than the frame they measure)."""
+    micropython.heap_lock()
+    try:
+        r.frame(p, cap, now)
+    except MemoryError:
+        return False
+    finally:
+        micropython.heap_unlock()
+    return True
 
 
 def _changed(prev, cur):
-    """{strip: (x0, x1)} where ``cur`` differs from ``prev``."""
+    """{strip: (x0, x1)} where ``cur`` differs from ``prev``. Slice compares
+    run in C (a pixel loop cost more than the frame it checks): a changed
+    row widens its strip's span only past an unequal prefix or suffix, and
+    the new edge is found by bisection."""
     mp = memoryview(prev)
     mc = memoryview(cur)
     out = {}
@@ -66,18 +93,31 @@ def _changed(prev, cur):
         o = y * ROW
         if mp[o:o + ROW] == mc[o:o + ROW]:
             continue
-        x0 = 0
-        while mp[o + 2 * x0] == mc[o + 2 * x0] and mp[o + 2 * x0 + 1] == mc[o + 2 * x0 + 1]:
-            x0 += 1
-        x1 = W - 1
-        while mp[o + 2 * x1] == mc[o + 2 * x1] and mp[o + 2 * x1 + 1] == mc[o + 2 * x1 + 1]:
-            x1 -= 1
         k = y // SH
-        if k in out:
-            a, b = out[k]
-            out[k] = (min(a, x0), max(b, x1))
-        else:
-            out[k] = (x0, x1)
+        x0, x1 = out[k] if k in out else (W, -1)
+        e = o + 2 * x0
+        if x0 > 0 and not mp[o:e] == mc[o:e]:
+            lo, hi = 0, x0           # pixels [0, lo) equal, [0, hi) not
+            while hi - lo > 1:
+                m = (lo + hi) >> 1
+                e = o + 2 * m
+                if mp[o:e] == mc[o:e]:
+                    lo = m
+                else:
+                    hi = m
+            x0 = lo
+        e = o + 2 * (x1 + 1)
+        if x1 < W - 1 and not mp[e:o + ROW] == mc[e:o + ROW]:
+            lo, hi = x1 + 1, W       # pixels [lo, W) not equal, [hi, W) equal
+            while hi - lo > 1:
+                m = (lo + hi) >> 1
+                e = o + 2 * m
+                if mp[e:o + ROW] == mc[e:o + ROW]:
+                    hi = m
+                else:
+                    lo = m
+            x1 = lo
+        out[k] = (x0, x1)
     return out
 
 
@@ -187,18 +227,14 @@ def _contract(name):
             age = age + 1 if k == k_was else 0
             k_was = k
             gap = t - times[n - 1] if n > 0 else 0
-            gc.collect()
-            gc.disable()
-            a0 = gc.mem_alloc()
-            r.frame(ps[n], cap, rt.T0 + t)
-            grown = gc.mem_alloc() - a0
-            gc.enable()
-            th = r.theme
             wake = n == 0 or gap > WAKE_MS
             # steady frames allocate nothing (hard rule 2); a moment's first
             # frames may build caches
             if age >= 3 and not wake:
-                assert grown == 0, (name, fx, t, grown, "bytes allocated")
+                assert _frame_locked(r, ps[n], cap, rt.T0 + t), (name, fx, t, "allocated")
+            else:
+                r.frame(ps[n], cap, rt.T0 + t)
+            th = r.theme
             if wake:
                 assert th.dirty == ALL, (name, fx, t, "a wake reports everything")
             else:
@@ -218,6 +254,24 @@ def _contract(name):
                 assert abs(d) <= abs(dr) + 12, (name, fx, t, lum, m, "ripple", ref[n - 1], ref[n])
             lum = m
             prev[:] = cap.buf
+
+
+def test_frame_lock_catches_an_allocation():
+    # the contract's allocation check itself: a frame that allocates fails it
+    _need_fb()
+
+    class Allocates:
+        def frame(self, p, cap, now):
+            self.last = [p, cap, now]
+
+    class Still:
+        def frame(self, p, cap, now):
+            pass
+
+    assert not _frame_locked(Allocates(), 1, 2, 3)
+    assert _frame_locked(Still(), 1, 2, 3)
+    x = [1, 2]                      # and the heap is unlocked after either
+    assert len(x) == 2
 
 
 def test_contract_ripple():
@@ -492,8 +546,6 @@ def test_follow_in_the_menu_starts_in_the_moment_under_it():
 def test_follow_frames_allocate_nothing():
     # following params.theme costs one compare a frame: no allocation (rule 7)
     _need_fb()
-    if not hasattr(gc, "mem_alloc"):
-        raise Skip("needs gc.mem_alloc (MicroPython)")
     cap = FrameCapture()
     _, phases, run_ms = rt.fixture("hot")
     r = ThemedRenderer("tide", follow=True, overlays=False)
@@ -501,10 +553,4 @@ def test_follow_frames_allocate_nothing():
     for k in range(4):
         r.frame(ps[k], cap, rt.T0 + k * 100)
     for k in range(4, 8):
-        gc.collect()
-        gc.disable()
-        a0 = gc.mem_alloc()
-        r.frame(ps[k], cap, rt.T0 + k * 100)
-        grown = gc.mem_alloc() - a0
-        gc.enable()
-        assert grown == 0, (k, grown)
+        assert _frame_locked(r, ps[k], cap, rt.T0 + k * 100), k
