@@ -144,12 +144,10 @@ stages in order:
    coloured through a 256-entry palette of byte-swapped RGB565, then glyph and
    text overlays) and
    pushes it with `display.push_strip`. Strips go top to bottom, so the panel
-   takes them as one window, from two buffers in turn: the watch's display
-   sends each strip from a background thread (the SPI DMA runs while the
-   next strip is drawn) and has sent the bottom one when its call returns.
-   The field is coloured four pixels a pass (a viper kernel on the watch,
-   checked against the framebuf path when the renderer starts; elsewhere a
-   framebuf palette blit). With the screen off it runs with
+   takes them as one window, all drawn in one buffer. The field is coloured
+   from a quarter of the ring map, eight pixels a pass mirrored left-right
+   and top-bottom (a viper kernel on the watch, checked against the framebuf
+   path when the renderer starts; elsewhere a framebuf palette blit). With the screen off it runs with
    `display=None`, so ring and heartbeat timing continue. It returns only the
    heartbeat names, locked to ring spawns.
 7. **tx**: when due, `game.fill_beacon` fills the 16-byte beacon (seq, own and

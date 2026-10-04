@@ -335,27 +335,54 @@ def build_map(rows):
     return buf
 
 
+def build_quadrant(full):
+    """Top-right quadrant of a full map (rows 0..119, columns 120..239;
+    14.4 KB): every other pixel mirrors one of these."""
+    q = bytearray(120 * 120)
+    for r in range(120):
+        q[r * 120:(r + 1) * 120] = full[r * W + 120:(r + 1) * W]
+    return q
+
+
 # ---- strip blit kernel --------------------------------------------------------
-# Map bytes off..off+n-1 (whole rows) through the palette into ``dst``, four
-# pixels per pass: one 32-bit load of map bytes, two 32-bit stores of pixel
-# pairs (little-endian, as framebuf stores RGB565). Compiled with
-# @micropython.viper where the port supports it (the ESP32 build; RingMap
-# checks it against the framebuf path before use); elsewhere RingMap uses the
-# framebuf palette blit.
+# Strip rows y0..y0+h-1 through the palette into ``dst``, from the map's
+# quadrant ``q`` (build_quadrant): row y reads quadrant row y (y < 120) or
+# 239 - y, and each palette colour lands at x and its mirror 239 - x. Four
+# map bytes per pass (one 32-bit load, four palette lookups) give eight
+# pixels (four 32-bit stores, little-endian as framebuf stores RGB565): half
+# the map reads and lookups of a straight blit, which on the watch run from
+# the PSRAM heap. Compiled with @micropython.viper where the port supports it
+# (the ESP32 build; RingMap checks it against the framebuf path before use);
+# elsewhere RingMap uses the framebuf palette blit.
 _BSRC = """
-def blit_kernel(dst, idx, pal, off: int, n: int):
+def blit_kernel(dst, q, pal, y0: int, h: int):
     dp = ptr32(dst)
-    ip = ptr32(idx)
+    qp = ptr32(q)
     pp = ptr16(pal)
-    i = off >> 2
-    e = i + (n >> 2)
-    d = 0
-    while i < e:
-        w = ip[i]
-        dp[d] = pp[w & 0xFF] | (pp[(w >> 8) & 0xFF] << 16)
-        dp[d + 1] = pp[(w >> 16) & 0xFF] | (pp[(w >> 24) & 0xFF] << 16)
-        d += 2
-        i += 1
+    row = 0
+    while row < h:
+        y = y0 + row
+        if y < 120:
+            i = y * 30
+        else:
+            i = (239 - y) * 30
+        e = i + 30
+        rt = row * 120 + 60
+        lt = rt - 2
+        while i < e:
+            w = qp[i]
+            c0 = pp[w & 0xFF]
+            c1 = pp[(w >> 8) & 0xFF]
+            c2 = pp[(w >> 16) & 0xFF]
+            c3 = pp[(w >> 24) & 0xFF]
+            dp[rt] = c0 | (c1 << 16)
+            dp[rt + 1] = c2 | (c3 << 16)
+            dp[lt] = c3 | (c2 << 16)
+            dp[lt + 1] = c1 | (c0 << 16)
+            rt += 2
+            lt -= 2
+            i += 1
+        row += 1
 """
 
 
@@ -384,16 +411,16 @@ def _aligned(b):
 class RingMap:
     """Ring-index map (240x240 GS8, 57.6 KB) blitted into RGB565 strips
     through a palette, top to bottom: with the viper ``blit_kernel`` (``kind``
-    "viper") once it matches the framebuf path on ``bufs`` (the strip
-    buffers it will write), else a framebuf palette blit (``kind``
-    "framebuf").
+    "viper", reading the map's quadrant) once it matches the framebuf path on
+    ``bufs`` (the strip buffers it will write), else a framebuf palette blit
+    (``kind`` "framebuf").
     """
 
     def __init__(self, strip_h, bufs, kernel=None):
         self.idx = build_map(W)
         self.h = strip_h
-        self.n = W * strip_h
         self.kern = None
+        self.q = None
         self.kind = "framebuf"
         if framebuf is None:
             self.kind = None
@@ -401,20 +428,22 @@ class RingMap:
         self.map_fb = framebuf.FrameBuffer(self.idx, W, W, framebuf.GS8)
         k = blit_kernel if kernel is None else kernel
         if k is not None:
-            ok = _aligned(self.idx)
+            self.q = build_quadrant(self.idx)
+            ok = _aligned(self.q)
             for b in bufs:
                 ok = ok and _aligned(b)
             if ok and self.agrees(k, bufs[0]):
                 self.kern = k
                 self.kind = "viper" if kernel is None else "kernel"
             else:
+                self.q = None
                 self.kind = "framebuf (kernel self-check failed)"
 
     def agrees(self, kern, buf):
         """True if ``kern`` writes the same strips into ``buf`` as the
-        framebuf path, at the top, the centre and the bottom, through a
-        palette of distinct colours. Leaves ``buf`` dirty (the next frame
-        redraws it)."""
+        framebuf path, at the top, across the middle row and at the bottom,
+        through a palette of distinct colours. Leaves ``buf`` dirty (the
+        next frame redraws it)."""
         arr = array.array("H", [(i * 4099 + 0x1235) & 0xFFFF for i in range(256)])
         pal = framebuf.FrameBuffer(arr, 256, 1, framebuf.RGB565)
         fb = framebuf.FrameBuffer(buf, W, self.h, framebuf.RGB565)
@@ -425,7 +454,7 @@ class RingMap:
                 self.blit(y0, pal, arr, buf, fb)
                 want = bytes(buf)
                 fb.fill(0x5A5A)               # so a pixel the kernel skips shows
-                kern(buf, self.idx, arr, y0 * W, self.n)
+                kern(buf, self.q, arr, y0, self.h)
                 if bytes(buf) != want:
                     return False
             return True
@@ -437,7 +466,7 @@ class RingMap:
         FrameBuffer). ``pal``: the palette as a framebuf, ``arr``: its array."""
         k = self.kern
         if k is not None:
-            k(buf, self.idx, arr, y0 * W, self.n)
+            k(buf, self.q, arr, y0, self.h)
             return
         fb.blit(self.map_fb, 0, -y0, -1, pal)
 

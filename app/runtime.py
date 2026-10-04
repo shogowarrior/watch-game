@@ -121,8 +121,7 @@ _NO_EVENTS = ()
 class _HapticDisplay:
     """Display proxy for the renderer: services the motor after each strip,
     so pulse edges stay within one strip of schedule mid-frame, and samples
-    touch after a strip once TOUCH_GAP_MS have passed since the last sample
-    (a background display sends the strip meanwhile)."""
+    touch after a strip once TOUCH_GAP_MS have passed since the last sample."""
 
     def __init__(self, rt, display):
         self.rt = rt

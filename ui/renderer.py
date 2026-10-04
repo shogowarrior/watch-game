@@ -6,10 +6,8 @@ open/close, arrow smoothing, the wedge glide between 10 Hz params, toast
 motion and phase timers. Each strip is composed off-screen (field blit
 through the palette, then overlays whose bounding boxes intersect the strip)
 and pushed whole with ``display.push_strip(y0, h, buf)`` (hal/st7789.py API).
-Strips go out top to bottom, so the panel takes them as one window, and
-alternate between two buffers: a display that sends in the background may
-keep reading a strip's buffer until its next ``push_strip`` returns, and
-must have sent the bottom strip when that call returns.
+Strips go out top to bottom, so the panel takes them as one window, all from
+one buffer (the display has sent a strip when ``push_strip`` returns).
 
     r = Renderer()
     beats = r.frame(params, display, ticks_ms())    # display=None: state only
@@ -164,15 +162,13 @@ class FrameCapture:
 
 
 class Renderer:
-    """RenderParams -> strips, pushed top to bottom from ``buf`` and ``buf2`` in turn."""
+    """RenderParams -> strips, each drawn in ``buf`` and pushed top to bottom."""
 
     def __init__(self):
         self.buf = bytearray(W * SH * 2)
-        self.buf2 = bytearray(W * SH * 2)
         self.fb = framebuf.FrameBuffer(self.buf, W, SH, framebuf.RGB565)
-        self.fb2 = framebuf.FrameBuffer(self.buf2, W, SH, framebuf.RGB565)
         self.field = RippleField()
-        self.map = RingMap(SH, (self.buf, self.buf2))
+        self.map = RingMap(SH, (self.buf,))
         self.tc = tx.TextCache()
         self._last = {}
         self._ev1 = {}
@@ -779,14 +775,10 @@ class Renderer:
         pal = self.field.pal
         arr = self.field.pal_arr
         m = self.map
+        buf = self.buf
+        fb = self.fb
         for s in range(NS):
             y0 = s * SH
-            if s & 1:
-                buf = self.buf2
-                fb = self.fb2
-            else:
-                buf = self.buf
-                fb = self.fb
             m.blit(y0, pal, arr, buf, fb)
             self._strip(p, t, y0, fb)
             display.push_strip(y0, SH, buf)

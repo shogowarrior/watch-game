@@ -31,14 +31,13 @@ palette), then push them with `push_strip(y0, h, buf)` (a full-width strip)
 or `push_frame(fb)` (115,200 B sent as strip-sized writes in one CS-low burst;
 the slice list is cached, so it allocates nothing). A strip that starts where
 the last one ended continues its window (CS stays low, no new command), so 10
-strips top to bottom cost what `push_frame` does (41.4 ms on the watch, against
-50.8 ms with a window per strip). `start_background()` (on in `Board`,
-`bg_push`) sends strips from a `_thread` worker: `machine.SPI` releases the GIL
-while each DMA chunk is on the wire, so the caller draws the next strip
-meanwhile. Then `push_strip` returns once the strip is handed over, and its
-`buf` must stay untouched until the next `push_strip` returns (alternate two
-buffers); a strip that reaches the bottom row is out on return, and every
-other display call waits for the worker first. You can also paint directly
+strips top to bottom cost what `push_frame` does (44.1 ms on the watch, against
+52.4 ms with a window per strip and 37.3 ms as one write; the wire alone takes
+34.6 ms at 26.67 MHz). Every write is copied from the PSRAM heap into an
+internal DMA buffer by ESP-IDF, so a write costs about 0.7 ms on top of the
+wire. A send thread was tried (4 Oct 2026) and measured no faster: the caller's
+drawing holds the GIL that the thread needs to queue each DMA chunk, so strips
+go out in the caller. You can also paint directly
 with `fill_rect` or `fill`. The SPI bus is SPI(1) with sck 18, mosi 19, cs 5 and
 dc 27. There is **no reset pin**, so `init()` does a software reset: SWRESET,
 SLPOUT, COLMOD 0x55, MADCTL **0xC0** with a **row offset of 80** (the upright
@@ -264,8 +263,7 @@ display while a benchmark runs.
 measures:
 
 - the real SPI clock, from `print(spi)`
-- `push_frame` compared with 10 × `push_strip` (the plain driver: it turns the
-  background push off; `tools/bench_frame.py` times both)
+- `push_frame` compared with 10 × `push_strip`
 - the GS8→RGB565 palette blit per strip
 - palette rebuilds
 - `gc.collect()` time and bytes allocated per frame

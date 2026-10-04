@@ -32,7 +32,6 @@ N = 20            # repetitions per measurement
 # (DCDC3 kept). In a notebook that already has a Board ``b``: board = b
 board = Board(fast_spi=FAST)
 disp = board.display
-disp.stop_background()    # times the plain driver (tools/bench_frame.py: the background push)
 STRIP = disp.strip_rows   # 24 rows per strip -> 10 strips, 11,520 B each
 disp.fill(0)
 disp.brightness(0.6)

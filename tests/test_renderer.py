@@ -278,19 +278,18 @@ def test_field_strips_match_the_full_map():
     # (test_fixtures_match_snapshots) catch overlays drawn into the wrong strip.
 
 
-def test_strips_go_top_to_bottom_from_two_buffers():
-    """In order (one panel window), alternating buffers (a background display
-    may still be reading the last one)."""
+def test_strips_go_top_to_bottom_from_one_buffer():
+    """In order (one panel window), each drawn in the same buffer."""
     _need_fb()
     r = Renderer()
     seen = []
 
     class D:
         def push_strip(self, y0, h, buf):
-            seen.append((y0, h, buf is r.buf, buf is r.buf2))
+            seen.append((y0, h, buf is r.buf))
 
     _run(r, D(), rs.hunt(2, status=None), 0)
-    assert seen == [(24 * k, 24, k % 2 == 0, k % 2 == 1) for k in range(10)], seen
+    assert seen == [(24 * k, 24, True) for k in range(10)], seen
 
 
 class _P16:
@@ -327,24 +326,27 @@ class _P32:
         b[j + 3] = (v >> 24) & 255
 
 
-def _py_blit_kernel():
-    """ui.field's blit kernel source as plain Python (viper is device-only)."""
+def _py_blit_kernel(src=None):
+    """ui.field's blit kernel source (or ``src``) as plain Python (viper is
+    device-only)."""
     ns = {"ptr16": lambda b: b if isinstance(b, array.array) else _P16(b),
           "ptr32": _P32}
-    exec(fld._BSRC, ns)
+    exec(fld._BSRC if src is None else src, ns)
     return ns["blit_kernel"]
 
 
 def test_blit_kernel_matches_the_framebuf_path():
     """The viper strip blit, run as Python, passes RingMap's self-check and
-    draws the same frame; kernels that read the wrong rows, swap a pixel
-    pair or skip pixels are refused."""
+    draws the same frame from the map's quadrant; kernels that read the
+    wrong rows, swap a pixel pair, skip a row or mirror the left half
+    without reversing it are refused."""
     _need_fb()
     k = _py_blit_kernel()
     r = Renderer()
     assert r.map.kind in ("framebuf", "viper"), r.map.kind
-    r.map = fld.RingMap(24, (r.buf, r.buf2), kernel=k)
+    r.map = fld.RingMap(24, (r.buf,), kernel=k)
     assert r.map.kind == "kernel" and r.map.kern is k
+    assert len(r.map.q) == 120 * 120
     cap = FrameCapture()
     _run(r, cap, rs.hunt(2, status=None), 300)
     ref = bytearray(240 * 240 * 2)
@@ -352,23 +354,26 @@ def test_blit_kernel_matches_the_framebuf_path():
     framebuf.FrameBuffer(ref, 240, 240, framebuf.RGB565).blit(full, 0, 0, -1, r.field.pal)
     assert cap.buf == ref
 
-    def mirrored(dst, idx, pal, off, n):     # a bottom strip from its top mirror, not reversed
-        y0 = off // 240
-        k(dst, idx, pal, (y0 if y0 < 120 else 216 - y0) * 240, n)
+    def mirrored(dst, q, pal, y0, h):         # a bottom strip from its top mirror, not reversed
+        k(dst, q, pal, y0 if y0 < 120 else 216 - y0, h)
 
-    def swapped(dst, idx, pal, off, n):
-        k(dst, idx, pal, off, n)
+    def swapped(dst, q, pal, y0, h):
+        k(dst, q, pal, y0, h)
         for i in range(0, len(dst), 4):
             a = dst[i:i + 2]
             dst[i:i + 2] = dst[i + 2:i + 4]
             dst[i + 2:i + 4] = a
 
-    def short(dst, idx, pal, off, n):
-        k(dst, idx, pal, off, n - 4)
+    def short(dst, q, pal, y0, h):
+        k(dst, q, pal, y0, h - 1)
 
-    for bad in (mirrored, swapped, short):
-        m = fld.RingMap(24, (r.buf, r.buf2), kernel=bad)
-        assert m.kern is None and "failed" in m.kind, m.kind
+    src = fld._BSRC.replace("dp[lt] = c3 | (c2 << 16)", "dp[lt] = c2 | (c3 << 16)")
+    assert src != fld._BSRC
+    unreversed = _py_blit_kernel(src)          # left half: one pixel pair in the wrong order
+
+    for bad in (mirrored, swapped, short, unreversed):
+        m = fld.RingMap(24, (r.buf,), kernel=bad)
+        assert m.kern is None and m.q is None and "failed" in m.kind, m.kind
 
 
 def _crest(r):

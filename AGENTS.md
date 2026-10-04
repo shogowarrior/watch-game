@@ -102,7 +102,7 @@ sets it as CPython would.
 | `python3 tools/drift_demo.py` | Why accelerometer double integration fails. |
 | `python3 tools/build_sim.py` | Build the web simulator into `dist/sim/` (needs `tools/mpy` npm install). |
 | `mpremote run tools/bench_display.py` | **On the watch**: real SPI clock, push/blit timings, fps. |
-| `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push) with the background push off and on, push variants, IMU cost per rate, which kernels run as viper, and 10 s of the game loop with bump sensing off then on. |
+| `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push) and the overlays of each strip, push variants, whether a send thread could overlap the drawing, IMU cost per rate, which kernels run as viper, and 10 s of the game loop with bump sensing off then on. |
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |
@@ -132,10 +132,7 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
    `@micropython.viper` on the watch only after a self-check against the plain
    version or the framebuf path; `tools/bench_frame.py` prints which ran.
    Viper needs 32-bit words: on a 64-bit unix port the self-checks fail
-   (`ptr32` loads are not sign-extended) and the plain versions run. The
-   watch's display sends strips from a background thread while the next one
-   is drawn: a buffer given to `push_strip` stays untouched until the next
-   `push_strip` returns, so the renderer alternates two strip buffers.
+   (`ptr32` loads are not sign-extended) and the plain versions run.
 3. **Byte-swapped RGB565.** `framebuf` stores RGB565 little-endian, the ST7789
    wants MSB-first. Every colour given to a framebuf, palette or `fill` goes
    through `rgb565()`/`swap16()`; `ui/__init__.py` takes the pre-swapped values

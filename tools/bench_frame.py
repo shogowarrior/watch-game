@@ -6,12 +6,15 @@ game's app/, finder/, hal/ and ui/ deployed, e.g. ``tools/deploy.py --noapp``).
 Prints where the time goes:
   * kernels: which hot loops run as viper on this build (palette, field
     blit, IMU decode, IMU feed) and the CPU clock
-  * render: per screen fixture, with the display's background push off and
-    on, ms per frame split into step (state), plan, palette, field (ring-map
-    blit), overlays and push (SPI; in background mode the wait for the
-    strip before)
-  * push: one frame sent as 10 windowed strips, as one window of 10 writes,
-    the same from the background thread, and as one window of one write
+  * render: per screen fixture, ms per frame split into step (state), plan,
+    palette, field (ring-map blit), overlays and push (SPI), then the
+    overlay ms of each of the 10 strips
+  * push: one frame sent as 10 windowed strips, as one window of 10, 5 and
+    1 writes
+  * overlap: whether a second thread can send strips while this one draws:
+    ms per frame of 10 strips, each after 3 ms of viper work, sent inline,
+    from a send thread, and from a send thread with the drawing split into
+    0.5 ms slices that hand the GIL over (``lock.acquire(0)``)
   * imu: per BMA423 rate, the I2C read, decode and ImuFeed cost per sample
     and the share of each second they take at that rate
   * loop: 10 s of the real game loop (app/runtime.py), ``print_stats()``,
@@ -58,10 +61,10 @@ def bench_kernels(r):
         imu_feed.KERNEL))
 
 
-def _frame_parts(r, p, display, t, acc):
+def _frame_parts(r, p, display, t, acc, strips):
     """Renderer.frame(p, display, t), timed part by part into ``acc``
-    (step, plan, palette, field, overlays, push; us). With the display in
-    background mode, push is the wait for the strip before plus the hand-off."""
+    (step, plan, palette, field, overlays, push; us) and the overlays of
+    each strip into ``strips``."""
     a = _us()
     r._step(p, t)
     b = _us()
@@ -78,29 +81,26 @@ def _frame_parts(r, p, display, t, acc):
     pal = r.field.pal
     arr = r.field.pal_arr
     m = r.map
+    buf = r.buf
+    fb = r.fb
     for s in range(NS):
         y0 = s * SH
-        if s & 1:
-            buf = r.buf2
-            fb = r.fb2
-        else:
-            buf = r.buf
-            fb = r.fb
         a = _us()
         m.blit(y0, pal, arr, buf, fb)
         b = _us()
         acc[3] += _d(b, a)
         r._strip(p, t, y0, fb)
         a = _us()
-        acc[4] += _d(a, b)
+        d = _d(a, b)
+        acc[4] += d
+        strips[s] += d
         display.push_strip(y0, SH, buf)
         acc[5] += _d(_us(), a)
 
 
 def bench_render(display):
-    print("render       bg  total ms  step  plan  pal  field  overlays  push    fps")
+    print("render         total ms  step  plan  pal  field  overlays  push    fps")
     r = None
-    bg = display.background
     for name, kw in FIXTURES:
         d = dict(_FIELD)
         d.update(kw)
@@ -110,61 +110,134 @@ def bench_render(display):
         for _ in range(10):                 # rings in flight, crossfades settled
             r.frame(p, display, t)
             t += 50
-        for on in (False, True):
-            if on and not display.start_background():
-                print("%-14s on  (no _thread)" % name)
-                continue
-            if not on:
-                display.stop_background()
-            gc.collect()
-            acc = [0] * 6
-            t0 = _us()
-            for _ in range(N):
-                _frame_parts(r, p, display, t, acc)
-                t += 50
-            tot = _d(_us(), t0) / N / 1000
-            ms = [x / N / 1000 for x in acc]
-            print("%-14s %-3s %6.1f  %5.1f %5.1f %5.1f %5.1f    %5.1f  %5.1f  %5.1f" % (
-                name, "on" if on else "off", tot, ms[0], ms[1], ms[2], ms[3], ms[4],
-                ms[5], 1000 / tot))
-    if not bg:
-        display.stop_background()
+        gc.collect()
+        acc = [0] * 6
+        strips = [0] * NS
+        t0 = _us()
+        for _ in range(N):
+            _frame_parts(r, p, display, t, acc, strips)
+            t += 50
+        tot = _d(_us(), t0) / N / 1000
+        ms = [x / N / 1000 for x in acc]
+        print("%-14s %6.1f  %5.1f %5.1f %5.1f %5.1f    %5.1f  %5.1f  %5.1f" % (
+            name, tot, ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], 1000 / tot))
+        print("  overlays per strip ms: " + " ".join("%.1f" % (x / N / 1000) for x in strips))
     return r
 
 
 def bench_push(display, r):
-    """One frame (the last fixture's strips) four ways."""
+    """One frame (the last fixture's strip, ten times) four ways."""
     frame = bytearray(W * W * 2)
     for s in range(NS):
         frame[s * W * SH * 2:(s + 1) * W * SH * 2] = r.buf
     mv = memoryview(frame)
     n = W * SH * 2
     spi = display.spi
-    bg = display.background
-    display.stop_background()
     out = []
-    for mode in range(3):                   # windowed strips, one window, background
-        if mode == 2 and not display.start_background():
-            out.append(-1)
-            continue
+    t0 = _us()
+    for _ in range(10):                     # a window per strip
+        for s in range(NS):
+            display._next = -1
+            display.push_strip(s * SH, SH, mv[s * n:(s + 1) * n])
+    out.append(_d(_us(), t0) / 10000)
+    for k in (NS, NS // 2, 1):              # one window, k writes
+        step = len(frame) // k
         t0 = _us()
         for _ in range(10):
-            for s in range(NS):
-                if mode == 0:
-                    display._next = -1      # as before: a window per strip
-                display.push_strip(s * SH, SH, mv[s * n:(s + 1) * n])
+            display._begin(0, 0, W - 1, W - 1)
+            for i in range(k):
+                spi.write(mv[i * step:(i + 1) * step])
+            display._cs(1)
         out.append(_d(_us(), t0) / 10000)
-    display.stop_background()
-    t0 = _us()
-    for _ in range(10):
-        display._begin(0, 0, W - 1, W - 1)
-        spi.write(frame)
-        display._cs(1)
-    out.append(_d(_us(), t0) / 10000)
-    if bg:
-        display.start_background()
-    print("push ms: 10 windows %.1f, 1 window x 10 writes %.1f, background %.1f, "
-          "1 window 1 write %.1f" % tuple(out))
+    print("push ms: 10 windows %.1f, 1 window x 10 writes %.1f, x 5 writes %.1f, "
+          "x 1 write %.1f" % tuple(out))
+
+
+def _spin_fn():
+    """A viper busy loop (holds the GIL, as the field blit does)."""
+    import micropython
+
+    @micropython.viper
+    def spin(n: int) -> int:
+        s = 0
+        i = 0
+        while i < n:
+            s += i ^ (s >> 3)
+            i += 1
+        return s
+    return spin
+
+
+def bench_overlap(display, r):
+    """Can a send thread overlap the drawing? 10 strips, 3 ms of work each."""
+    try:
+        import _thread
+    except ImportError:
+        print("overlap: no _thread")
+        return
+    spin = _spin_fn()
+    n = 1000
+    while True:                             # n spins = 0.5 ms
+        t0 = _us()
+        spin(n)
+        dt = _d(_us(), t0)
+        if dt >= 2000:
+            break
+        n *= 2
+    n = n * 500 // dt
+    buf = r.buf
+    st = {"go": _thread.allocate_lock(), "done": _thread.allocate_lock(),
+          "y": 0, "stop": False}
+    go = st["go"]
+    done = st["done"]
+    go.acquire()
+    done.acquire()
+
+    def worker():
+        while True:
+            go.acquire()
+            if st["stop"]:
+                done.release()
+                return
+            display.push_strip(st["y"], SH, buf)
+            done.release()
+
+    yl = _thread.allocate_lock()
+    yl.acquire()                            # acquire(0) on it only hands the GIL over
+
+    def frame(mode):
+        busy = False
+        for s in range(NS):
+            if mode == 2:
+                for _ in range(6):
+                    spin(n)
+                    yl.acquire(0)
+            else:
+                spin(6 * n)
+            if mode == 0:
+                display.push_strip(s * SH, SH, buf)
+                continue
+            if busy:
+                done.acquire()
+            st["y"] = s * SH
+            go.release()
+            busy = True
+        done.acquire()
+
+    out = []
+    for mode in range(3):
+        if mode == 1:
+            _thread.start_new_thread(worker, ())
+        frame(mode)
+        t0 = _us()
+        for _ in range(5):
+            frame(mode)
+        out.append(_d(_us(), t0) / 5000)
+    st["stop"] = True
+    go.release()
+    done.acquire()
+    print("overlap ms/frame (10 x 3 ms work + strips): inline %.1f, thread %.1f, "
+          "thread + GIL hand-offs %.1f" % tuple(out))
 
 
 class _Batch:
@@ -235,6 +308,7 @@ def main():
     r = bench_render(board.display)
     bench_kernels(r)
     bench_push(board.display, r)
+    bench_overlap(board.display, r)
     bench_imu(board.i2c0)
     bench_loop(board)
 
