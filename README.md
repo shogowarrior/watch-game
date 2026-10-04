@@ -1,9 +1,9 @@
-# Watch game
+# Homing
 
 > Original goal: display proximity to another watch using BLE/Wifi strength.
 
 A hide-and-seek game for two **LILYGO T-Watch 2020 V1** watches. Each watch
-shows how close the other one is, like the Sheikah sensor in Zelda: a green glow
+shows how close the other one is, like the proximity sensor in the Zelda games: a green glow
 with ripples pulsing out from the centre. It gets brighter and faster as you get
 closer, the watch buzzes in step with it, and an arrow appears once you've
 worked out which way to go. You win by finding your friend and bumping watches.

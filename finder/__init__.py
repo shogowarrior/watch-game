@@ -1,4 +1,4 @@
-"""Sheikah Finder game logic.
+"""Homing game logic.
 
 Everything under ``finder/`` is pure Python that must run unchanged on
 MicroPython (ESP32 watch, WebAssembly simulator) and CPython (desktop tests).

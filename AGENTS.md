@@ -9,7 +9,7 @@ A two-player "find each other" game for two **LILYGO T-Watch 2020 V1** watches
 compass, FT6336 touch, vibration motor). The watches broadcast 16-byte ESP-NOW
 beacons. Each watch turns the partner's RSSI plus both watches' step and
 activity hints into a distance estimate, and shows it as a green ripple field
-(a "Sheikah sensor" homage, codename *Sheikah Finder*). A guided 360° body-turn
+(a homage to the proximity sensor in the Zelda games; the game is called *Homing*). A guided 360° body-turn
 scan gives a direction arrow. The round ends when the players physically bump
 watches. The watch runs **stock MicroPython v1.29.0 (`ESP32_GENERIC-SPIRAM`)**,
 pure `.py`, no custom C modules.
@@ -176,7 +176,7 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
     so it runs in tests and the browser; `app/` gets hardware through `Board`.
 13. Other ui-spec §12 "don'ts" hold everywhere: no haptic pulse under 60 ms, no
     new patterns beyond the 9, no full-screen flashes, no Nintendo assets or
-    "Sheikah" on screen, nothing mapped near the AXP202 power-off hold.
+    names on screen, nothing mapped near the AXP202 power-off hold.
 
 14. **GPIO12 is a boot strapping pin (flash voltage).** On the V1 it is also the
     backlight. It must be LOW at reset, so never add a pull-up to it, never claim it
