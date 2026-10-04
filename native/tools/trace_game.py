@@ -24,7 +24,8 @@ properties that changed since the object's previous line (all of them after
 the constructor). Values: JSON numbers (a float is always
 written with a "." or an exponent, so ints and floats stay apart; NaN and
 Infinity as such), {"b": "hex"} for bytes, {"@": "Class", ...fields} for
-other objects (namedtuples by field, the rest by public attribute), and
+other objects (namedtuples by field, the rest by public attribute; a
+test's stand-in class's own values too), and
 {"@ref": "module.Class#id"} for an object of a TRACED class (recorded in
 this test or not); in "s", an array or bytearray
 is {"t": typecode, "n": length, "crc": CRC-32 of its bytes}. A test that fails
@@ -144,6 +145,7 @@ def _namedtuple(v, depth, deep):
 _PLAIN = frozenset((type(None), bool, int, float, str))
 _class_names = {}   # type -> its public slots and properties
 _names = {}         # (type, instance attribute names) -> public names, sorted
+_traced = set()     # the TRACED classes
 _sigs = {}          # function -> its signature
 _ROUTINES = (types.FunctionType, types.MethodType, types.BuiltinFunctionType, types.BuiltinMethodType)
 
@@ -154,8 +156,9 @@ def _routine(v):
 
 def _items(obj):
     """(name, value) of each public attribute and property of ``obj``, sorted
-    by name; one that cannot be read now (an unset slot, a property that
-    needs more state) is left out."""
+    by name, and for a test's stand-in (a class not in TRACED) the values its
+    class holds too; one that cannot be read now (an unset slot, a property
+    that needs more state) is left out."""
     t = type(obj)
     d = getattr(obj, "__dict__", None)
     key = (t, tuple(d) if d else ())
@@ -165,7 +168,9 @@ def _items(obj):
         if fixed is None:
             fixed = _class_names[t] = set(
                 k for c in t.__mro__ for k in list(getattr(c, "__slots__", ()))
-                + [k for k, a in c.__dict__.items() if isinstance(a, property)] if not k.startswith("_"))
+                + [k for k, a in c.__dict__.items() if isinstance(a, property)
+                   or t not in _traced and not callable(a) and not isinstance(a, (staticmethod, classmethod))]
+                if not k.startswith("_"))
         names = _names[key] = sorted(fixed.union(k for k in key[1] if not k.startswith("_")))
     out = []
     for k in names:
@@ -282,6 +287,7 @@ def install(outdir):
     """Open one file per TRACED class in ``outdir`` and build its wrappers."""
     for mod, name in TRACED:
         cls = getattr(importlib.import_module(mod), name)
+        _traced.add(cls)
         key = "%s.%s" % (mod, name)
         _out[key] = open(os.path.join(outdir, key + ".jsonl"), "w")
         w = {}
@@ -306,7 +312,7 @@ def record(keys, unwrap=False):
 # module's when its port lands. Recording costs about 50 us a call, so a wide
 # test (test_game, test_episode: a minute or more with every class) records
 # only the classes no unit test covers.
-TESTS = (("test_proto", None), ("test_link", None),
+TESTS = (("test_proto", None), ("test_link", None), ("test_proximity", None),
          ("test_game", ("finder.pairing.Pairing", "finder.pairing.Calibrator")))
 
 
