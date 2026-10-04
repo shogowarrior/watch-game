@@ -114,10 +114,12 @@ SPEC = (
         ("BUMP_READY_HOLD_MS", 1500, "band <3 held 1.5 s"),
         ("BUMP_READY_BAND", 0, "index of '<3'"),
         ("BUMP_LIT_MS", 1000, "HOT bump view: a counted spike lights its watch icon this long"),
+        ("FELT_CONFIRM_GRACE_MS", 400, "PAIRING: a friend's felt-it verdict waits KNOCK_WAIT_MS + this "
+                                       "for its confirm (a confirming tap gets none)"),
         ("HOT_SCAN_PRESS_MS", 1000, "HOT: 2nd short press within this starts a scan (§8)"),
         ("FOUND_CELEBRATE_MS", 2000, None),
         ("FOUND_TIME_MAX_S", 5999, "TIME chip m:ss caps at 99:59 (§6 FOUND)"),
-        ("FOUND_WORD_MSS_MAX_S", 599, "FOUND word: m:ss up to 9:59, then whole minutes, 99M+ past the cap"),
+        ("FOUND_WORD_MSS_MAX_S", 599, "FOUND word: m:ss up to 9:59, then FOUNDmm:ss, FOUND 1H+ past the cap"),
         ("PARTNER_LEFT_MS", 2000, "partner in PAIRING this long: it left (§6 MENU)"),
         ("BATT_SHUTDOWN_PCT", 3, None),
         ("BATT_INTERSTITIAL_MS", 2500, None),

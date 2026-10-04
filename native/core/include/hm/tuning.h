@@ -98,6 +98,7 @@ constexpr int32_t EVENT_LIT_MS = 5000;
 constexpr int32_t FADEIN_PX = 12;
 constexpr int32_t FALLBACK_MAX_BAND = 1;
 constexpr int32_t FALLBACK_PRESS_WINDOW_MS = 3000;
+constexpr int32_t FELT_CONFIRM_GRACE_MS = 400;
 constexpr int32_t FIELD_LEAD_TRAIL_PX[2] = {3, 22};
 constexpr const char FIELD_LINK_LOST_0[] = "grey";
 // FIELD_LINK_LOST_1: None

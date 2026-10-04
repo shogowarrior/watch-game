@@ -1297,7 +1297,7 @@ def test_found_words_are_gold_and_other_words_on_found_are_not():
         return acc, pri
 
     for w, top in (("FOUND", "TIME 1:48"), ("FOUND 1:48", "BUTTON: PLAY AGAIN"),
-                   ("FOUND 99M+", "BUTTON: PLAY AGAIN")):
+                   ("FOUND12:48", "BUTTON: PLAY AGAIN"), ("FOUND 1H+", "BUTTON: PLAY AGAIN")):
         acc, pri = colours(dict(FOUND_KW, sub="result" if top[0] == "B" else "celebrate",
                                 word=w, top_text=top))
         assert acc > 100 and pri == 0, (w, acc, pri)

@@ -228,6 +228,7 @@ class Game:
         self._fu_prev = True
         self.usb = False              # on USB power: screen kept on (set_usb)
         self._lit_until = None        # event wake: lit whatever the tilt until then (§8)
+        self._unseen = False          # an event lit a dark screen; the wrist not raised since
         self.reset(t_ms)
 
     # ---- lifecycle ---------------------------------------------------------------
@@ -287,6 +288,9 @@ class Game:
         self._fq = None           # partner spike waiting for its verdict
         self._fm_seen = None      # last own / partner spike already looked at
         self._fq_seen = None
+        self._fq_conf = False     # PAIRING: the partner had confirmed when _fq was taken
+        self._touch_t = None      # last finger landing
+        self._spike_touched = None  # last own spike a finger landing went with (§6 PAIRING)
         self._felt = None         # HOT felt-it chip text
         self._felt_until = t_ms
         self._still_since = None
@@ -365,6 +369,8 @@ class Game:
             return False
         self._spike_t = t_ms
         self.bump_t = t_ms
+        if self._touch_t is not None and _knock(t_ms, self._touch_t):
+            self._spike_touched = t_ms
         self.taps = (self.taps + 1) & 7
         self._tap_hot = self.mode == M_HUNT and self.px.zone == HOT
         return True
@@ -389,6 +395,7 @@ class Game:
     def on_touch_down(self, t_ms):
         """A finger lands (every touch, even one the gesture recognizer drops): it
         counts toward the rain/sleeve burst filter."""
+        self._note_touch(t_ms)
         if (self.screen_on and not self.power_off and self._touch_block is None
                 and ticks_diff(t_ms, self._wake_t) >= T.WAKE_TOUCH_IGNORE_MS):
             self._touch_burst(t_ms)
@@ -407,6 +414,7 @@ class Game:
         if not self.screen_on or self.power_off or self._bye_t is not None:
             return
         td = t_ms if t_down is None else t_down
+        self._note_touch(td)
         self._resolve_held(t_ms, True)
         s = self._spike_t
         if _knock(s, td):           # a knock or a finger's own spike (§8)
@@ -414,6 +422,11 @@ class Game:
                 self._held_g = (code, x, y, td, s)  # waits for the partner's word
             return
         self._gesture(t_ms, code, x, y, td)
+
+    def _note_touch(self, td):
+        self._touch_t = td
+        if _knock(self._spike_t, td):
+            self._spike_touched = self._spike_t
 
     def _peer_spiked(self, s):
         """The partner reported a spike within BUMP_WINDOW_MS of our spike ``s``."""
@@ -470,6 +483,9 @@ class Game:
         if self._bye_t is not None:
             return                # shutting down: BYE only
         self._input(t_ms)
+        if self._unseen and not long:
+            self._unseen = False  # lit by an event, wrist still down: a look (§8)
+            return
         if long:
             self._long_press(t_ms)
         elif self.menu.is_open:
@@ -526,20 +542,24 @@ class Game:
         self._wake_t = t_ms
         self._input_t = t_ms
         self._down_since = None
+        self._unseen = False
 
-    def _light(self, t_ms, ms):
+    def _light(self, t_ms, ms, critical_ok=False):
         """Event wake (ui-spec §8): the screen lights now and stays lit ``ms``
         whatever the tilt. A dark screen wakes as on a wrist raise (boost,
         300 ms touch filter) but keeps its wrist-down clock, so a wrist that
-        stayed lowered goes dark when the hold ends. A later event extends
-        the hold, never shortens it. At <= 5 % only FOUND lights the screen
-        (LOW-BATTERY: haptics carry the game); nothing while shutting down."""
+        stayed lowered goes dark when the hold ends, and it counts as unseen
+        until the wrist is raised (a short press only wakes it). A later event
+        extends the hold, never shortens it. At <= 5 % only FOUND
+        (``critical_ok``) lights the screen (LOW-BATTERY: haptics carry the
+        game); nothing while shutting down."""
         if self.power_off or self._bye_t is not None:
             return
-        if ms < T.FOUND_LIT_MS and self._critical():
+        if not critical_ok and self._critical():
             return
         if not self.screen_on:
             self.screen_on = True
+            self._unseen = True
             self._wake_t = t_ms
         self._input_t = t_ms
         u = ticks_add(t_ms, ms)
@@ -662,6 +682,9 @@ class Game:
         s = self._spike_t
         if s is not None and ticks_diff(t_ms, s) > KNOCK_KEEP_MS:
             self._spike_t = None
+        s = self._touch_t
+        if s is not None and ticks_diff(t_ms, s) > KNOCK_KEEP_MS:
+            self._touch_t = None
         s = self._unrel_t
         if s is not None and ticks_diff(t_ms, s) >= UNRELIABLE_PIN_MS:
             self._unrel_t = None
@@ -852,6 +875,9 @@ class Game:
         # hidden by the MENU or SAVER ON: the pacer must not run unseen (clock pauses)
         self._update_arrow(t_ms, True, self.menu.is_open or self._inter_until is not None)
         self._update_bump_ready(t_ms)
+        a = self.arrow
+        if self.bump_ready and a is not None and a.glyph == "arrow" and a.sub == "walk":
+            self.arrow = None         # the bump view takes it, silently (§6 HOT)
         self._update_still_hint(t_ms)
         self._update_peer_scan(t_ms)
         self._check_found(t_ms)
@@ -964,7 +990,11 @@ class Game:
     def _update_felt(self, t_ms):
         """ONLY YOU FELT IT / FRIEND FELT IT: a spike the other watch did not
         report within BUMP_WINDOW_MS, judged KNOCK_WAIT_MS after it, so players
-        learn how firm a bump must be (ui-spec §6 HOT). Touches play no part."""
+        learn how firm a bump must be (ui-spec §6 HOT). In HOT touches play no
+        part. In PAIRING a spike a touch went with gets no verdict: an own spike
+        with a finger landing in the knock window, or a partner spike after
+        which its confirm turns on (judged FELT_CONFIRM_GRACE_MS later), was a
+        confirming tap or a screen knock (§6 PAIRING)."""
         if not self._felt_ctx():
             if self._felt_on:
                 self._felt_on = False
@@ -994,6 +1024,7 @@ class Game:
                 self._fq_seen = q
                 if not self._my_spiked(q):
                     self._fq = q
+                    self._fq_conf = self.pair.peer_confirmed
             # else its ST_TAP_HOT can trail the tap count by a beacon: look again
         fm = self._fm
         if fm is not None:
@@ -1001,15 +1032,23 @@ class Game:
                 self._fm = None
             elif ticks_diff(t_ms, fm) >= T.KNOCK_WAIT_MS:
                 self._fm = None       # HOT: FRIEND NOT READY already says why
-                if not hot or self._friend_ready(t_ms):
+                if hot:
+                    if self._friend_ready(t_ms):
+                        self._felt_say(t_ms, T_ONLY_YOU)
+                elif fm != self._spike_touched:
                     self._felt_say(t_ms, T_ONLY_YOU)
         fq = self._fq
         if fq is not None:
             if self._my_spiked(fq):
                 self._fq = None
-            elif ticks_diff(t_ms, fq) >= T.KNOCK_WAIT_MS:
+            elif hot:
+                if ticks_diff(t_ms, fq) >= T.KNOCK_WAIT_MS:
+                    self._fq = None
+                    self._felt_say(t_ms, T_FRIEND_FELT)
+            elif ticks_diff(t_ms, fq) >= T.KNOCK_WAIT_MS + T.FELT_CONFIRM_GRACE_MS:
                 self._fq = None
-                self._felt_say(t_ms, T_FRIEND_FELT)
+                if self._fq_conf or not self.pair.peer_confirmed:
+                    self._felt_say(t_ms, T_FRIEND_FELT)
 
     def _felt_say(self, t_ms, text):
         if self.mode == M_HUNT:
@@ -1069,7 +1108,7 @@ class Game:
         if s > T.FOUND_TIME_MAX_S:
             s = T.FOUND_TIME_MAX_S
         self._time_text = "TIME %d:%02d" % (s // 60, s % 60)
-        self._light(t_ms, T.FOUND_LIT_MS)
+        self._light(t_ms, T.FOUND_LIT_MS, True)
 
     def _tick_found(self, t_ms):
         pv = self.peer
@@ -1258,6 +1297,8 @@ class Game:
         self._fu_prev = fu
         if not self.screen_on:
             return
+        if not self._lowered():
+            self._unseen = False  # the wrist is up: an event-lit screen has been seen
         if self.usb or not self._lowered() or self._keep_on():
             self._down_since = None
             return
@@ -1523,8 +1564,8 @@ class Game:
                     inten = self.mirror.value
             arrow_on = a is not None and a.glyph == "arrow"
             ready = self._friend_ready(t_ms)
-            if self.bump_ready and (not arrow_on or a.sub == "walk"):
-                glyph = "bump"               # a walk arrow keeps aging, hidden (§6 HOT)
+            if self.bump_ready and not arrow_on:
+                glyph = "bump"               # a walk arrow was dropped for it (§6 HOT)
                 bump = self._bump_icons(t_ms, ready)
             elif arrow_on:
                 glyph = "arrow"

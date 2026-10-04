@@ -166,8 +166,8 @@ def test_valid_other_screens():
 
 def test_spec_copy_fits_font_and_length():
     words = ("LOOKING", "BUMP = YES", "YOU'RE IN", "HOLD STILL", "SPLIT UP", "GO", "SEARCHING",
-             "WALK ABOUT", "BUMP!", "FOUND", "FOUND 1:48", "FOUND 9:59", "FOUND 12M",
-             "FOUND 99M+", "TURN RIGHT", "TURN LEFT",
+             "WALK ABOUT", "BUMP!", "FOUND", "FOUND 1:48", "FOUND 9:59", "FOUND12:48",
+             "FOUND 1H+", "TURN RIGHT", "TURN LEFT",
              "4 O'CLOCK", "12 O'CLOCK", "AHEAD", "BEHIND", "WALK", "SAVER ON", "BYE")
     labels = ("START OTHER WATCH", "WAITING FOR FRIEND", "SAME RUNES?", "STAND 1 STEP APART",
               "NO PEEKING", "FIND YOUR FRIEND", "FASTER IS CLOSER", "TAP TO SCAN",

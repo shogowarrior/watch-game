@@ -187,7 +187,7 @@ FIXTURES = [
     # result: FOUND and the round time in gold, until a button press (§6 FOUND)
     ("found_result", [(0, dict(_found, sub="result", word="FOUND 1:48",
                                top_text="BUTTON: PLAY AGAIN"))], 2500),
-    ("found_result_long", [(0, dict(_found, sub="result", word="FOUND 12M",
+    ("found_result_long", [(0, dict(_found, sub="result", word="FOUND12:48",
                                     top_text="BUTTON: PLAY AGAIN"))], 2500),
     ("scan_ready_flat", [(0, dict(_scan, sub="ready", glyph="countdown", countdown=3,
                                   top_text="HOLD AT CHEST", word="TURN RIGHT"))], 1500),

@@ -59,15 +59,16 @@ def screen_code(name):
 
 def fmt_found(s):
     """FOUND result word for a round of ``s`` seconds (ui-spec §6 FOUND):
-    ``FOUND m:ss`` up to 9:59, then whole minutes (``FOUND 12M``), and
-    ``FOUND 99M+`` past the 99:59 cap. At most 10 type.word characters."""
+    ``FOUND m:ss`` up to 9:59, then ``FOUNDmm:ss`` (no space), and ``FOUND 1H+``
+    past the 99:59 cap. At most 10 type.word characters, and never an ``M``
+    for minutes (the readout's ``M`` means metres)."""
     if s < 0:
         s = 0
     if s <= T.FOUND_WORD_MSS_MAX_S:
         return "FOUND %d:%02d" % (s // 60, s % 60)
     if s <= T.FOUND_TIME_MAX_S:
-        return "FOUND %dM" % (s // 60)
-    return "FOUND 99M+"
+        return "FOUND%d:%02d" % (s // 60, s % 60)
+    return "FOUND 1H+"
 
 
 class MotionSnap:
