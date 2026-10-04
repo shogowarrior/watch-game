@@ -2,8 +2,9 @@
 
     python3 native/test/run.py [name-filter]
 
-Compiles native/core/src/*.cpp with native/test/*.cpp for this machine, with
-the address and undefined-behaviour sanitizers (C++ overflow is UB where the
+Compiles native/core/src/*.cpp with native/test/*.cpp, plus the portable code
+and tests a port keeps beside its drivers (PORTS), for this machine, with the
+address and undefined-behaviour sanitizers (C++ overflow is UB where the
 Python it ports has none), runs them from the repo root and prints their
 result line ``[native] N passed, S skipped, K failed``.
 """
@@ -18,13 +19,18 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FLAGS = ["-std=c++17", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
          "-fsanitize=address,undefined", "-fno-sanitize-recover=all"]
+# Plain C++ on the hm:: interfaces that lives in a port: (sources, headers, tests).
+PORTS = [("native/idf/components/hm_idf/portable", "native/idf/components/hm_idf/include", "native/idf/test")]
 
 
 def build(out):
     """Compile the host test binary to ``out``; returns (ok, compiler output)."""
-    srcs = sorted(glob.glob(os.path.join(ROOT, "native", "core", "src", "*.cpp")) +
-                  glob.glob(os.path.join(ROOT, "native", "test", "*.cpp")))
+    dirs = [os.path.join(ROOT, "native", "core", "src"), os.path.join(ROOT, "native", "test")]
     inc = ["-I" + os.path.join(ROOT, "native", "core", "include"), "-I" + os.path.join(ROOT, "native", "test")]
+    for src, hdr, tests in PORTS:
+        dirs += [os.path.join(ROOT, src), os.path.join(ROOT, tests)]
+        inc.append("-I" + os.path.join(ROOT, hdr))
+    srcs = sorted(f for d in dirs for f in glob.glob(os.path.join(d, "*.cpp")))
     p = subprocess.run(["g++"] + FLAGS + inc + srcs + ["-o", out], capture_output=True, text=True)
     return p.returncode == 0, p.stdout + p.stderr
 
