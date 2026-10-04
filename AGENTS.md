@@ -117,6 +117,7 @@ sets it as CPython would.
 | `mpremote run tools/bench_display.py` | **On the watch**: real SPI clock, push/blit timings, fps. |
 | `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push), push variants, whether a send thread could overlap the drawing, IMU cost per rate, which kernels run as viper, and 10 s of the game loop (with its serial `fps` lines: frame lock, misses, jitter) with bump sensing off then on. |
 | `mpremote run tools/bench_spi_clock.py` | **On the watch**: MicroPython's full-frame push at 26.67, 40 and 80 MHz (pokes the SPI clock register, then puts 26.67 back), with a test card held 5 s per clock to check by eye. |
+| `mpremote run tools/bench_hmlcd.py` | **On the watch, custom firmware** (`native/micropython`, see `native/README.md`): the renderer with the stock push, then with the `hmlcd` C module's push on core 0 at 26.67, 40 and 80 MHz. |
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |

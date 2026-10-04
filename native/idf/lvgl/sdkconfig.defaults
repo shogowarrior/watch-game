@@ -1,0 +1,6 @@
+# On top of ../sdkconfig.defaults (CMakeLists.txt). LVGL: RGB565, the chip and
+# readout fonts, and no image cache (the field image changes every frame).
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_CACHE_DEF_SIZE=0

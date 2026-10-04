@@ -13,6 +13,14 @@
 
 namespace hm {
 
+// Draws and sends one frame its own way (for example through LVGL) from this
+// frame's field palette and the ring map; returns with the last pixels queued,
+// as St7789::push_strip does.
+struct FrameDrawer {
+  virtual ~FrameDrawer() = default;
+  virtual void frame(const uint16_t* pal, const uint8_t* ring_map) = 0;
+};
+
 struct BenchHost {
   const char* variant;      // e.g. "arduino-lovyangfx"
   const char* framework;    // e.g. "arduino-esp32 2.0.17"
@@ -21,7 +29,22 @@ struct BenchHost {
   I2c& i2c0;                // AXP202 + BMA423
   ImuTask& imu;
   void (*backlight)(bool on);
+  FrameDrawer* drawer = nullptr;   // nullptr: the bench's own strip loop
 };
+
+// One timed run of frames: intervals between frame starts, CPU per frame, misses.
+struct RunStats {
+  Stats interval, work;
+  int frames, miss;
+  uint32_t elapsed_us;
+};
+
+// Frames paced to target fps (0 = as fast as possible) for dur_us, frame(ctx)
+// drawing each; a frame that overruns its slot is a miss and the schedule
+// restarts from now. Shared by every renderer, so their "HM run" lines compare.
+void pace(Clock& c, RunStats& r, int target, uint32_t dur_us, void (*frame)(void* ctx), void* ctx);
+// One "HM <step> hz= target= fps= p50_us= ..." line for a run.
+void log_run(const char* step, uint32_t hz, int target, const RunStats& r);
 
 class Bench {
  public:
@@ -35,14 +58,8 @@ class Bench {
   void show(uint32_t hz, int target, int s);
 
  private:
-  struct Run {
-    Stats interval, work;
-    int frames, miss;
-    uint32_t elapsed_us;
-  };
   void frame(const FieldParams& p, ticks_t t, bool push, bool wait_each);
-  void loop(Run& r, const FieldParams& p, int target, uint32_t dur_us, ImuSampler* inline_imu);
-  void log_run(const char* step, uint32_t hz, int target, const Run& r);
+  void loop(RunStats& r, const FieldParams& p, int target, uint32_t dur_us, ImuSampler* inline_imu);
   bool clock(uint32_t hz);
   void compose();
   void push(uint32_t hz);
@@ -57,7 +74,7 @@ class Bench {
   FieldScene scene_;
   Bma423 bma_;
   ImuSampler sampler_;
-  Run run_;
+  RunStats run_;
 };
 
 }  // namespace hm

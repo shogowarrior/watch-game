@@ -22,6 +22,41 @@ const uint8_t WINDOWS[][2] = {{240, 24}, {120, 120}, {60, 60}, {30, 30}, {8, 8}}
 
 }  // namespace
 
+void pace(Clock& c, RunStats& r, int target, uint32_t dur_us, void (*frame)(void* ctx), void* ctx) {
+  r.interval.reset();
+  r.work.reset();
+  r.frames = r.miss = 0;
+  const uint32_t period = target ? 1000000 / target : 0;
+  const uint32_t start = c.now_us();
+  uint32_t next = start, last = start;
+  for (;;) {
+    const uint32_t t0 = c.now_us();
+    if (t0 - start >= dur_us) break;
+    if (r.frames) r.interval.add(t0 - last);
+    last = t0;
+    frame(ctx);
+    r.work.add(c.now_us() - t0);
+    r.frames++;
+    if (!period) continue;
+    next += period;
+    if ((int32_t)(next - c.now_us()) < 0) {
+      r.miss++;
+      next = c.now_us();
+    } else {
+      c.sleep_until_us(next);
+    }
+  }
+  r.elapsed_us = c.now_us() - start;
+}
+
+void log_run(const char* step, uint32_t hz, int target, const RunStats& r) {
+  const uint32_t fps10 = (uint32_t)((uint64_t)r.frames * 10000000 / r.elapsed_us);
+  logf("HM %s hz=%u target=%d fps=%u.%u p50_us=%u p95_us=%u max_us=%u sd_us=%u miss=%d work_us=%u", step,
+       (unsigned)hz, target, (unsigned)(fps10 / 10), (unsigned)(fps10 % 10), (unsigned)r.interval.pct(50),
+       (unsigned)r.interval.pct(95), (unsigned)r.interval.pct(100), (unsigned)r.interval.sd(), r.miss,
+       (unsigned)r.work.mean());
+}
+
 Bench::Bench(BenchHost& h)
     : h_(h), panel_(h.lcd, h.clock), scene_(field_), bma_(h.i2c0, h.clock), sampler_(bma_, h.clock) {}
 
@@ -51,6 +86,7 @@ void Bench::frame(const FieldParams& p, ticks_t t, bool push, bool wait_each) {
   // One frame: the field state, then each strip blitted and (optionally) pushed
   // while the previous one is still on the wire.
   scene_.step(p, t);
+  if (push && h_.drawer) return h_.drawer->frame(field_.pal, ring_map);
   if (push) panel_.begin_frame();
   for (int s = 0; s < NS; s++) {
     uint16_t* buf = strips[s & 1];
@@ -137,44 +173,18 @@ void Bench::windows(uint32_t hz) {
   }
 }
 
-void Bench::loop(Run& r, const FieldParams& p, int target, uint32_t dur_us, ImuSampler* inline_imu) {
-  // Frames paced to target fps (0 = as fast as possible) for dur_us; a frame that
-  // overruns its slot is a miss and the schedule restarts from now.
-  Clock& c = h_.clock;
-  r.interval.reset();
-  r.work.reset();
-  r.frames = r.miss = 0;
-  const uint32_t period = target ? 1000000 / target : 0;
-  const uint32_t start = c.now_us();
-  uint32_t next = start, last = start;
-  for (;;) {
-    const uint32_t t0 = c.now_us();
-    if (t0 - start >= dur_us) break;
-    if (r.frames) r.interval.add(t0 - last);
-    last = t0;
-    if (inline_imu) inline_imu->poll();
-    frame(p, c.now_ms(), true, false);
-    r.work.add(c.now_us() - t0);
-    r.frames++;
-    if (!period) continue;
-    next += period;
-    if ((int32_t)(next - c.now_us()) < 0) {
-      r.miss++;
-      next = c.now_us();
-    } else {
-      c.sleep_until_us(next);
-    }
-  }
+void Bench::loop(RunStats& r, const FieldParams& p, int target, uint32_t dur_us, ImuSampler* inline_imu) {
+  struct Ctx {
+    Bench* b;
+    const FieldParams& p;
+    ImuSampler* imu;
+  } ctx{this, p, inline_imu};
+  pace(h_.clock, r, target, dur_us, [](void* v) {
+    Ctx& c = *static_cast<Ctx*>(v);
+    if (c.imu) c.imu->poll();
+    c.b->frame(c.p, c.b->h_.clock.now_ms(), true, false);
+  }, &ctx);
   panel_.end_frame();
-  r.elapsed_us = c.now_us() - start;
-}
-
-void Bench::log_run(const char* step, uint32_t hz, int target, const Run& r) {
-  const uint32_t fps10 = (uint32_t)((uint64_t)r.frames * 10000000 / r.elapsed_us);
-  logf("HM %s hz=%u target=%d fps=%u.%u p50_us=%u p95_us=%u max_us=%u sd_us=%u miss=%d work_us=%u", step,
-       (unsigned)hz, target, (unsigned)(fps10 / 10), (unsigned)(fps10 % 10), (unsigned)r.interval.pct(50),
-       (unsigned)r.interval.pct(95), (unsigned)r.interval.pct(100), (unsigned)r.interval.sd(), r.miss,
-       (unsigned)r.work.mean());
 }
 
 void Bench::locked(uint32_t hz, const int* targets, int n) {
