@@ -3,8 +3,9 @@
     python3 native/tools/trace_game.py OUTDIR [--tests test_link,test_game,...]
                                               [--classes finder.link.LinkMonitor,...]
 
-Runs Python tests (TESTS, or --tests) with the classes in TRACED wrapped (or
-only those named in --classes), and writes one JSON-lines file per class,
+Runs Python tests and golden scenarios (TESTS, or --tests; "golden:<name>" runs
+native/tools/golden/<name>.py's scenarios) with the classes in TRACED wrapped
+(or only those named in --classes), and writes one JSON-lines file per class,
 OUTDIR/<module>.<Class>.jsonl:
 
     {"new": 3, "a": [...]}                     # object 3 constructed with these arguments
@@ -260,7 +261,19 @@ def record(keys):
 # module's when its port lands. Recording costs about 50 us a call, so a wide
 # test (test_game, test_episode: a minute or more with every class) records
 # only the classes no unit test covers.
-TESTS = (("test_proto", None), ("test_link", None))
+# "golden:<name>" runs native/tools/golden/<name>.py's scenarios instead of a
+# test module (golden:haptic_patterns stays a golden test: 227k calls, 10 MB).
+_EST = ("finder.estimators.base.PathLoss", "finder.estimators.base.MotionInfo",
+        "finder.estimators.kalman2.Estimator")
+TESTS = (
+    ("test_proto", None), ("test_link", None),
+    ("test_est_default", _EST), ("test_est_kalman2", _EST), ("golden:estimator", _EST), ("golden:kalman2", _EST),
+    ("test_motion", ("finder.motion.MotionTracker",)), ("golden:motion", ("finder.motion.MotionTracker",)),
+    ("test_gestures", ("finder.gestures.GestureRecognizer",)),
+    ("golden:gestures", ("finder.gestures.GestureRecognizer",)),
+    ("test_menu", ("finder.menu.Menu",)), ("golden:menu", ("finder.menu.Menu",)),
+    ("test_haptics", ("finder.haptic_patterns.BlankWindow", "finder.haptic_patterns.HapticPlayer")),
+)
 
 
 def main(argv):
@@ -278,7 +291,14 @@ def main(argv):
     failed = 0
     for test, keys in plan:
         record(only if keys is None else set(keys) & only if only else set(keys))
-        failed += runner.run([test])
+        if test.startswith("golden:"):    # a generator drives its module through its scenarios
+            ns = {"__name__": "golden_" + test[7:]}
+            with open(os.path.join(ROOT, "native", "tools", "golden", test[7:] + ".py")) as f:
+                exec(f.read(), ns)
+            for _ in ns["lines"]():
+                pass
+        else:
+            failed += runner.run([test])
     record(())
     for f in _out.values():
         f.close()
