@@ -1,11 +1,11 @@
 // Radio check on Arduino-ESP32 2.0.17: pings a MicroPython watch running the pong
-// side of tools/radio_pingpong.py, so the RSSI this build reads (espnow_radio.h)
+// side of tools/radio_pingpong.py, so the RSSI this build reads (hm/esp32_io.h)
 // sits next to the RSSI MicroPython measures on the same link.
 #include <Arduino.h>
 
-#include "espnow_radio.h"
 #include "framework.h"
 #include "hm/esp32.h"
+#include "hm/esp32_io.h"
 #include "pingpong.h"
 
 namespace {

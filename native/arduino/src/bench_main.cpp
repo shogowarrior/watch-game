@@ -1,35 +1,18 @@
 // Display and motion-sensor benchmark on Arduino-ESP32, one env per graphics
 // library (bench_env.h). Steps and log lines are the shared ones in native/core (hm::Bench).
 #include <Arduino.h>
-#include <Wire.h>
 
 #include "bench_env.h"
+#include "board_pins.h"
 #include "framework.h"
 #include "hm/esp32.h"
+#include "wire_i2c.h"
 
 namespace {
 
-// I2C0 (AXP202, BMA423) through Wire; reads stay within Wire's 128-byte buffer.
-struct WireI2c : hm::I2c {
-  bool write(uint8_t addr, uint8_t reg, const uint8_t* d, size_t n) override {
-    Wire.beginTransmission(addr);
-    Wire.write(reg);
-    Wire.write(d, n);
-    return Wire.endTransmission() == 0;
-  }
-  bool read(uint8_t addr, uint8_t reg, uint8_t* d, size_t n) override {
-    Wire.beginTransmission(addr);
-    Wire.write(reg);
-    if (Wire.endTransmission(false) != 0) return false;
-    if (Wire.requestFrom((uint16_t)addr, n, true) != n) return false;
-    for (size_t i = 0; i < n; i++) d[i] = (uint8_t)Wire.read();
-    return true;
-  }
-};
-
 char framework[96];
 hm::esp::EspClock clock_;
-WireI2c i2c0;
+WireI2c i2c0(Wire);
 hm::esp::CoreImuTask imu;
 bool ready = false;
 
@@ -46,18 +29,7 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   framework_name(framework, sizeof framework, bench_env().library);
-  // Install the I2C driver from core 0 so its interrupt runs beside the sensor
-  // task, not the renderer (as the ESP-IDF build does).
-  static volatile bool wire_ok = false, wire_done = false;
-  xTaskCreatePinnedToCore(
-      [](void*) {
-        wire_ok = Wire.begin(21, 22, 400000);
-        wire_done = true;
-        vTaskDelete(nullptr);
-      },
-      "hm_wire", 4096, nullptr, 5, nullptr, 0);
-  while (!wire_done) delay(1);
-  if (!wire_ok) {
+  if (!i2c0.begin(pins::I2C0_SDA, pins::I2C0_SCL, pins::I2C_HZ)) {
     hm::logf("HM error what=i2c_bus");
     return;
   }

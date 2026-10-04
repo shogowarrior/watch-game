@@ -6,7 +6,8 @@ One PlatformIO env per graphics library. Each compiles `src/bench_main.cpp`
 in one table.
 
 All envs run on Arduino-ESP32 2.0.17 (IDF 4.4), so only the library differs.
-`radio-pingpong` is not a display env: it checks the ESP-NOW radio (below).
+`radio-pingpong` and `platform-check` are not display envs: they check the
+ESP-NOW radio and the rest of the game's hardware (below).
 
 | Env | Library | How a frame goes out |
 |---|---|---|
@@ -56,9 +57,10 @@ done
 ## Radio check (`radio-pingpong`)
 
 Arduino-ESP32 2.0.17 is IDF 4.4, whose ESP-NOW receive callback carries no
-RSSI. `src/espnow_radio.cpp` reads it from the radio header just in front of
-the payload, as Espressif's esp-now component does for IDF < 5, and checks
-that header's channel (`hdr_bad` counts misses). `radio-pingpong` checks that
+RSSI. The shared radio (`native/esp32_shared`, `hm/esp32_io.h`) reads it from
+the radio header just in front of the payload, as Espressif's esp-now
+component does for IDF < 5, and checks that header's channel (`hdr_bad`
+counts misses). `radio-pingpong` checks that
 reading on the watch: it sends 1000 pings, 50 ms apart on channel 6 at 20 dBm,
 to a MicroPython watch running the pong side of `tools/radio_pingpong.py`. It
 reports delivery, round trip and gaps, and RSSI both ways: `where=rx` is what
@@ -83,3 +85,35 @@ mpremote connect $B exec "import radio_pingpong as pp; pp.run('pong')" > logs/ra
 python3 native/tools/capture.py $A logs/radio-pingpong-A.log --seconds 120
 ```
 
+## Platform check (`platform-check`)
+
+The game's hardware below the display: both I2C buses (`src/wire_i2c.h`; bus 0
+holds the AXP202, BMA423 and RTC, bus 1 the touch panel), the interrupt lines
+and the motor (shared, `hm/esp32_io.h`), and the loop watchdog
+(`src/task_watchdog.h`, 8 s as in `main.py`). It feeds the watchdog for 3 s,
+then stops feeding it: the watch must reboot, say so and end.
+
+```sh
+A=/dev/cu.usbserial-022152D1
+pio run -d native/arduino -e platform-check -t upload --upload-port $A
+python3 native/tools/capture.py $A logs/platform-check-A.log --seconds 60
+```
+
+Expected on watch A, with one short buzz:
+
+```
+HM i2c bus=0 found=0x19,0x35,0x51 missing=none   (0x18 for 0x19 is fine)
+HM i2c bus=1 found=0x38 missing=none
+HM lines ok=1 axp202=0 touch=0 bma423=0
+HM motor ok=1 buzz_ms=100
+HM watchdog starving: a reboot should follow within 8 s
+HM watchdog rebooted=1 reset_reason=6            (6: task watchdog, 4: panic)
+HM done
+```
+
+The lines are read once and are active low, so 0 is idle; `axp202=1` can be an
+interrupt latched before boot, which the game clears and this check does not.
+QEMU has none of the devices, so there the check passes at the watchdog:
+`python3 native/tools/qemu_run.py native/arduino --env platform-check --until
+"Task watchdog got triggered"` (its reboot also reaches `HM watchdog
+rebooted=1`, but `qemu_run.py` fails any reboot).
