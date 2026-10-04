@@ -11,7 +11,8 @@ CPython bit for bit instead of re-deriving them with another libm.
 Emission is generic: scalars become constexpr values, flat tuples arrays,
 tuples of equal-length tuples 2-D arrays, string-keyed dicts one constant per
 key (NAME_KEY), and mixed tuples one constant per element (NAME_0, NAME_1,
-...). Floats are float (the watch's MicroPython is single precision too).
+...). Floats are double, as in CPython, so the game port computes what the
+Python traces record bit for bit (native/test replays them).
 Values none of these fit (RUNES) are listed in the header as skipped.
 """
 
@@ -36,7 +37,7 @@ def _is_num(v):
 def _num(v, as_float):
     if as_float:
         s = repr(float(v))
-        return (s if "e" in s or "." in s else s + ".0") + "f"
+        return s if "e" in s or "." in s else s + ".0"
     return str(v)
 
 
@@ -59,7 +60,7 @@ def _array(name, vals):
             name, len(vals), ", ".join(_cstr(v) for v in vals))
     if all(_is_num(v) for v in vals):
         fl = any(isinstance(v, float) for v in vals)
-        ty = "float" if fl else _int_type(vals)
+        ty = "double" if fl else _int_type(vals)
         return "constexpr %s %s[%d] = {%s};" % (ty, name, len(vals), ", ".join(_num(v, fl) for v in vals))
     return None
 
@@ -72,7 +73,7 @@ def _table(name, rows):
     if not all(_is_num(v) for v in flat):
         return None
     fl = any(isinstance(v, float) for v in flat)
-    ty = "float" if fl else _int_type(flat)
+    ty = "double" if fl else _int_type(flat)
     body = ", ".join("{" + ", ".join(_num(v, fl) for v in r) + "}" for r in rows)
     return "constexpr %s %s[%d][%d] = {%s};" % (ty, name, len(rows), len(rows[0]), body)
 
@@ -92,7 +93,7 @@ def emit(name, v, out, skipped):
     elif isinstance(v, int):
         out.append("constexpr %s %s = %d;" % (_int_type([v]), name, v))
     elif isinstance(v, float):
-        out.append("constexpr float %s = %s;" % (name, _num(v, True)))
+        out.append("constexpr double %s = %s;" % (name, _num(v, True)))
     elif isinstance(v, str):
         out.append("constexpr const char %s[] = %s;" % (name, _cstr(v)))
     elif isinstance(v, dict):
