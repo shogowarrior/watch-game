@@ -3,9 +3,9 @@
 namespace hm {
 namespace proto {
 
-int8_t clamp_i8(float v) {
+int8_t clamp_i8(double v) {
   if (isnan(v)) return RSSI_NONE;
-  const long r = lrintf(v);   // round half to even, as Python's round()
+  const long r = lrint(v);   // round half to even, as Python's round()
   return (int8_t)(r < -128 ? -128 : r > 127 ? 127 : r);
 }
 
