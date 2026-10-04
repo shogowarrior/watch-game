@@ -258,8 +258,12 @@ def _load(names):
             t0 = time.ticks_us()
             try:
                 next(g)
-            except StopIteration:
-                tot += time.ticks_diff(time.ticks_us(), t0)
+            except StopIteration:              # the last step does work too
+                d = time.ticks_diff(time.ticks_us(), t0)
+                tot += d
+                n += 1
+                if d > mx:
+                    mx = d
                 break
             d = time.ticks_diff(time.ticks_us(), t0)
             tot += d
