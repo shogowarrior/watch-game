@@ -2,6 +2,7 @@
 #pragma once
 #include <vector>
 
+#include "hm/motion.h"
 #include "hm/proto.h"
 #include "hm/py.h"
 #include "trace.h"
@@ -64,6 +65,29 @@ inline hm::proto::Beacon beacon(const Json& v) {
   for (auto& kv : v.o)
     if (kv.first[0] != '@') beacon_set(b, kv.first, kv.second);
   return b;
+}
+
+// motion::MotionTracker as Python shows it (its own trace, and an ImuFeed's part).
+inline void tracker_state(const hm::motion::MotionTracker& t, State& s) {
+  s("stride_m", J(t.stride_m));
+  s("run_stride_k", J(t.run_stride_k));
+  s("z_sign", J(t.z_sign));
+  s("steps", J(t.steps));
+  s("sw_steps", J(t.sw_steps));
+  s("step_rate_hz", J(t.step_rate_hz));
+  s("activity", J(t.activity));
+  s("is_still", J(t.is_still));
+  s("mag_sd_g", J(t.mag_sd_g));
+  s("gx", J(t.gx));
+  s("gy", J(t.gy));
+  s("gz", J(t.gz));
+  s("face_up", J(t.face_up));
+  s("dist_m", J(t.dist_m));
+  s("chip_live", J(t.chip_live));
+  s("tilt_deg", J(t.tilt_deg()));
+  s("has_gravity", J(t.has_gravity()));
+  s("roll_deg", J(t.roll_deg()));
+  s("pitch_deg", J(t.pitch_deg()));
 }
 
 [[noreturn]] inline void unported(const std::string& method) { throw Mismatch("the port has no " + method + "()"); }

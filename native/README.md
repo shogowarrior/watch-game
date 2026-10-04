@@ -9,7 +9,7 @@ is untouched.
 
 | Path | What |
 |---|---|
-| `core/` | Portable C++17 with no hardware calls. The game (`finder/`, one `hm::<module>` per Python module, `hm::game::Game` on top, checked call for call below), the renderer (`ui/`: `hm::ui::Renderer` draws any strip of a frame; every snapshot fixture's frame matches `tests/snapshot_crc.json`), the ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), the drivers the game loop drives (the PMU, panel, IMU and touch of `hm/platform.h`, checked against `hal/`'s bus traffic below), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h`, `field_tables.h` and `ui_tables.h` are generated. |
+| `core/` | Portable C++17 with no hardware calls. The game (`finder/`, one `hm::<module>` per Python module, `hm::game::Game` on top, checked call for call below), the game loop's frame lock and IMU feed (`app/pacer.py`, `app/imu_feed.py`: `hm::pacer::FramePacer`, `hm::imu_feed::ImuFeed`, checked the same way), the renderer (`ui/`: `hm::ui::Renderer` draws any strip of a frame; every snapshot fixture's frame matches `tests/snapshot_crc.json`), the ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), the drivers the game loop drives (the PMU, panel, IMU and touch of `hm/platform.h`, checked against `hal/`'s bus traffic below), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h`, `field_tables.h` and `ui_tables.h` are generated. |
 | `esp32_shared/` | ESP32 clock, serial log, backlight PWM, the motion-sensor task on core 0, the spi_master LCD bus, the ESP-NOW radio (IDF 4.4 and 5), the motor and the interrupt lines, plus `esp32_app.h`: those as the game loop's parts (`hm/platform.h`). Plain ESP-IDF calls, so both builds share it. |
 | `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), one env per graphics library (LovyanGFX, TFT_eSPI, Arduino_GFX, LVGL): see `arduino/README.md`. |
 | `idf/` | PlatformIO: ESP-IDF 5.5, one environment per way of driving the panel: the `esp_lcd` SPI panel IO with DMA (`bench-esplcd`, which also checks a faster BMA423 I2C clock) and SPI2's registers with DMA (`bench-regdma`). `components/hm_idf/` holds the I2C0 and SPI buses they share; its `portable/` (the I2C0 check) runs in the host tests. |
@@ -41,22 +41,27 @@ python3 native/test/run.py --mark               # after a run where every port m
 
 ### The game port: trace tests
 
-The C++ port of `finder/` (one header per Python module, `core/include/hm/<module>.h`,
+The C++ port of `finder/` and of the game loop's `app/pacer.py` and
+`app/imu_feed.py` (one header per Python module, `core/include/hm/<module>.h`,
 names as in Python, floats as `double` like CPython, ticks with MicroPython's
 2^30 period) is checked call for call against the Python. `run.py` runs
 `tools/trace_game.py` while it compiles: it runs Python tests (`TESTS` there:
 those of the modules ported so far), each with the game classes `TESTS` names
 for it wrapped (objects of the others still show as references), and records
 each outermost call on each object, a test's call of a private method too
-(arguments, result, the object's public
-state afterwards, the functions it calls back, attributes other code writes
+(arguments, result or the OSError it raised, the object's public
+state afterwards, the functions it calls back, the methods it calls on a
+device it was given, such as the test's fake BMA423 FIFO, with the device's
+state after each, attributes other code writes
 between calls) into one JSON-lines file per class. Each ported class has a
 `Port<T>` in `test/test_port_<module>.cpp` (how to construct it, make each call
 by method name, show its state under the Python names, write an attribute; a
-`Probe` the class befriends reaches the private methods tests call);
+`Probe` the class befriends reaches the private methods tests call; a fake
+device answers from the trace);
 `CHECK_REPLAY` replays the class's file and compares every result and state
 field after every call exactly, as Python's `==`, and prints the first
-difference with its trace line, call, field, wanted and actual value.
+difference with its trace line, call, field, wanted and actual value. A bus
+error, an OSError in Python, is a status return in C++ (`false`, `-1`).
 
 `test/traced.txt` holds a hash of the Python the default traces come from, as
 of the last run in which every port matched. While the Python differs from it,
