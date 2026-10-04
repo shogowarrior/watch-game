@@ -313,6 +313,8 @@ def record(keys, unwrap=False):
 # test (test_game, test_episode: a minute or more with every class) records
 # only the classes no unit test covers.
 TESTS = (("test_proto", None), ("test_link", None), ("test_proximity", None),
+         ("test_arrow", ("finder.arrow.Arrow",)),
+         ("test_episode", ("finder.arrow.Arrow",)),    # real scan values: float order
          ("test_game", ("finder.pairing.Pairing", "finder.pairing.Calibrator")))
 
 
