@@ -18,10 +18,11 @@ using opt_ticks = std::optional<ticks_t>;   // a time stamp or None
 // round(x) for a float, halves to even (int(round(x)) in Python).
 inline int64_t pyround(double x) { return (int64_t)nearbyint(x); }
 
-// x % m for floats: the result takes the sign of m.
+// x % m for floats: the result takes the sign of m (a zero too, as CPython's float_rem).
 inline double pymod(double x, double m) {
   const double r = fmod(x, m);
-  return r != 0 && (r < 0) != (m < 0) ? r + m : r;
+  if (r == 0) return copysign(0.0, m);
+  return (r < 0) != (m < 0) ? r + m : r;
 }
 
 struct Mac {

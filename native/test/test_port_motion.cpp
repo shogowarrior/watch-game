@@ -7,10 +7,6 @@
 using namespace hm;
 using namespace hmt;
 
-static std::optional<int32_t> opt_i32(const Json& v) {
-  return v.null() ? std::nullopt : std::optional<int32_t>((int32_t)v.in());
-}
-
 TEST(trace_motion_tracker) {
   Port<motion::MotionTracker> p;
   p.cls = "finder.motion.MotionTracker";

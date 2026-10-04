@@ -7,23 +7,6 @@
 using namespace hm;
 using namespace hmt;
 
-static void beacon_state(const proto::Beacon& b, State& s) {
-  s("game_id", J(b.game_id));
-  s("seq", J(b.seq));
-  s("rssi_last", J(b.rssi_last));
-  s("rssi_filt", J(b.rssi_filt));
-  s("steps", J(b.steps));
-  s("activity", J(b.activity));
-  s("battery", J(b.battery));
-  s("state", J(b.state));
-  s("flags", J(b.flags));
-  s("bump_ago_ms", J(b.bump_ago_ms));
-  s("sweeping", J(b.sweeping()));
-  s("walking", J(b.walking()));
-  s("ready", J(b.ready()));
-  s("taps", J(b.taps()));
-}
-
 TEST(trace_beacon) {
   Port<proto::Beacon> p;
   p.cls = "finder.proto.Beacon";
@@ -49,15 +32,7 @@ TEST(trace_beacon) {
     unported(m);
   };
   p.state = beacon_state;
-  p.set = [](proto::Beacon& b, const std::string& f, const Json& v) {
-    int32_t* ints[] = {&b.game_id, &b.seq, &b.steps, &b.activity, &b.battery, &b.state, &b.flags, &b.bump_ago_ms};
-    const char* names[] = {"game_id", "seq", "steps", "activity", "battery", "state", "flags", "bump_ago_ms"};
-    for (int k = 0; k < 8; k++)
-      if (f == names[k]) return *ints[k] = (int32_t)v.in(), true;
-    if (f == "rssi_last") return b.rssi_last = v.opt_num(), true;
-    if (f == "rssi_filt") return b.rssi_filt = v.opt_num(), true;
-    return false;
-  };
+  p.set = beacon_set;
   CHECK_REPLAY(p);
 }
 
