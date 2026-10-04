@@ -9,7 +9,7 @@ been ported yet. MicroPython (the rest of the repo) is untouched.
 |---|---|
 | `core/` | Portable C++17 with no hardware calls. The ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h` and `field_tables.h` are generated. |
 | `esp32_shared/` | ESP32 clock, serial log, backlight PWM and the motion-sensor task on core 0. Plain ESP-IDF calls, so both builds share it. |
-| `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), LovyanGFX's SPI bus with DMA. |
+| `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), one env per graphics library (LovyanGFX, TFT_eSPI, Arduino_GFX, LVGL): see `arduino/README.md`. |
 | `idf/` | PlatformIO: ESP-IDF 5.5, the `esp_lcd` SPI panel IO with DMA. |
 | `test/` | Host tests (g++ with address and UB sanitizers) on fake hardware, plus the golden palettes. |
 | `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log). |
@@ -32,7 +32,7 @@ node tools/mpy/run.mjs native/tools/golden_field.py > native/test/golden_field.t
 
 ```sh
 python3 -m pip install platformio     # once; the first build downloads the toolchains
-pio run -d native/arduino             # -> native/arduino/.pio/build/bench-lovyangfx/firmware.bin
+pio run -d native/arduino             # every library env -> native/arduino/.pio/build/<env>/firmware.bin
 pio run -d native/idf                 # -> native/idf/.pio/build/bench-esplcd/firmware.bin
 ```
 
@@ -42,7 +42,7 @@ Flashing replaces MicroPython on that watch. Only do it when the user has asked.
 
 ```sh
 PORT=/dev/cu.usbserial-022152D1       # watch A (watch B: /dev/cu.usbserial-02215408)
-pio run -d native/arduino -t upload --upload-port $PORT
+pio run -d native/arduino -e bench-lovyangfx -t upload --upload-port $PORT   # other envs: arduino/README.md
 python3 native/tools/capture.py $PORT logs/bench-arduino-A.log --seconds 150
 pio run -d native/idf -t upload --upload-port $PORT
 python3 native/tools/capture.py $PORT logs/bench-idf-A.log --seconds 150
