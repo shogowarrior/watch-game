@@ -52,9 +52,9 @@ Choices where the spec is silent (all starting values):
     (scan > saver > HOT > normal); after a rate change the lower of the old and
     new rates is expected for one delivery window, so the 5 s meter never
     reports a false drop while it still holds packets sent at the old rate
-  * the LINK_LOST GO BACK / KEEP ON hint uses the last non-zero trend if it
-    is at most 30 s old at link loss (``lost_trend``), else 0; it is forgotten
-    on relink, a new round and SEARCHING
+  * the LINK_LOST ``LOST: GO BACK`` / ``LOST: KEEP ON`` hint uses the last
+    non-zero trend if it is at most 30 s old at link loss (``lost_trend``),
+    else 0; it is forgotten on relink, a new round and SEARCHING
   * event haptics raised under the MENU are held (highest priority wins) and
     played when it closes; heartbeats are simply skipped. A toast raised
     during the sweep, and the SAVER ON interstitial raised during a scan,
@@ -102,7 +102,7 @@ from finder.scan import READY as SCAN_READY, SWEEP as SCAN_SWEEP
 from finder import arrow as A
 from finder import menu as MENU
 from finder import pairing as P
-from finder.session import (MotionSnap, PeerView, LiveMirror, screen_code, fmt_mss, fmt_found,
+from finder.session import (MotionSnap, PeerView, LiveMirror, screen_code, fmt_found,
                             TAP_KEEP_MS, SC_MASK, SC_PAIRING, SC_HOT, SC_FOUND, SC_PAIRED,
                             SC_BYE, ST_PRESS, ST_GOODBYE, ST_CONFIRMED, ST_TAP_HOT)
 
@@ -128,13 +128,19 @@ SCAN_READY_MAX_MS = 15000  # scan ``ready`` never flat within this: silent cance
 W_SEARCHING = "SEARCHING"
 W_WALK_ABOUT = "WALK ABOUT"
 W_HOLD_STILL = "HOLD STILL"
+W_YOURE_IN = "YOU'RE IN"
 W_BUMP = "BUMP!"
 W_BUMP_YES = "BUMP = YES"
 W_FOUND = "FOUND"
 W_SAVER = "SAVER ON"
 W_BYE = "BYE"
+T_START_OTHER = "START OTHER WATCH"
+T_WAITING_FRIEND = "WAITING FOR FRIEND"
+T_NEW_ROUND = "NEW ROUND"
+T_FIND_FRIEND = "FIND YOUR FRIEND"
+T_FASTER_CLOSER = "FASTER IS CLOSER"
 T_TAP_TO_SCAN = "TAP TO SCAN"
-T_LOOK_AROUND = "LOOK AROUND"
+T_LOOK_UP = "LOOK UP"
 T_BUMP_WRISTS = "BUMP WRISTS"
 T_FRIEND_NOT_READY = "FRIEND NOT READY"
 T_ONLY_YOU = "ONLY YOU FELT IT"
@@ -145,6 +151,16 @@ T_FRIEND_OFF = "FRIEND IS OFF"
 T_FRIEND_LOW = "FRIEND LOW BATTERY"
 T_FRIEND_LEFT = "FRIEND LEFT"
 T_PLAY_AGAIN = "BUTTON: PLAY AGAIN"
+T_SIGNAL_LOST = "SIGNAL LOST"
+T_LOST_GO_BACK = "LOST: GO BACK"
+T_LOST_KEEP_ON = "LOST: KEEP ON"
+
+# LINK_LOST banners: fixed words, built once (no running clock, ui-spec §6 LINK-LOST)
+_B_FRIEND_OFF = (T_FRIEND_OFF, "critical", True)
+_B_FRIEND_LOW = (T_FRIEND_LOW, "warn", True)
+_B_SIGNAL_LOST = (T_SIGNAL_LOST, "warn", True)
+_B_GO_BACK = (T_LOST_GO_BACK, "warn", True)
+_B_KEEP_ON = (T_LOST_KEEP_ON, "warn", True)
 
 _FP = T.FIELD_PAIRING_LOOKING
 _FS = T.FIELD_SEARCHING
@@ -252,6 +268,7 @@ class Game:
         self._toast_until = None  # None while the toast waits to be seen
         self._hint = None
         self._hint_until = t_ms
+        self._teach_far = False   # FASTER IS CLOSER still due this round (first FAR)
         self._last_trend = 0
         self._last_trend_t = None
         self.lost_trend = 0       # last trend at link loss (LINK_LOST hint / mark)
@@ -474,6 +491,8 @@ class Game:
             pr = self.pair
             if pr.sub == P.SPLIT:
                 pr.set_ready(t_ms)
+                if pr.ready and self._toast == T_NEW_ROUND:
+                    self._toast = None      # its READY word shows at once (§6 Round start)
             else:
                 pr.confirm(t_ms)
         elif m == M_HUNT:
@@ -555,6 +574,17 @@ class Game:
     def _hint_set(self, t_ms, text):
         self._hint = text
         self._hint_until = ticks_add(t_ms, T.HINT_CHIP_MS)
+
+    def _hint_text(self, t_ms):
+        """The hint chip still showing, or None."""
+        h = self._hint
+        return h if h is not None and ticks_diff(self._hint_until, t_ms) > 0 else None
+
+    def _hint_free(self):
+        """No hint showing, or only TAP TO SCAN (which may restart): a hint
+        never cuts another short, except LOOK UP on entering HOT (§6 FAR)."""
+        h = self._hint
+        return h is None or h == T_TAP_TO_SCAN
 
     def _show_pending(self, t_ms):
         """Start a waiting toast or SAVER ON interstitial once it can be seen: not
@@ -701,8 +731,14 @@ class Game:
         self.lost_trend = 0
 
     def _scan_hint(self, t_ms):
-        """``TAP TO SCAN`` for 4 s on entering FAR or NEAR (no arrow shown)."""
-        if self.arrow is None:
+        """``TAP TO SCAN`` for 4 s on entering FAR or NEAR (no arrow shown, no
+        other hint showing); the round's first FAR says ``FASTER IS CLOSER``."""
+        if self.arrow is not None or not self._hint_free():
+            return
+        if self._teach_far and self.px.zone == FAR:
+            self._teach_far = False
+            self._hint_set(t_ms, T_FASTER_CLOSER)
+        else:
             self._hint_set(t_ms, T_TAP_TO_SCAN)
 
     def _peer_gone(self):
@@ -732,9 +768,12 @@ class Game:
         if pr.sub in (P.SEEN, P.CONFIRMED) and self._bump_match(t_ms):
             self._consume_bump()
             pr.bump(t_ms)
+        was = pr.sub
         self._emit(t_ms, pr.update(t_ms))
         if pr.toast:
-            self._toast_set(pr.toast, "info")
+            self._toast_set(pr.toast, "info")       # CAL SKIPPED keeps the slot
+        elif was == P.CALIBRATE and pr.sub == P.SPLIT:
+            self._toast_set(T_NEW_ROUND, "info")
         if pr.p1m is not None and pr.p1m != self._p1m:
             self._p1m = pr.p1m
             self.est.calibrate(pr.p1m)
@@ -743,6 +782,10 @@ class Game:
             self._update_px(t_ms)
         elif pr.sub == P.DONE:
             self.round_t0 = t_ms
+            self._teach_far = True
+            if self._toast == T_NEW_ROUND:
+                self._toast = None                  # the split ended early: not into the hunt
+            self._hint_set(t_ms, T_FIND_FRIEND)     # before the zone hint: HOT's LOOK UP wins
             if self.peer.live3(t_ms) and self.px.zone is not None and not self._peer_gone():
                 self._enter_hunt(t_ms, False)
             else:
@@ -800,10 +843,12 @@ class Game:
                     self._scan_hint(t_ms)
             else:
                 self._emit(t_ms, "FARTHER")
-                if self._hint == T_LOOK_AROUND:
+                if self._hint == T_LOOK_UP:
                     self._hint = None
                 if z == FAR or z == NEAR:
                     self._scan_hint(t_ms)
+        if self._teach_far and z == FAR and self._hint is None and not self._peer_sweep:
+            self._scan_hint(t_ms)     # the first FAR, once FIND YOUR FRIEND has gone
         # hidden by the MENU or SAVER ON: the pacer must not run unseen (clock pauses)
         self._update_arrow(t_ms, True, self.menu.is_open or self._inter_until is not None)
         self._update_bump_ready(t_ms)
@@ -812,8 +857,8 @@ class Game:
         self._check_found(t_ms)
 
     def _enter_hot(self, t_ms):
-        """HOT entry: LOOK AROUND for 4 s; on battery the screen lights (§8)."""
-        self._hint_set(t_ms, T_LOOK_AROUND)
+        """HOT entry: LOOK UP for 4 s; on battery the screen lights (§8)."""
+        self._hint_set(t_ms, T_LOOK_UP)
         self._light(t_ms, T.EVENT_LIT_MS)
 
     def _update_arrow(self, t_ms, link_ok, hidden=False):
@@ -852,7 +897,7 @@ class Game:
         if z != HOT and self.arrow is None and self.me.activity == ACT_STILL:
             if self._still_since is None:
                 self._still_since = t_ms
-            elif (not self._still_done
+            elif (not self._still_done and self._hint_free()
                   and ticks_diff(t_ms, self._still_since) >= T.HINT_STILL_MS):
                 self._still_done = True
                 self._hint_set(t_ms, T_TAP_TO_SCAN)
@@ -1041,6 +1086,7 @@ class Game:
         self._hint = None
         self._press_t = None
         self._consume_bump()
+        self._toast_set(T_NEW_ROUND, "info")
 
     # SCANNING
     def _start_scan(self, t_ms):
@@ -1148,15 +1194,14 @@ class Game:
     def _lost_banner(self, t_ms):
         pv = self.peer
         if pv.goodbye:
-            return (T_FRIEND_OFF, "critical", True)
+            return _B_FRIEND_OFF
         if pv.battery is not None and pv.battery <= T.BATT_BANNER_PCT:
-            return (T_FRIEND_LOW, "warn", True)
+            return _B_FRIEND_LOW
         el = pv.age(t_ms)
         el = ticks_diff(t_ms, self.mode_t) + T.LINK_LOST_AFTER_MS if el is None else el
-        s = "LOST " + fmt_mss(el)
-        if el >= T.LOST_HINT_AFTER_MS:
-            s += " KEEP ON" if self.lost_trend > 0 else " GO BACK"
-        return (s, "warn", True)
+        if el < T.LOST_HINT_AFTER_MS:
+            return _B_SIGNAL_LOST
+        return _B_KEEP_ON if self.lost_trend > 0 else _B_GO_BACK
 
     # MENU
     def _long_press(self, t_ms):
@@ -1414,14 +1459,14 @@ class Game:
             if sub == P.LOOKING:
                 speed = ls
                 period = lp
-                top = "PAIR"
+                top = T_START_OTHER
                 word = "LOOKING"
             elif sub == P.SEEN:
                 top = "SAME RUNES?"
                 word = W_BUMP_YES
             elif sub == P.CONFIRMED:
-                top = "WAITING"
-                word = "WAITING"
+                top = T_WAITING_FRIEND
+                word = W_YOURE_IN
             elif sub == P.CALIBRATE:
                 glyph = "countdown"
                 cd = pr.countdown
@@ -1459,6 +1504,7 @@ class Game:
             live = False
             word = W_WALK_ABOUT if ticks_diff(t_ms, self.mode_t) >= T.SEARCHING_WALK_ABOUT_MS \
                 else W_SEARCHING
+            top = self._hint_text(t_ms)      # FIND YOUR FRIEND as the round starts
         elif m == M_HUNT:
             z = px.zone
             zone = z
@@ -1508,8 +1554,8 @@ class Game:
                             word = W_BUMP
                         if top is None:
                             top = T_BUMP_WRISTS
-                if top is None and self._hint is not None and ticks_diff(self._hint_until, t_ms) > 0:
-                    top = self._hint
+                if top is None:
+                    top = self._hint_text(t_ms)
         elif m == M_SCANNING:
             sc = self.scan
             sub = sc.sub

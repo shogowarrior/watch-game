@@ -209,7 +209,6 @@ constexpr int32_t LIVE_WINDOW_MS = 1000;
 constexpr int32_t LOGIC_MS = 100;
 constexpr int32_t LONG_PRESS_MS = 800;
 constexpr int32_t LOST_HINT_AFTER_MS = 20000;
-constexpr int32_t LOST_TIMER_MAX_S = 599;
 constexpr int32_t MENU_AUTOCLOSE_MS = 8000;
 constexpr int32_t MENU_CONFIRM_MS = 3000;
 constexpr float MENU_PALETTE_SCALE = 0.5f;

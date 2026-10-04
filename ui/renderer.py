@@ -533,7 +533,7 @@ class Renderer:
         bn = p.banner
         if bn:
             # rise when a banner appears, or a new toast replaces one; a
-            # sticky banner's text updates (LOST 0:12 -> 0:13) stay put
+            # sticky banner's text updates (SIGNAL LOST -> LOST: GO BACK) stay put
             if (self._toast_s is None or self._toast_out or bn[1] != self._toast_sev or
                     bn[2] != self._toast_st or (not bn[2] and bn[0] != self._toast_s)):
                 self._toast_t0 = t

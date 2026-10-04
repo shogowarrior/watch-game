@@ -866,7 +866,7 @@ def test_sticky_banner_rises_once():
     r = Renderer()
     dys = []
     for k in range(60):
-        s = "LOST 0:%02d" % (k // 20)
+        s = "SIGNAL LOST" if k < 30 else "LOST: GO BACK"   # the hint swaps in place
         _fr(r, make_params(t_ms=T0 + 50 * k, **dict(rs._lost, banner=(s, "warn", True))), cap)
         dys.append(r.bot_dy)
     assert dys[0] == 12 and max(dys[5:]) == 0, dys

@@ -139,12 +139,12 @@ def test_valid_other_screens():
     rp = make_params(screen="LINK_LOST", zone=1, ramp=ll[0], intensity=0.3,
                      speed_px_s=ll[2], pulse_period_ms=ll[3], glow_r_px=ll[4],
                      glyph="seeker", dist_band="~20", dist_stale=True,
-                     top_text="LAST ~20M", banner=("LOST 0:12", "warn", True))
+                     top_text="LAST ~20M", banner=("SIGNAL LOST", "warn", True))
     assert validate(rp) == [], validate(rp)
     pl = T.FIELD_PAIRING_LOOKING
     rp = make_params(screen="PAIRING", sub="looking", ramp=pl[0], intensity=pl[1],
                      speed_px_s=pl[2], pulse_period_ms=pl[3], glow_r_px=pl[4],
-                     glyph="glow", top_text="PAIR", word="LOOKING")
+                     glyph="glow", top_text="START OTHER WATCH", word="LOOKING")
     assert validate(rp) == [], validate(rp)
     rp = make_params(screen="PAIRING", sub="seen", ramp="green", speed_px_s=0.0,
                      glyph="runes", runes=(0, 7, 3), top_text="SAME RUNES?", word="BUMP = YES")
@@ -165,12 +165,13 @@ def test_valid_other_screens():
 
 
 def test_spec_copy_fits_font_and_length():
-    words = ("LOOKING", "BUMP = YES", "WAITING", "HOLD STILL", "SPLIT UP", "GO", "SEARCHING",
+    words = ("LOOKING", "BUMP = YES", "YOU'RE IN", "HOLD STILL", "SPLIT UP", "GO", "SEARCHING",
              "WALK ABOUT", "BUMP!", "FOUND", "FOUND 1:48", "FOUND 9:59", "FOUND 12M",
              "FOUND 99M+", "TURN RIGHT", "TURN LEFT",
              "4 O'CLOCK", "12 O'CLOCK", "AHEAD", "BEHIND", "WALK", "SAVER ON", "BYE")
-    labels = ("PAIR", "SAME RUNES?", "STAND 1 STEP APART", "NO PEEKING", "TAP TO SCAN",
-              "LOOK AROUND", "BUMP WRISTS", "FRIEND NOT READY", "ONLY YOU FELT IT",
+    labels = ("START OTHER WATCH", "WAITING FOR FRIEND", "SAME RUNES?", "STAND 1 STEP APART",
+              "NO PEEKING", "FIND YOUR FRIEND", "FASTER IS CLOSER", "TAP TO SCAN",
+              "LOOK UP", "BUMP WRISTS", "FRIEND NOT READY", "ONLY YOU FELT IT",
               "FRIEND FELT IT", "TIME 12:48", "TIME 99:59",
               "BUTTON: PLAY AGAIN", "HOLD AT CHEST", "HOLD FLAT",
               "FRIEND SCANNING", "TAP TO RESCAN", "WRONG WAY? RESCAN", "LAST ~20M",
@@ -179,7 +180,8 @@ def test_spec_copy_fits_font_and_length():
         assert validate(_zone_frame(0, word=w)) == [], w
     for s in labels:
         assert validate(_zone_frame(0, top_text=s)) == [], s
-    for s in ("NO FIX, TRY AGAIN", "LOST 0:27 GO BACK", "BACK IN RANGE", "BATTERY 5%"):
+    for s in ("NO FIX, TRY AGAIN", "NEW ROUND", "SIGNAL LOST", "LOST: GO BACK", "LOST: KEEP ON",
+              "BACK IN RANGE", "BATTERY 5%"):
         assert validate(_zone_frame(0, banner=(s, "info", False))) == [], s
 
 

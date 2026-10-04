@@ -10,7 +10,7 @@ from finder import tuning as T
 from finder.game import (Game, M_HUNT, M_SCANNING, M_FOUND, M_LINK_LOST, M_SEARCHING, M_PAIRING,
                          BUZZ_OFF)
 from finder.pairing import Calibrator, Pairing, rune_ids, fnv1a32, UNSTABLE_SHOW_MS
-from finder.session import (PeerView, LiveMirror, fmt_mss, fmt_found, screen_code, PEER_FRESH_MS,
+from finder.session import (PeerView, LiveMirror, fmt_found, screen_code, PEER_FRESH_MS,
                             SC_PAIRING, SC_FAR,
                             SC_NEAR, SC_WARM, SC_HOT, SC_FOUND, SC_SCANNING, SC_PAIRED, SC_BYE,
                             SC_MASK, ST_PRESS, ST_GOODBYE, ST_CONFIRMED, ST_TAP_HOT)
@@ -345,8 +345,6 @@ def test_pairing_tracks_several_candidates_and_takes_the_strongest():
 
 
 def test_session_helpers():
-    assert fmt_mss(12000) == "0:12" and fmt_mss(87000) == "1:27"
-    assert fmt_mss(599999) == "9:59" and fmt_mss(600000) == "10M+"
     assert screen_code("PAIRING") == SC_PAIRING and screen_code("HOT") == SC_HOT
     assert screen_code("FOUND") == SC_FOUND and screen_code("SCANNING") == SC_SCANNING
     assert screen_code("NEAR") == SC_NEAR and screen_code("WARM") == SC_WARM
@@ -417,7 +415,8 @@ def test_pairing_flow_button_confirm_calibrate_split():
     assert g.pair.runes == rune_ids(MAC_A, MAC_B) and r.p.runes == g.pair.runes
     r.g.on_button(r.t)
     r.run(300)
-    assert r.p.sub == "confirmed" and r.p.word == "WAITING"
+    assert r.p.sub == "confirmed" and r.p.word == "YOU'RE IN"
+    assert r.p.top_text == "WAITING FOR FRIEND"
     assert g.state_byte & ST_CONFIRMED
     r.state = SC_PAIRED | ST_CONFIRMED          # the partner confirms second: calibrate
     r.rssi = -44
@@ -428,7 +427,7 @@ def test_pairing_flow_button_confirm_calibrate_split():
     assert r.p.sub == "split" and r.est.cal == -44.0
     assert r.haptics().count("TICK") >= 3 and "CLOSER" in r.haptics()
     assert r.p.top_text == "NO PEEKING" and r.p.word == "SPLIT UP" and r.p.heartbeat is None
-    assert r.p.countdown == 30
+    assert r.p.countdown == 30 and r.p.banner == ("NEW ROUND", "info", False)
     t0 = r.t
     r.rssi = -60
     n = 0
@@ -440,7 +439,7 @@ def test_pairing_flow_button_confirm_calibrate_split():
     assert r.haptics(t0) == ["TICK", "TICK", "TICK", "CLOSER"], r.haptics(t0)
     r.run(1000)
     assert g.mode == M_HUNT and r.p.screen == "FAR" and r.p.dist_band == "~40"
-    assert r.p.runes is None
+    assert r.p.runes is None and r.p.top_text == "FIND YOUR FRIEND"
 
 
 def test_split_length_is_settable():
@@ -575,6 +574,7 @@ def test_split_without_link_goes_to_searching_then_zone_on_three_packets():
     assert r.g.mode == M_SEARCHING and r.p.screen == "SEARCHING"
     assert r.p.ramp == "grey" and r.p.speed_px_s < 0 and r.p.dist_band is None
     assert r.p.word == "SEARCHING" and r.p.haptic is None and r.p.heartbeat is None
+    assert r.p.top_text == "FIND YOUR FRIEND"
     r.run(46000, packets=False)
     assert r.p.word == "WALK ABOUT"
     r.state = SC_FAR
@@ -588,7 +588,7 @@ def test_split_without_link_goes_to_searching_then_zone_on_three_packets():
     r.packet()
     r.run(100, packets=False)
     assert r.p.screen == "FAR" and r.p.burst and r.p.haptic == "CLOSER"
-    assert r.p.top_text == "TAP TO SCAN"
+    assert r.p.top_text == "FASTER IS CLOSER"      # the round's first FAR
 
 
 def test_bump_confirms_pairing_on_both_sides_at_once():
@@ -621,7 +621,7 @@ def test_zone_screens_follow_distance_with_haptics():
     assert r.p.screen == "HOT" and r.p.dist_band == "~5"
     assert "CLOSER" in r.haptics(t0)
     assert any(p.burst for p in r.params if p.t_ms > t0)
-    assert any(p.top_text == "LOOK AROUND" for p in r.params if p.t_ms > t0)
+    assert any(p.top_text == "LOOK UP" for p in r.params if p.t_ms > t0)
     assert r.g.beacon_hz == 20
     r.est.fixed = 12.0
     t0 = r.t
@@ -1213,13 +1213,13 @@ def test_link_lost_banner_and_relink():
     r.run(100, packets=False)
     assert r.p.screen == "LINK_LOST" and r.p.haptic == "LOST"
     assert r.p.ramp == "grey" and r.p.zone == 1 and r.p.dist_band == "~20" and r.p.dist_stale
-    assert r.p.banner[0].startswith("LOST 0:0") and r.p.banner[2] is True
+    assert r.p.banner == ("SIGNAL LOST", "warn", True)
     assert r.p.speed_px_s < 0 and r.p.arrow_deg is None
     r.run(20000, packets=False)
-    assert r.p.banner[0].endswith("GO BACK") and r.g.mode == M_LINK_LOST
+    assert r.p.banner == ("LOST: GO BACK", "warn", True) and r.g.mode == M_LINK_LOST
     assert "LOST" not in r.haptics(t0 + 5500)
     r.run(600000, packets=False)
-    assert r.p.banner[0] == "LOST 10M+ GO BACK" and r.p.screen == "LINK_LOST"
+    assert r.p.banner == ("LOST: GO BACK", "warn", True) and r.p.screen == "LINK_LOST"
     r.est.fixed = 9.0
     t1 = r.t
     last = r.run(400)
@@ -1813,7 +1813,7 @@ def test_tap_to_scan_on_entering_near_from_far_and_warm():
     r = paired_rig(d=40.0)
     r.activity = ACT_WALK                       # no stillness hint
     r.state = SC_FAR
-    r.run(6000)
+    r.run(8000)                                 # FIND YOUR FRIEND, then FASTER IS CLOSER
     assert r.p.screen == "FAR" and r.p.top_text is None
     r.est.fixed = 20.0
     t0 = r.t
@@ -1901,7 +1901,7 @@ def test_lost_trend_keep_on_only_for_a_recent_warmer_trend():
     r = paired_rig(d=20.0)
     _lose(r, True)
     r.run(26000, packets=False)
-    assert r.p.screen == "LINK_LOST" and r.p.banner[0].endswith("KEEP ON")
+    assert r.p.screen == "LINK_LOST" and r.p.banner == ("LOST: KEEP ON", "warn", True)
     assert r.g.lost_trend == 1 and r.p.trend == 1      # the LAST chip's mark (§6)
     # a warmer trend long before the loss does not count
     r2 = paired_rig(d=20.0)
@@ -1909,7 +1909,7 @@ def test_lost_trend_keep_on_only_for_a_recent_warmer_trend():
     r2.est.trend = 0
     r2.run(40000)
     r2.run(26000, packets=False)
-    assert r2.p.banner[0].endswith("GO BACK") and r2.g.lost_trend == 0
+    assert r2.p.banner == ("LOST: GO BACK", "warn", True) and r2.g.lost_trend == 0
     # a new round forgets the trend
     r3 = paired_rig(d=20.0)
     _lose(r3, True)
@@ -1938,12 +1938,12 @@ def test_long_idle_timestamps_never_wrap():
     g._hint_set(r.t, "OLD HINT")
     t, ps = _hourly(g, r.t, 192, face_up=False)        # 8 days, link lost, wrist down
     for p in ps[1:]:
-        assert p.screen == "LINK_LOST" and p.banner[0] == "LOST 10M+ GO BACK", p.banner
+        assert p.screen == "LINK_LOST" and p.banner[0] == "LOST: GO BACK", p.banner
         assert p.backlight == 0.0
     g.on_wake(t)
     t, ps = _hourly(g, t, 192)                          # 8 more days face up, no input
     for p in ps[1:]:                                    # (first tick: face-up wake boost)
-        assert p.banner[0] == "LOST 10M+ GO BACK" and p.top_text is None
+        assert p.banner[0] == "LOST: GO BACK" and p.top_text is None
         assert p.backlight == T.IDLE_DIM_BACKLIGHT and not p.status[3]
     g.on_gesture(t + 50, 3)                             # long press still opens the menu
     assert g.menu_open
@@ -2526,7 +2526,7 @@ def test_no_event_wake_while_shutting_down():
     assert not g.screen_on and all(p.backlight == 0.0 for p in after)
 
 
-def test_relink_into_hot_says_look_around():
+def test_relink_into_hot_says_look_up():
     r = hot_rig()
     r.run(5200, packets=False)
     assert r.g.mode == M_LINK_LOST
@@ -2534,7 +2534,7 @@ def test_relink_into_hot_says_look_around():
     t1 = r.t
     r.run(400)
     hot = [p for p in r.params if p.t_ms > t1 and p.screen == "HOT"]
-    assert hot and hot[0].top_text == "LOOK AROUND"
+    assert hot and hot[0].top_text == "LOOK UP"
 
 
 def test_warm_clears_a_running_tap_to_scan_hint():
@@ -2585,3 +2585,154 @@ def test_battery_warnings_rearm_after_charging():
     t0 = r.t
     r.run(500)
     assert any(p.banner == ("FRIEND BATT 20%", "warn", False) for p in r.params if p.t_ms > t0)
+
+
+# ---- copy: every screen says the one thing to do; no running counters ----------
+
+def _to_split(r, cal_packets=True):
+    """Rig from looking through a button confirm to the first tick of the split."""
+    r.rssi = -50
+    r.run(600)
+    r.g.on_button(r.t)
+    r.state = SC_PAIRED | ST_CONFIRMED
+    r.rssi = -45
+    n = 0
+    while r.g.pair.sub != "split":
+        r.run(100, packets=cal_packets or r.g.pair.sub != "calibrate")
+        n += 1
+        assert n < 160
+    return r
+
+
+def test_pairing_copy_says_what_to_do():
+    r = Rig()
+    r.run(300, packets=False)
+    assert r.p.sub == "looking"
+    assert r.p.top_text == "START OTHER WATCH" and r.p.word == "LOOKING"
+    r.rssi = -50
+    r.run(600)
+    r.g.on_button(r.t)
+    r.run(100)
+    assert r.p.sub == "confirmed"
+    assert r.p.top_text == "WAITING FOR FRIEND" and r.p.word == "YOU'RE IN"
+
+
+def test_new_round_toast_at_every_split_start():
+    r = _to_split(Rig())
+    p = r.p
+    assert p.banner == ("NEW ROUND", "info", False)
+    assert p.top_text == "NO PEEKING" and p.word == "SPLIT UP"
+    r.run(T.TOAST_MS)
+    assert r.p.banner is None and r.p.word == "SPLIT UP"
+    # FOUND -> PLAY AGAIN (the button on the result): the new round's split says it too
+    h = hot_rig()
+    _found_by_press(h)
+    h.state = SC_FOUND
+    h.run(T.FOUND_CELEBRATE_MS + 100)
+    h.g.on_button(h.t)
+    h.run(100)
+    assert h.p.sub == "split" and h.p.banner == ("NEW ROUND", "info", False)
+    # ... and when it follows the partner's new round
+    f = hot_rig()
+    _found_by_press(f)
+    f.state = SC_PAIRED | ST_CONFIRMED
+    f.run(700)
+    assert f.p.sub == "split" and f.p.banner == ("NEW ROUND", "info", False)
+
+
+def test_own_ready_drops_the_new_round_toast():
+    r = _to_split(Rig())
+    assert r.p.banner == ("NEW ROUND", "info", False)
+    r.g.on_gesture(r.t, 1)                      # READY
+    r.run(100)
+    assert r.p.banner is None and r.p.word == "READY"
+    r.run(T.TOAST_MS)
+    assert not any(p.banner for p in r.params[-25:])
+
+
+def test_cal_skipped_keeps_the_toast_slot():
+    r = _to_split(Rig(), cal_packets=False)     # no packets: the 10 s skip
+    assert r.p.banner == ("CAL SKIPPED", "info", False)
+    r.run(3000)
+    assert not any(p.banner and p.banner[0] == "NEW ROUND" for p in r.params)
+
+
+def test_new_round_toast_never_carries_into_the_hunt():
+    r = Rig()
+    r.g.pair.split_s = 1                        # a split shorter than the toast
+    r = _to_split(r)
+    assert r.p.banner == ("NEW ROUND", "info", False)
+    r.rssi = -60
+    n = 0
+    while r.g.mode == M_PAIRING:
+        r.run(100)
+        n += 1
+        assert n < 40
+    assert r.p.banner is None and r.p.top_text == "FIND YOUR FRIEND"
+
+
+def test_round_start_says_find_your_friend_then_faster_is_closer():
+    r = paired_rig(d=40.0)                      # the hunt begins in FAR
+    r.activity = ACT_WALK                       # no stillness hint
+    r.state = SC_FAR
+    t0 = r.g.round_t0
+    tops = [(p.t_ms - t0, p.top_text) for p in r.params if p.t_ms >= t0]
+    r.run(9000)
+    tops = [(p.t_ms - t0, p.top_text) for p in r.params if p.t_ms >= t0]
+    find = [d for d, s in tops if s == "FIND YOUR FRIEND"]
+    teach = [d for d, s in tops if s == "FASTER IS CLOSER"]
+    assert find[0] == 0 and find[-1] < T.HINT_CHIP_MS, find
+    assert teach and teach[0] >= T.HINT_CHIP_MS and teach[-1] - teach[0] < T.HINT_CHIP_MS
+    assert not any(s == "TAP TO SCAN" for d, s in tops), tops
+    # once per round: the next FAR entry says TAP TO SCAN
+    r.est.fixed = 20.0
+    r.run(4500)
+    assert r.p.screen == "NEAR"
+    r.run(4500)
+    r.est.fixed = 45.0
+    t1 = r.t
+    r.run(4500)
+    far = [p for p in r.params if p.t_ms > t1 and p.screen == "FAR"]
+    assert far and far[0].top_text == "TAP TO SCAN"
+    # a new round teaches again
+    r.g._new_round(r.t)
+    r.run(31500)
+    assert r.g.mode == M_HUNT and r.p.top_text == "FIND YOUR FRIEND"
+    r.run(4500)
+    assert r.p.top_text == "FASTER IS CLOSER"
+
+
+def test_round_start_in_hot_says_look_up():
+    r = paired_rig(d=2.0)
+    hot = [p for p in r.params if p.t_ms >= r.g.round_t0]
+    assert hot[0].screen == "HOT" and hot[0].top_text == "LOOK UP", hot[0]
+
+
+def test_stillness_hint_waits_for_the_round_start_hints():
+    r = paired_rig(d=40.0)                      # standing still from the start
+    t0 = r.g.round_t0
+    r.run(14000)
+    tops = [p.top_text for p in r.params if p.t_ms >= t0]
+    seq = [s for i, s in enumerate(tops) if s is not None and (i == 0 or tops[i - 1] != s)]
+    assert seq == ["FIND YOUR FRIEND", "FASTER IS CLOSER", "TAP TO SCAN"], seq
+    n = sum(1 for s in tops if s == "FASTER IS CLOSER")
+    assert n >= T.HINT_CHIP_MS // 100 - 1, n    # not cut short by the stillness hint
+
+
+def test_link_lost_banner_has_no_running_clock():
+    r = paired_rig(d=20.0)
+    r.state = SC_NEAR
+    r.run(2000)
+    t0 = r.t
+    r.run(30000, packets=False)
+    lost = [p for p in r.params if p.t_ms > t0 and p.screen == "LINK_LOST"]
+    texts = []
+    for p in lost:
+        if not texts or texts[-1] != p.banner[0]:
+            texts.append(p.banner[0])
+        assert not any(c in "0123456789" for c in p.banner[0]), p.banner
+    assert texts == ["SIGNAL LOST", "LOST: GO BACK"], texts
+    hint = [p for p in lost if p.banner[0] == "LOST: GO BACK"]
+    assert hint[0].t_ms - t0 >= T.LOST_HINT_AFTER_MS                 # from the last packet
+    assert lost[0].banner is lost[1].banner                          # built once, not per tick
+    assert hint[0].banner is hint[-1].banner and len(hint) > 1
