@@ -1,4 +1,4 @@
-# Sheikah Finder: handoff (2026-10-03)
+# Homing: handoff (2026-10-03)
 
 Read this first. It covers the current state, the decisions waiting on the
 owner, and the order to do things in. CLAUDE.md and AGENTS.md still govern how
@@ -65,7 +65,7 @@ in one message with the current default marked. Don't build on an assumption.
    laptop bridge and the page in parallel, then reviews, fixes and checks it
    end to end with `tools/debug_server.py --demo`. Afterwards, run one
    `review-fix-round` with `changed` set to the files it touched.
-2. **Design canvas sync.** The "Sheikah Finder watch UI" canvas
+2. **Design canvas sync.** The Design canvas
    (https://claude.ai/artifact/EnemW5QZy7BkxYyQ4SyfFn) predates these visual
    changes. The snapshots in docs/design/snapshots/ are current:
    - the FRIEND LEFT toast with NOPE when the partner goes back to PAIRING;

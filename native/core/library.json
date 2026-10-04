@@ -1,7 +1,7 @@
 {
   "name": "sf-core",
   "version": "0.1.0",
-  "description": "Sheikah Finder portable C++ core (no hardware calls)",
+  "description": "Homing portable C++ core (no hardware calls)",
   "frameworks": "*",
   "platforms": "*",
   "build": {"srcDir": "src", "includeDir": "include"}

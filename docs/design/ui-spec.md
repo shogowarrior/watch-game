@@ -1,4 +1,4 @@
-# Sheikah Finder UI specification (v0.2)
+# Homing UI specification (v0.2)
 
 This is the final screen specification for the two-watch finder game on the LILYGO T-Watch 2020: a 240×240 ST7789 panel, RGB565 colour, one side button, a vibration motor and a BMA423 accelerometer with no gyro and no compass.
 
@@ -13,7 +13,7 @@ All pixel values are on the 240×240 physical display: origin at the top left, y
 
 ## 0. Decision: base concept and grafts
 
-Three concepts were drafted and critiqued: RUNEWELL (a Sheikah-sensor homage), PINPOINT (fixed places and an uncertainty cone) and BLIP HUNT (a radar game with an 8-bit numeral). The concept and critique notes were working drafts and are not kept in the repo; this section and §9 record what came out of them.
+Three concepts were drafted and critiqued: RUNEWELL (a homage to the Zelda proximity sensor), PINPOINT (fixed places and an uncertainty cone) and BLIP HUNT (a radar game with an 8-bit numeral). The concept and critique notes were working drafts and are not kept in the repo; this section and §9 record what came out of them.
 
 **Base: RUNEWELL.** It matches the brief almost literally: glow and ripples come from the middle, brighten and speed up as you get closer, and an arrow appears in the centre once direction is known. It is also cheap to draw, because the whole field is one palette-cycled ring map (§4).
 
@@ -55,7 +55,7 @@ The table in §9 maps each critical and major critique finding to its fix.
 4. **Show only what the radio knows.** Distance is shown only as bands (`<3`, `~5`, `~10`, `~20`, `~40`, `60+`). Outward bright rings mean packets are arriving. Inward rings, grey rings and silence mean no data. Stale data is always grey and always shows its age.
 5. **Readable in a 1–2 s glance in sun.** There is a sun floor: a bright core or a bright iris rim is always present. Ring crests are at least `prox.4` in FAR. Anything read while walking is 32 px tall. Text never sits on the live field.
 6. **Radial first, calm always.** Proximity effects are palette-only. Outside SCANNING, each frame adds at most 3 polygons and 2 text chips. Motion is time-based, locked to an even frame grid (§4 rule 6) and temporally anti-aliased at the real frame rate. There are no full-field flashes. This is the direct fix for the old flickering outline-circle UI.
-7. **Evoke, don't replicate.** Green glow and ripple pulses in an original geometric language: no eye emblem, no Sheikah, Hylian or Zonai script, no Nintendo fonts or chrome. "Sheikah" is the project's codename, not on-screen text.
+7. **Evoke, don't replicate.** Green glow and ripple pulses in an original geometric language: no eye emblem, no Sheikah, Hylian or Zonai script, no Nintendo fonts or chrome. No Nintendo names on screen.
 
 ---
 
@@ -722,7 +722,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 - Don't let RSSI alone declare FOUND, and don't use an absolute dBm gate for anything.
 - Don't draw directly to the panel (`fill` then redraw). Compose every strip off-screen and push it whole.
 - Don't make a haptic pulse under 60 ms, and don't invent new patterns beyond the 9.
-- Don't copy Nintendo assets: no eye emblem, no Sheikah, Hylian or Zonai script, no fonts, no UI chrome, no "Sheikah" on screen.
+- Don't copy Nintendo assets: no eye emblem, no Sheikah, Hylian or Zonai script, no fonts, no UI chrome, no Nintendo names on screen.
 - Don't present the game as a child-safety or person tracker. RSSI cannot support that claim (R-13).
 - Don't map anything to a button hold anywhere near the AXP202 power-off hold.
 

@@ -1,4 +1,4 @@
-# Sheikah Finder design system (v0.2.0)
+# Homing design system (v0.2.0)
 
 A small design system for the watch UI of the two-player hide-and-seek game on the LILYGO T-Watch 2020 (240×240 ST7789 IPS, RGB565, one side button, vibration motor, BMA423). The machine-readable source of truth is [`tokens.json`](./tokens.json). If this document and the JSON disagree, the JSON wins.
 
