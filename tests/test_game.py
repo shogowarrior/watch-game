@@ -3342,6 +3342,27 @@ def test_ignored_toasts_drop_once_their_screen_moves_on():
     c.run(300)
     assert c.g.mode == M_SCANNING
     no_toast([p for p in c.params if p.screen == "SCANNING"], "PRESS 2X TO SCAN")
+    m = hot_rig(4.0)                            # the MENU hides it, like any toast
+    m.run(1000)
+    press_2x_up(m)
+    m.g.on_button(m.t, long=True)
+    m.run(200)
+    assert m.p.screen == "MENU"
+    m.g.on_button(m.t, long=True)               # RESUME
+    m.run(100)
+    assert m.p.screen == "HOT" and m.p.banner[0] == "PRESS 2X TO SCAN"
+    g = hot_rig(4.0)                            # BUMP! on the very tick it is raised:
+    g.state = SC_WARM                           # never seen, so no gap is spent
+    _bump_ready(g)
+    g.run(1000)
+    _touch_tap(g)
+    g.run(T.KNOCK_WAIT_MS)
+    g.state = SC_HOT
+    ps = g.run(100)
+    assert ps[-1].word == "BUMP!" and ps[-1].banner is None and g.g._ign_t is None
+    g.state = SC_WARM
+    g.run(1500)
+    press_2x_up(g)
     w = hot_rig(4.0)                            # HOT ends into WARM: readout, no word
     w.run(1000)
     press_2x_up(w)

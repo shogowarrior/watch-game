@@ -790,8 +790,10 @@ class Game:
         self.state_byte = self._state_byte(t_ms)
         self.menu.window(self.sun, self.buzz, self.indoor)
         p = self._params(t_ms)
-        if self._toast == T_PRESS_2X and (p.word is not None or p.dist_band is None):
+        if self._toast == T_PRESS_2X and p.word is not None:
             self._toast = None        # BUMP!, HOLD STILL or an arrow word took the slot (§8)
+            if self._ign_t == t_ms:
+                self._ign_t = None    # raised this tick, never shown: no gap spent
             p = self._params(t_ms)
         self.params = p
         return p
