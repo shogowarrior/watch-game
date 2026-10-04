@@ -9,7 +9,7 @@ been ported yet. MicroPython (the rest of the repo) is untouched.
 |---|---|
 | `core/` | Portable C++17 with no hardware calls. The ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h` and `field_tables.h` are generated. |
 | `esp32_shared/` | ESP32 clock, serial log, backlight PWM and the motion-sensor task on core 0. Plain ESP-IDF calls, so both builds share it. |
-| `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), LovyanGFX's SPI bus with DMA. |
+| `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), one env per graphics library (LovyanGFX, TFT_eSPI, Arduino_GFX, LVGL): see `arduino/README.md`. |
 | `idf/` | PlatformIO: ESP-IDF 5.5, one environment per way of driving the panel: the `esp_lcd` SPI panel IO with DMA (`bench-esplcd`, which also checks a faster BMA423 I2C clock) and SPI2's registers with DMA (`bench-regdma`). `components/hm_idf/` holds the I2C0 and SPI buses they share; its `portable/` (the I2C0 check) runs in the host tests. |
 | `idf/lvgl/` | PlatformIO: LVGL 9.5 through esp_lvgl_port 2.9 on the same `esp_lcd` bus (`bench-lvgl`). The field is an LVGL image a custom decoder fills from the ring map, so its pixels are the other builds' ones; the HOT chips are LVGL labels; and a third scene has LVGL draw rings itself as arcs. |
 | `micropython/` | `hmlcd`, a C user module for a custom MicroPython 1.29 build: the screen push on core 0 from internal DMA buffers, from the shared ST7789 code and `esp32_shared`'s spi_master bus. |
@@ -36,7 +36,7 @@ node tools/mpy/run.mjs native/tools/golden_field.py > native/test/golden_field.t
 
 ```sh
 python3 -m pip install platformio     # once; the first build downloads the toolchains
-pio run -d native/arduino             # -> native/arduino/.pio/build/bench-lovyangfx/firmware.bin
+pio run -d native/arduino             # every library env -> native/arduino/.pio/build/<env>/firmware.bin
 pio run -d native/idf                 # -> native/idf/.pio/build/{bench-esplcd,bench-regdma}/firmware.bin
 pio run -d native/idf/lvgl            # -> native/idf/lvgl/.pio/build/bench-lvgl/firmware.bin
 ```
@@ -94,7 +94,7 @@ Flashing replaces MicroPython on that watch. Only do it when the user has asked.
 
 ```sh
 PORT=/dev/cu.usbserial-022152D1       # watch A (watch B: /dev/cu.usbserial-02215408)
-pio run -d native/arduino -t upload --upload-port $PORT
+pio run -d native/arduino -e bench-lovyangfx -t upload --upload-port $PORT   # other envs: arduino/README.md
 python3 native/tools/capture.py $PORT logs/bench-arduino-A.log --seconds 150
 pio run -d native/idf -e bench-esplcd -t upload --upload-port $PORT
 python3 native/tools/capture.py $PORT logs/bench-idf-esplcd-A.log --seconds 180
