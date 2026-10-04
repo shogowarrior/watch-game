@@ -42,14 +42,16 @@ One ``step(now)`` does, in order:
           (``display=None``) so heartbeats keep their time grid (ui-spec §7).
           A frame takes ~80 ms on the watch, so the motor is serviced after
           every band the renderer blits or pushes and after its overlays
-          (~5-15 ms apart) and the frame's
-          haptic events start at the
+          (~5-15 ms apart) and the frame's haptic events start at the
           post-render time (pulses keep their 60 ms ERM floor). The backlight
           follows ``params.backlight`` after each frame, so a woken panel is
           lit only over a fresh frame (§8: no stale frame)
   radio   beacon (``game.fill_beacon``) at ``game.beacon_hz`` via ``maybe_send``
   haptic  ``params.haptic`` (``play_named``; telemetry logs only accepted ones)
-          + renderer heartbeats (``heartbeat``) -> HapticPlayer (buzz mode) -> Motor
+          + renderer heartbeats (``heartbeat``) -> HapticPlayer (buzz mode) -> Motor.
+          A renderer that announces its next heartbeat spawn gets the beat
+          handed over ahead, at the spawn time (``_beats``), so it lands on its
+          ring at any lock rate; the loop wakes for it (``player.beat_due``)
   gc      ``gc.collect()`` once per ``GC_PERIOD_MS`` (10 s) when the next frame
           is at least ``GC_BUDGET_MS`` away (forced after ``GC_FORCE_MS``). On
           the SPIRAM build a collect sweeps the whole 4 MB heap: about 70 ms
@@ -151,8 +153,9 @@ class _HapticDisplay:
     """Display proxy for the renderer: ``service`` runs after each band the
     renderer blits, after its overlays and after each band it pushes (~5-15
     ms apart on the watch), so pulse edges stay within one band of schedule mid-frame,
-    samples touch there once TOUCH_GAP_MS have passed since the last sample,
-    and the debug sink is pumped there."""
+    an announced heartbeat is handed over as soon as the frame's spawns are
+    known, touch is sampled there once TOUCH_GAP_MS have passed since the
+    last sample, and the debug sink is pumped there."""
 
     def __init__(self, rt, display):
         self.rt = rt
@@ -165,6 +168,9 @@ class _HapticDisplay:
     def service(self):
         rt = self.rt
         t = rt.clock()
+        r = rt.renderer
+        if getattr(r, "hb_next_t", -1) != -1:
+            rt._sync_beat(r, t)
         rt._stage_haptic(t)
         if rt.touch is not None and ticks_diff(t, rt._touch_t) >= TOUCH_GAP_MS:
             rt._sample_touch(t)
@@ -275,6 +281,8 @@ class Runtime:
         self._fresh = False
         self._metro = None
         self._metro_ms = 0
+        self._hb_at = None          # spawn time of the beat handed to the player ahead
+        self._hb_was = None         # ... and of the one handed before it
         self._fps_t = now
         self._fps_n = 0
         self._t_tick = now
@@ -363,12 +371,18 @@ class Runtime:
 
     def idle(self, ms):
         """Sleep ``ms``; while a pattern plays, tick the motor every
-        ``HAPTIC_SLICE_MS`` so its edges land on time (ERM 60 ms floor)."""
-        if not self.hap_active():
-            self.sleep_ms(ms)
-            return
+        ``HAPTIC_SLICE_MS`` so its edges land on time (ERM 60 ms floor). A
+        heartbeat due inside the sleep starts on time."""
         clk = self.clock
         end = ticks_add(clk(), ms)
+        if not self.hap_active():
+            d = self.player.beat_due
+            if d is None or ticks_diff(d, end) > 0:
+                self.sleep_ms(ms)
+                return
+            r = ticks_diff(d, clk())
+            if r > 0:
+                self.sleep_ms(r)
         while True:
             self._stage_haptic(clk())
             r = ticks_diff(end, clk())
@@ -463,6 +477,9 @@ class Runtime:
             nx = t
         t = self.pacer.t_next
         if ticks_diff(t, nx) < 0:
+            nx = t
+        t = self.player.beat_due
+        if t is not None and ticks_diff(t, nx) < 0:
             nx = t
         r = self.radio
         if r is not None:
@@ -764,8 +781,46 @@ class Runtime:
         pl = self.player
         if event is not None and pl.play_named(event, now):
             self._log_haptic(now, event)
-        for i in range(len(ev)):            # heartbeats (an event replaces one)
-            pl.heartbeat(ev[i], now)
+        if r is not None:
+            self._beats(r, ev, now)
+
+    def _beats(self, r, ev, now):
+        """Heartbeats on ring spawns (an event replaces one). A renderer that
+        announces its next heartbeat spawn (``hb_next_t``, ``hb_next``) gets
+        the beat handed to the player ahead (``_sync_beat``), so the buzz lands
+        on its ring at any frame lock rate, and the frame that spawns that
+        ring (``hb_t0``, the spawn's time) does not start it again. Otherwise
+        a beat starts when its frame is out, up to a frame late."""
+        pl = self.player
+        if getattr(r, "hb_next_t", -1) == -1:
+            if len(ev):
+                pl.heartbeat(ev[0], now)
+            return
+        if len(ev):
+            t0 = r.hb_t0
+            if t0 != self._hb_at and t0 != self._hb_was:
+                pl.heartbeat(ev[0], now)    # not handed ahead: starts now
+        self._sync_beat(r, now)
+
+    def _sync_beat(self, r, now):
+        """Hand the announced spawn's beat to the player at the spawn time
+        once it falls before the frame after next. Re-read after the
+        renderer's state step and between bands (``_HapticDisplay.service``),
+        before the motor is ticked: a spawn still ahead that moves or goes (new
+        tempo, MENU) moves or drops its beat before it can start."""
+        nt = r.hb_next_t
+        at = self._hb_at
+        pl = self.player
+        pc = self.pacer
+        if nt is not None and ticks_diff(nt, ticks_add(pc.t_next, pc.period)) <= 0:
+            if nt != at and not pl.beat_playing:
+                pl.heartbeat(r.hb_next, nt)
+                self._hb_was = at
+                self._hb_at = nt
+        elif (at is not None and ticks_diff(at, now) > 0 and pl.beat_due == at
+                and nt != at):
+            pl.cancel_heartbeat()           # its spawn moved or is gone
+            self._hb_at = None
 
     def _log_haptic(self, now, name):
         """Only events the player accepted (§7 guard drops some): the log
