@@ -4,10 +4,10 @@
 #pragma once
 #include <stdint.h>
 
-#include "sf/hal.h"
-#include "sf/imu_sampler.h"
+#include "hm/hal.h"
+#include "hm/imu_sampler.h"
 
-namespace sf {
+namespace hm {
 namespace esp {
 
 struct EspClock : Clock {
@@ -31,8 +31,8 @@ class CoreImuTask : public ImuTask {
 };
 
 // GPIO12 PWM at 1 kHz and BACKLIGHT_NORMAL, as hal/st7789.py does. The panel
-// supply (AXP202 LDO2) must be on: see sf::axp202::panel_power_on.
+// supply (AXP202 LDO2) must be on: see hm::axp202::panel_power_on.
 void backlight(bool on);
 
 }  // namespace esp
-}  // namespace sf
+}  // namespace hm

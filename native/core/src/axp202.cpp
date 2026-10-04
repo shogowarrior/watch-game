@@ -1,6 +1,6 @@
-#include "sf/axp202.h"
+#include "hm/axp202.h"
 
-namespace sf {
+namespace hm {
 namespace axp202 {
 
 bool panel_power_on(I2c& i2c) {
@@ -12,4 +12,4 @@ bool panel_power_on(I2c& i2c) {
 }
 
 }  // namespace axp202
-}  // namespace sf
+}  // namespace hm

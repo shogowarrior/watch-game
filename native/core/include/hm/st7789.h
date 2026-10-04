@@ -4,9 +4,9 @@
 #pragma once
 #include <stdint.h>
 
-#include "sf/hal.h"
+#include "hm/hal.h"
 
-namespace sf {
+namespace hm {
 
 class St7789 {
  public:
@@ -36,4 +36,4 @@ class St7789 {
   bool first_ = true;     // next strip opens the RAMWR
 };
 
-}  // namespace sf
+}  // namespace hm

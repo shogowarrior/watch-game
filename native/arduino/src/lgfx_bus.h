@@ -50,8 +50,8 @@ class LgfxBus : public ArduinoLcd {
   lgfx::Bus_SPI bus_;
 };
 
-#define SF_STR(x) SF_STR2(x)
-#define SF_STR2(x) #x
+#define HM_STR(x) HM_STR2(x)
+#define HM_STR2(x) #x
 // "lovyangfx_1.2.32"
-#define SF_LGFX_LIBRARY \
-  "lovyangfx_" SF_STR(LGFX_VERSION_MAJOR) "." SF_STR(LGFX_VERSION_MINOR) "." SF_STR(LGFX_VERSION_PATCH)
+#define HM_LGFX_LIBRARY \
+  "lovyangfx_" HM_STR(LGFX_VERSION_MAJOR) "." HM_STR(LGFX_VERSION_MINOR) "." HM_STR(LGFX_VERSION_PATCH)

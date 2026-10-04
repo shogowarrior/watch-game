@@ -1,5 +1,5 @@
 // Display and motion-sensor benchmark on ESP-IDF with esp_lcd's SPI panel IO
-// (DMA). Steps and log lines are the shared ones in native/core (sf::Bench).
+// (DMA). Steps and log lines are the shared ones in native/core (hm::Bench).
 #include <string.h>
 
 #include "driver/i2c_master.h"
@@ -8,13 +8,13 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "sf/bench.h"
-#include "sf/esp32.h"
+#include "hm/bench.h"
+#include "hm/esp32.h"
 
 namespace {
 
 // I2C0 (AXP202, BMA423) on the IDF 5 master driver, one device handle per address.
-class IdfI2c : public sf::I2c {
+class IdfI2c : public hm::I2c {
  public:
   bool begin() {
     i2c_master_bus_config_t c = {};
@@ -60,7 +60,7 @@ class IdfI2c : public sf::I2c {
 
 // esp_lcd: a command first drains the queued pixel bursts, so at most one strip
 // is on the wire while the next is drawn. A new clock means a new panel IO.
-class EspLcdBus : public sf::LcdBus {
+class EspLcdBus : public hm::LcdBus {
  public:
   bool begin() {
     spi_bus_config_t b = {};
@@ -69,7 +69,7 @@ class EspLcdBus : public sf::LcdBus {
     b.sclk_io_num = 18;
     b.quadwp_io_num = -1;
     b.quadhd_io_num = -1;
-    b.max_transfer_sz = sf::FIELD_W * sf::Bench::SH * 2;
+    b.max_transfer_sz = hm::FIELD_W * hm::Bench::SH * 2;
     return spi_bus_initialize(SPI2_HOST, &b, SPI_DMA_CH_AUTO) == ESP_OK;
   }
   bool set_clock(uint32_t hz) override {
@@ -96,19 +96,19 @@ class EspLcdBus : public sf::LcdBus {
 };
 
 char framework[64];
-sf::esp::EspClock clock_;
+hm::esp::EspClock clock_;
 IdfI2c i2c0;
 EspLcdBus lcd;
-sf::esp::CoreImuTask imu;
-sf::BenchHost host{"idf-esplcd", framework, clock_, lcd, i2c0, imu, sf::esp::backlight};
-sf::Bench bench(host);
+hm::esp::CoreImuTask imu;
+hm::BenchHost host{"idf-esplcd", framework, clock_, lcd, i2c0, imu, hm::esp::backlight};
+hm::Bench bench(host);
 
 void bench_task(void*) {
   // After the run: the HOT field at 20, 30 and 60 fps in turn, 10 s each, for the eye.
   static const int targets[] = {20, 30, 60};
   if (bench.setup()) {
     bench.run();
-    for (int i = 0;; i++) bench.show(sf::Bench::CLOCKS[1], targets[i % 3], 10);
+    for (int i = 0;; i++) bench.show(hm::Bench::CLOCKS[1], targets[i % 3], 10);
   }
   for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
 }
@@ -118,13 +118,13 @@ void bench_task(void*) {
 extern "C" void app_main() {
   snprintf(framework, sizeof framework, "esp-idf_%s_esp_lcd", esp_get_idf_version());
   if (!i2c0.begin()) {
-    sf::logf("SF error what=i2c_bus");
+    hm::logf("HM error what=i2c_bus");
     return;
   }
   if (!lcd.begin()) {
-    sf::logf("SF error what=spi_bus");
+    hm::logf("HM error what=spi_bus");
     return;
   }
   // The renderer gets core 1; the motion-sensor task and the system tasks keep core 0.
-  xTaskCreatePinnedToCore(bench_task, "sf_bench", 8192, nullptr, 5, nullptr, 1);
+  xTaskCreatePinnedToCore(bench_task, "hm_bench", 8192, nullptr, 5, nullptr, 1);
 }

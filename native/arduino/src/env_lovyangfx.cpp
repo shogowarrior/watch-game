@@ -3,6 +3,6 @@
 
 BenchEnv& bench_env() {
   static LgfxBus lcd;
-  static BenchEnv env{"arduino-lovyangfx", SF_LGFX_LIBRARY, lcd, nullptr};
+  static BenchEnv env{"arduino-lovyangfx", HM_LGFX_LIBRARY, lcd, nullptr};
   return env;
 }

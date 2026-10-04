@@ -5,9 +5,9 @@
 #pragma once
 #include <stdint.h>
 
-#include "sf/field.h"
+#include "hm/field.h"
 
-namespace sf {
+namespace hm {
 
 // Screen and glyph ids: index in T::SCREENS / T::GLYPHS (G_DOTS is renderer-only).
 enum Screen : int8_t { S_PAIRING = 0, S_SEARCHING, S_FAR, S_NEAR, S_WARM, S_HOT, S_FOUND, S_SCANNING,
@@ -48,4 +48,4 @@ class FieldScene {
   int8_t sub_ = -1;
 };
 
-}  // namespace sf
+}  // namespace hm

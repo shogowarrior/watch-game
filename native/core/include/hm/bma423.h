@@ -2,9 +2,9 @@
 #pragma once
 #include <stdint.h>
 
-#include "sf/hal.h"
+#include "hm/hal.h"
 
-namespace sf {
+namespace hm {
 
 class Bma423 {
  public:
@@ -33,4 +33,4 @@ class Bma423 {
   int range_mg_ = 4000;
 };
 
-}  // namespace sf
+}  // namespace hm

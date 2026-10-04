@@ -61,13 +61,13 @@ def test_capture_keeps_lines_until_done():
     master, slave = os.openpty()
     fd = cap["open_port"](os.ttyname(slave))
     try:
-        os.write(master, b"boot junk\r\nSF hello variant=x\r\nSF run fps=3")
-        os.write(master, b"0.0\r\nSF done\r\nafter\r\n")
+        os.write(master, b"boot junk\r\nHM hello variant=x\r\nHM run fps=3")
+        os.write(master, b"0.0\r\nHM done\r\nafter\r\n")
         out, echoed = io.StringIO(), []
-        assert cap["capture"](fd, out, 5, "SF done", echoed.append)
-        assert out.getvalue() == "boot junk\nSF hello variant=x\nSF run fps=30.0\nSF done\n"
-        assert echoed == ["SF hello variant=x", "SF run fps=30.0", "SF done"]
-        assert not cap["capture"](fd, io.StringIO(), 0.3, "SF done")   # times out on silence
+        assert cap["capture"](fd, out, 5, "HM done", echoed.append)
+        assert out.getvalue() == "boot junk\nHM hello variant=x\nHM run fps=30.0\nHM done\n"
+        assert echoed == ["HM hello variant=x", "HM run fps=30.0", "HM done"]
+        assert not cap["capture"](fd, io.StringIO(), 0.3, "HM done")   # times out on silence
     finally:
         for f in (fd, master, slave):
             os.close(f)

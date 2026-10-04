@@ -1,8 +1,8 @@
-#include "sf/bench.h"
+#include "hm/bench.h"
 
-#include "sf/axp202.h"
+#include "hm/axp202.h"
 
-namespace sf {
+namespace hm {
 
 namespace {
 
@@ -26,9 +26,9 @@ Bench::Bench(BenchHost& h)
     : h_(h), panel_(h.lcd, h.clock), scene_(field_), bma_(h.i2c0, h.clock), sampler_(bma_, h.clock) {}
 
 bool Bench::setup() {
-  logf("SF hello variant=%s framework=%s", h_.variant, h_.framework);
+  logf("HM hello variant=%s framework=%s", h_.variant, h_.framework);
   if (!axp202::panel_power_on(h_.i2c0)) {
-    logf("SF error what=axp202");
+    logf("HM error what=axp202");
     return false;
   }
   h_.clock.delay_ms(10);
@@ -37,13 +37,13 @@ bool Bench::setup() {
   h_.backlight(true);
   const uint32_t t0 = h_.clock.now_us();
   build_map(ring_map, FIELD_W);
-  logf("SF setup map_us=%u", (unsigned)(h_.clock.now_us() - t0));
+  logf("HM setup map_us=%u", (unsigned)(h_.clock.now_us() - t0));
   return true;
 }
 
 bool Bench::clock(uint32_t hz) {
   if (h_.lcd.set_clock(hz)) return true;
-  logf("SF error what=spi_clock hz=%u", (unsigned)hz);
+  logf("HM error what=spi_clock hz=%u", (unsigned)hz);
   return false;
 }
 
@@ -79,7 +79,7 @@ void Bench::compose() {
       step += t1 - t0;
       blit_us += h_.clock.now_us() - t1;
     }
-    logf("SF compose fixture=\"%s\" frames=%d step_us=%u blit_us=%u", p.name, n, (unsigned)(step / n),
+    logf("HM compose fixture=\"%s\" frames=%d step_us=%u blit_us=%u", p.name, n, (unsigned)(step / n),
          (unsigned)(blit_us / n));
   }
 }
@@ -106,7 +106,7 @@ void Bench::push(uint32_t hz) {
     panel_.end_frame();
     overlap += h_.clock.now_us() - t0;
   }
-  logf("SF push hz=%u wire_us=%u serial_us=%u overlap_us=%u floor_us=%u", (unsigned)hz, (unsigned)(wire / n),
+  logf("HM push hz=%u wire_us=%u serial_us=%u overlap_us=%u floor_us=%u", (unsigned)hz, (unsigned)(wire / n),
        (unsigned)(serial / n), (unsigned)(overlap / n), (unsigned)((uint64_t)FRAME_BYTES * 8 * 1000000 / hz));
   pause();
 }
@@ -132,7 +132,7 @@ void Bench::windows(uint32_t hz) {
     }
     panel_.end_frame();
     const uint32_t us = (h_.clock.now_us() - t0) / reps;
-    logf("SF window hz=%u w=%d h=%d n=%d frame_us=%u us_per_window=%u ns_per_px=%u", (unsigned)hz, w, h, n,
+    logf("HM window hz=%u w=%d h=%d n=%d frame_us=%u us_per_window=%u ns_per_px=%u", (unsigned)hz, w, h, n,
          (unsigned)us, (unsigned)(us / n), (unsigned)((uint64_t)us * 1000 / (FIELD_W * FIELD_W)));
     pause();
   }
@@ -172,7 +172,7 @@ void Bench::loop(Run& r, const FieldParams& p, int target, uint32_t dur_us, ImuS
 
 void Bench::log_run(const char* step, uint32_t hz, int target, const Run& r) {
   const uint32_t fps10 = (uint32_t)((uint64_t)r.frames * 10000000 / r.elapsed_us);
-  logf("SF %s hz=%u target=%d fps=%u.%u p50_us=%u p95_us=%u max_us=%u sd_us=%u miss=%d work_us=%u", step,
+  logf("HM %s hz=%u target=%d fps=%u.%u p50_us=%u p95_us=%u max_us=%u sd_us=%u miss=%d work_us=%u", step,
        (unsigned)hz, target, (unsigned)(fps10 / 10), (unsigned)(fps10 % 10), (unsigned)r.interval.pct(50),
        (unsigned)r.interval.pct(95), (unsigned)r.interval.pct(100), (unsigned)r.interval.sd(), r.miss,
        (unsigned)r.work.mean());
@@ -191,7 +191,7 @@ void Bench::imu() {
   // 800 Hz FIFO drained every 20 ms by a task on the other core, then from the
   // render loop itself (as the MicroPython game does), while frames run at 30 fps.
   if (!bma_.init(800, 8)) {
-    logf("SF error what=bma423");
+    logf("HM error what=bma423");
     return;
   }
   if (!clock(CLOCKS[1])) return;
@@ -203,7 +203,7 @@ void Bench::imu() {
     const ImuStats& s = sampler_.stats;
     const char* where = inline_poll ? "render_loop" : "other_core";
     log_run(inline_poll ? "run_imu_inline" : "run_imu_task", CLOCKS[1], 30, run_);
-    logf("SF imu where=%s odr=800 rate=%u polls=%u full=%u fifo_max=%u read_ms_per_s=%u errors=%u peak_mg=%u",
+    logf("HM imu where=%s odr=800 rate=%u polls=%u full=%u fifo_max=%u read_ms_per_s=%u errors=%u peak_mg=%u",
          where, (unsigned)((uint64_t)s.samples * 1000000 / run_.elapsed_us), (unsigned)s.polls, (unsigned)s.full,
          (unsigned)s.fifo_max, (unsigned)((uint64_t)s.read_us * 1000 / run_.elapsed_us), (unsigned)s.errors,
          (unsigned)s.peak_mg);
@@ -225,15 +225,15 @@ void Bench::run() {
   locked(CLOCKS[0], LOCKED_OTHER, sizeof LOCKED_OTHER / sizeof LOCKED_OTHER[0]);
   locked(CLOCKS[2], LOCKED_OTHER, sizeof LOCKED_OTHER / sizeof LOCKED_OTHER[0]);
   imu();
-  logf("SF done");
+  logf("HM done");
 }
 
 void Bench::show(uint32_t hz, int target, int s) {
   if (!clock(hz)) return;
-  logf("SF showing hz=%u target=%d s=%d", (unsigned)hz, target, s);
+  logf("HM showing hz=%u target=%d s=%d", (unsigned)hz, target, s);
   loop(run_, HOT, target, (uint32_t)s * 1000000, nullptr);
   log_run("show", hz, target, run_);
   pause();
 }
 
-}  // namespace sf
+}  // namespace hm

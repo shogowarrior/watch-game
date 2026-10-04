@@ -5,29 +5,29 @@
 
 #include "check.h"
 #include "fakes.h"
-#include "sf/axp202.h"
-#include "sf/bench.h"
-#include "sf/bma423.h"
-#include "sf/st7789.h"
+#include "hm/axp202.h"
+#include "hm/bench.h"
+#include "hm/bma423.h"
+#include "hm/st7789.h"
 
-namespace sft {
+namespace hmt {
 std::vector<std::string> log_lines;
 }
 
-void sf::logf(const char* fmt, ...) {
+void hm::logf(const char* fmt, ...) {
   char buf[256];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(buf, sizeof buf, fmt, ap);
   va_end(ap);
-  sft::log_lines.push_back(buf);
+  hmt::log_lines.push_back(buf);
 }
 
 namespace {
 
 int count_prefix(const char* prefix) {
   int n = 0;
-  for (const std::string& l : sft::log_lines) n += l.compare(0, strlen(prefix), prefix) == 0;
+  for (const std::string& l : hmt::log_lines) n += l.compare(0, strlen(prefix), prefix) == 0;
   return n;
 }
 
@@ -38,10 +38,10 @@ void no_backlight(bool) {}
 TEST(test_st7789_init_matches_hal) {
   // hal/st7789.py init(): SWRESET, SLPOUT, COLMOD 0x55, MADCTL 0xC0, INVON,
   // NORON, black GRAM in a full window (rows 80..319), DISPON.
-  sft::FakeClock clock;
-  sft::FakeLcd lcd(clock);
+  hmt::FakeClock clock;
+  hmt::FakeLcd lcd(clock);
   lcd.set_clock(26666667);
-  sf::St7789 panel(lcd, clock);
+  hm::St7789 panel(lcd, clock);
   static uint16_t strip[240 * 24];
   strip[5] = 0x1234;
   panel.init(strip, 24);
@@ -60,10 +60,10 @@ TEST(test_st7789_init_matches_hal) {
 }
 
 TEST(test_st7789_window_takes_pixels_in_chunks) {
-  sft::FakeClock clock;
-  sft::FakeLcd lcd(clock);
+  hmt::FakeClock clock;
+  hmt::FakeLcd lcd(clock);
   lcd.set_clock(40000000);
-  sf::St7789 panel(lcd, clock);
+  hm::St7789 panel(lcd, clock);
   static uint16_t px[900];
   panel.begin_window(30, 60, 30, 30);
   panel.push_pixels(px, 500);
@@ -77,9 +77,9 @@ TEST(test_st7789_window_takes_pixels_in_chunks) {
 }
 
 TEST(test_axp202_turns_ldo2_on_and_keeps_dcdc3) {
-  sft::FakeI2c i2c;
+  hmt::FakeI2c i2c;
   i2c.regs[0x35 << 8 | 0x12] = 0x00;            // even if DCDC3 read back clear
-  CHECK(sf::axp202::panel_power_on(i2c));
+  CHECK(hm::axp202::panel_power_on(i2c));
   CHECK(i2c.regs[0x35 << 8 | 0x12] == (0x04 | 0x02));
   CHECK(i2c.regs[0x35 << 8 | 0x28] == 0xF5);    // LDO2 3.3 V, LDO4 bits kept
   for (auto& w : i2c.writes)
@@ -87,9 +87,9 @@ TEST(test_axp202_turns_ldo2_on_and_keeps_dcdc3) {
 }
 
 TEST(test_bma423_init_matches_hal) {
-  sft::FakeClock clock;
-  sft::FakeI2c i2c;
-  sf::Bma423 imu(i2c, clock);
+  hmt::FakeClock clock;
+  hmt::FakeI2c i2c;
+  hm::Bma423 imu(i2c, clock);
   CHECK(!imu.init(300, 8));
   CHECK(imu.init(800, 8));
   // soft reset, then hal/bma423.py _configure() with odr 800 (code 11), +-8 g (code 2)
@@ -107,37 +107,37 @@ TEST(test_bma423_decode_matches_python) {
   const int16_t want4[] = {2, -2, 1000, 3998, -4000, 0, -1896, -2838, 61};
   const int16_t want16[] = {8, -8, 4000, 15992, -16000, 0, -7586, -11352, 242};
   int16_t out[15];
-  CHECK(sf::Bma423::decode(raw, 5, out, 4000) == 3);
+  CHECK(hm::Bma423::decode(raw, 5, out, 4000) == 3);
   CHECK(memcmp(out, want4, sizeof want4) == 0);
-  CHECK(sf::Bma423::decode(raw, 5, out, 16000) == 3);
+  CHECK(hm::Bma423::decode(raw, 5, out, 16000) == 3);
   CHECK(memcmp(out, want16, sizeof want16) == 0);
 }
 
 TEST(test_bench_runs_every_step) {
-  sft::log_lines.clear();
-  sft::FakeClock clock;
-  sft::FakeLcd lcd(clock);
+  hmt::log_lines.clear();
+  hmt::FakeClock clock;
+  hmt::FakeLcd lcd(clock);
   lcd.max_hz = 40000000;                        // 80 MHz refused: logged, skipped
-  sft::FakeI2c i2c;
-  sft::FakeImuTask imu;
-  sf::BenchHost host{"host", "g++", clock, lcd, i2c, imu, no_backlight};
-  static sf::Bench bench(host);
+  hmt::FakeI2c i2c;
+  hmt::FakeImuTask imu;
+  hm::BenchHost host{"host", "g++", clock, lcd, i2c, imu, no_backlight};
+  static hm::Bench bench(host);
   CHECK(bench.setup());
   bench.run();
-  CHECK(sft::log_lines.back() == "SF done");
-  CHECK(count_prefix("SF compose ") == 3);
-  CHECK(count_prefix("SF push ") == 2);
-  CHECK(count_prefix("SF window ") == 2 * 5);
-  CHECK(count_prefix("SF run hz=40000000 target=") == 1 + 5);
-  CHECK(count_prefix("SF run hz=26666667 target=") == 1 + 3);
-  CHECK(count_prefix("SF error what=spi_clock hz=80000000") == 1 + 1 + 1 + 1);
-  CHECK(count_prefix("SF imu ") == 2 && imu.starts == 1);
-  for (const std::string& l : sft::log_lines) {
-    if (l.compare(0, 9, "SF window") == 0)                       // each tiling covers the screen
+  CHECK(hmt::log_lines.back() == "HM done");
+  CHECK(count_prefix("HM compose ") == 3);
+  CHECK(count_prefix("HM push ") == 2);
+  CHECK(count_prefix("HM window ") == 2 * 5);
+  CHECK(count_prefix("HM run hz=40000000 target=") == 1 + 5);
+  CHECK(count_prefix("HM run hz=26666667 target=") == 1 + 3);
+  CHECK(count_prefix("HM error what=spi_clock hz=80000000") == 1 + 1 + 1 + 1);
+  CHECK(count_prefix("HM imu ") == 2 && imu.starts == 1);
+  for (const std::string& l : hmt::log_lines) {
+    if (l.compare(0, 9, "HM window") == 0)                       // each tiling covers the screen
       CHECK(l.find(" n=10 ") != std::string::npos || l.find(" n=4 ") != std::string::npos ||
             l.find(" n=16 ") != std::string::npos || l.find(" n=64 ") != std::string::npos ||
             l.find(" n=900 ") != std::string::npos);
-    if (l.compare(0, 31, "SF run hz=40000000 target=30 fp") == 0) {   // fits: ~30 fps, no misses
+    if (l.compare(0, 31, "HM run hz=40000000 target=30 fp") == 0) {   // fits: ~30 fps, no misses
       CHECK(l.find("fps=29.") != std::string::npos || l.find("fps=30.") != std::string::npos);
       CHECK(l.find("miss=0") != std::string::npos);
     }
@@ -147,7 +147,7 @@ TEST(test_bench_runs_every_step) {
 TEST(test_bench_drawer_sends_the_timed_frames) {
   // With a runtime's own drawer (LVGL), every timed frame goes through it with the
   // field's palette and the ring map, and the bench sends no strips of its own.
-  struct CountDrawer : sf::FrameDrawer {
+  struct CountDrawer : hm::FrameDrawer {
     int frames = 0;
     const uint8_t* map = nullptr;
     void frame(const uint16_t* pal, const uint8_t* m) override {
@@ -156,12 +156,12 @@ TEST(test_bench_drawer_sends_the_timed_frames) {
       map = m;
     }
   } drawer;
-  sft::FakeClock clock;
-  sft::FakeLcd lcd(clock);
-  sft::FakeI2c i2c;
-  sft::FakeImuTask imu;
-  sf::BenchHost host{"host", "g++", clock, lcd, i2c, imu, no_backlight, &drawer};
-  static sf::Bench bench(host);
+  hmt::FakeClock clock;
+  hmt::FakeLcd lcd(clock);
+  hmt::FakeI2c i2c;
+  hmt::FakeImuTask imu;
+  hm::BenchHost host{"host", "g++", clock, lcd, i2c, imu, no_backlight, &drawer};
+  static hm::Bench bench(host);
   CHECK(bench.setup());
   const size_t ops = lcd.ops.size();
   bench.show(40000000, 30, 1);

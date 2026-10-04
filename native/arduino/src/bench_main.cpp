@@ -1,16 +1,16 @@
 // Display and motion-sensor benchmark on Arduino-ESP32, one env per graphics
-// library (bench_env.h). Steps and log lines are the shared ones in native/core (sf::Bench).
+// library (bench_env.h). Steps and log lines are the shared ones in native/core (hm::Bench).
 #include <Arduino.h>
 #include <Wire.h>
 #include <esp_arduino_version.h>
 
 #include "bench_env.h"
-#include "sf/esp32.h"
+#include "hm/esp32.h"
 
 namespace {
 
 // I2C0 (AXP202, BMA423) through Wire; reads stay within Wire's 128-byte buffer.
-struct WireI2c : sf::I2c {
+struct WireI2c : hm::I2c {
   bool write(uint8_t addr, uint8_t reg, const uint8_t* d, size_t n) override {
     Wire.beginTransmission(addr);
     Wire.write(reg);
@@ -28,15 +28,15 @@ struct WireI2c : sf::I2c {
 };
 
 char framework[96];
-sf::esp::EspClock clock_;
+hm::esp::EspClock clock_;
 WireI2c i2c0;
-sf::esp::CoreImuTask imu;
+hm::esp::CoreImuTask imu;
 bool ready = false;
 
-sf::Bench& bench() {
+hm::Bench& bench() {
   BenchEnv& env = bench_env();
-  static sf::BenchHost host{env.variant, framework, clock_, env.lcd, i2c0, imu, sf::esp::backlight, env.drawer};
-  static sf::Bench b(host);
+  static hm::BenchHost host{env.variant, framework, clock_, env.lcd, i2c0, imu, hm::esp::backlight, env.drawer};
+  static hm::Bench b(host);
   return b;
 }
 
@@ -56,14 +56,14 @@ void setup() {
         wire_done = true;
         vTaskDelete(nullptr);
       },
-      "sf_wire", 4096, nullptr, 5, nullptr, 0);
+      "hm_wire", 4096, nullptr, 5, nullptr, 0);
   while (!wire_done) delay(1);
   if (!wire_ok) {
-    sf::logf("SF error what=i2c_bus");
+    hm::logf("HM error what=i2c_bus");
     return;
   }
-  if (!bench_env().lcd.begin(sf::Bench::CLOCKS[0])) {
-    sf::logf("SF error what=spi_bus");
+  if (!bench_env().lcd.begin(hm::Bench::CLOCKS[0])) {
+    hm::logf("HM error what=spi_bus");
     return;
   }
   ready = bench().setup();
@@ -78,5 +78,5 @@ void loop() {
     delay(1000);
     return;
   }
-  bench().show(sf::Bench::CLOCKS[1], targets[i++ % 3], 10);
+  bench().show(hm::Bench::CLOCKS[1], targets[i++ % 3], 10);
 }

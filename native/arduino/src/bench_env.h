@@ -5,18 +5,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "sf/bench.h"
+#include "hm/bench.h"
 
-// sf::LcdBus plus bring-up: the SPI bus on HSPI at hz, the panel selected.
-struct ArduinoLcd : sf::LcdBus {
+// hm::LcdBus plus bring-up: the SPI bus on HSPI at hz, the panel selected.
+struct ArduinoLcd : hm::LcdBus {
   virtual bool begin(uint32_t hz) = 0;
 };
 
 struct BenchEnv {
-  const char* variant;       // "SF hello variant=", e.g. "arduino-tft_espi"
+  const char* variant;       // "HM hello variant=", e.g. "arduino-tft_espi"
   const char* library;       // name and version, e.g. "tft_espi_2.5.43"
   ArduinoLcd& lcd;
-  sf::FrameDrawer* drawer;   // nullptr: the bench's own strip loop
+  hm::FrameDrawer* drawer;   // nullptr: the bench's own strip loop
 };
 
 BenchEnv& bench_env();

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Restart a watch over its USB serial port and save what it prints.
 
-    python3 native/tools/capture.py PORT OUT [--seconds 150] [--until "SF done"] [--no-reset]
+    python3 native/tools/capture.py PORT OUT [--seconds 150] [--until "HM done"] [--no-reset]
 
 Standard library only (POSIX termios), so it runs on the Mac with nothing else
 installed. It pulses RTS (wired to EN on the T-Watch, as esptool's hard reset)
 so the log starts at boot, keeps every line until the --until text appears or
---seconds pass, and echoes the "SF " lines. Exit 0 if --until was seen, else 1.
+--seconds pass, and echoes the "HM " lines. Exit 0 if --until was seen, else 1.
 """
 import fcntl
 import os
@@ -72,7 +72,7 @@ def capture(fd, out, seconds, until, echo=None):
             line = raw.decode("utf-8", "replace").rstrip("\r")
             out.write(line + "\n")
             out.flush()
-            if echo and line.startswith("SF "):
+            if echo and line.startswith("HM "):
                 echo(line)
             if until and until in line:
                 return True
@@ -83,7 +83,7 @@ def main(argv):
     if len(pos) != 2:
         print(__doc__.strip().splitlines()[2].strip())
         return 2
-    o = parse_args(argv[2:], {"seconds": "150", "until": "SF done", "no-reset": False}, flags=("no-reset",))
+    o = parse_args(argv[2:], {"seconds": "150", "until": "HM done", "no-reset": False}, flags=("no-reset",))
     fd = open_port(pos[0])
     try:
         if not o["no-reset"]:

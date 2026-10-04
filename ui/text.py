@@ -5,8 +5,8 @@ FrameBuffers and blitted with a 2-entry RGB565 palette plus a transparent
 key. MicroPython compares the blit key after the palette lookup, so the key
 is the palette's background entry.
 
-All ``draw_*`` helpers take the strip FrameBuffer and its top row ``y0`` and
-use absolute screen coordinates. Nothing here allocates on a cache hit.
+All ``draw_*`` helpers take a FrameBuffer and the screen row ``y0`` of its
+top (0 for the renderer's full frame) and use absolute screen coordinates. Nothing here allocates on a cache hit.
 """
 
 import framebuf

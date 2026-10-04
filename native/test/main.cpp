@@ -3,18 +3,18 @@
 
 #include "check.h"
 
-namespace sft {
+namespace hmt {
 Test* tests = nullptr;
 int failures = 0;
-}  // namespace sft
+}  // namespace hmt
 
 int main(int argc, char** argv) {
   int passed = 0, failed = 0;
-  for (sft::Test* t = sft::tests; t; t = t->next) {
+  for (hmt::Test* t = hmt::tests; t; t = t->next) {
     if (argc > 1 && strstr(t->name, argv[1]) == nullptr) continue;
-    const int before = sft::failures;
+    const int before = hmt::failures;
     t->fn();
-    if (sft::failures == before) {
+    if (hmt::failures == before) {
       passed++;
     } else {
       failed++;

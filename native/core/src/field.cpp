@@ -1,11 +1,11 @@
 // Port of ui/field.py; comments name the ui-spec rule where the Python does.
-#include "sf/field.h"
+#include "hm/field.h"
 
 #include <string.h>
 
-#include "sf/tuning.h"
+#include "hm/tuning.h"
 
-namespace sf {
+namespace hm {
 
 namespace {
 
@@ -456,4 +456,4 @@ void RippleField::build(ticks_t t, int32_t core, int32_t rim, int32_t vmax, int3
   pal_kernel(pal, acc_, tab_, q);
 }
 
-}  // namespace sf
+}  // namespace hm

@@ -5,7 +5,7 @@
 #pragma once
 #include <stdint.h>
 
-namespace sf {
+namespace hm {
 namespace T {
 
 constexpr float ARROW_ANGLE_DEADBAND_DEG = 4.0f;
@@ -303,7 +303,7 @@ constexpr int32_t TOAST_IN_MS = 200;
 constexpr int32_t TOAST_IN_PX = 12;
 constexpr int32_t TOAST_MS = 2500;
 constexpr int32_t TOAST_OUT_MS = 150;
-constexpr const char TOKENS_HASH[] = "471ac7fada25b8bd";
+constexpr const char TOKENS_HASH[] = "87afb72d2d98ae4d";
 constexpr const char TOKENS_VERSION[] = "0.2.0";
 constexpr int32_t TOP_SLOT[4] = {12, 12, 216, 24};
 constexpr int32_t TOUCH_BURST_COUNT = 3;
@@ -352,4 +352,4 @@ constexpr int32_t ZONE_TRAIL_PX[4] = {22, 20, 18, 14};
 constexpr int32_t ZONE_WARM = 2;
 
 }  // namespace T
-}  // namespace sf
+}  // namespace hm
