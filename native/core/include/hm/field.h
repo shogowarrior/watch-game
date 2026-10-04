@@ -4,10 +4,10 @@
 #pragma once
 #include <stdint.h>
 
-#include "sf/field_tables.h"
-#include "sf/ticks.h"
+#include "hm/field_tables.h"
+#include "hm/ticks.h"
 
-namespace sf {
+namespace hm {
 
 constexpr int FIELD_W = 240;
 constexpr int N_IDX = 170;      // ring indices 0..169 (the map's max is 168, the corner)
@@ -100,4 +100,4 @@ class RippleField {
   ticks_t stand_t0_;
 };
 
-}  // namespace sf
+}  // namespace hm

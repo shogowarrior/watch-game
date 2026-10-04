@@ -1,11 +1,11 @@
-#include "sf/stats.h"
+#include "hm/stats.h"
 
 #include <math.h>
 #include <string.h>
 
 #include <algorithm>
 
-namespace sf {
+namespace hm {
 
 uint32_t Stats::pct(int p) const {
   const int n = count();
@@ -27,4 +27,4 @@ uint32_t Stats::sd() const {
   return (uint32_t)(sqrt(s / n) + 0.5);
 }
 
-}  // namespace sf
+}  // namespace hm

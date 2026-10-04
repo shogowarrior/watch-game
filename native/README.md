@@ -7,7 +7,7 @@ been ported yet. MicroPython (the rest of the repo) is untouched.
 
 | Path | What |
 |---|---|
-| `core/` | Portable C++17 with no hardware calls. The ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), and `sf::Bench`, the benchmark every runtime runs. `include/sf/tuning.h` and `field_tables.h` are generated. |
+| `core/` | Portable C++17 with no hardware calls. The ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h` and `field_tables.h` are generated. |
 | `esp32_shared/` | ESP32 clock, serial log, backlight PWM and the motion-sensor task on core 0. Plain ESP-IDF calls, so both builds share it. |
 | `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), LovyanGFX's SPI bus with DMA. |
 | `idf/` | PlatformIO: ESP-IDF 5.5, the `esp_lcd` SPI panel IO with DMA. |
@@ -49,8 +49,8 @@ python3 native/tools/capture.py $PORT logs/bench-idf-A.log --seconds 150
 ```
 
 `capture.py` restarts the watch through the USB serial reset line, so the log
-starts at boot, and stops at `SF done` (about 80 s). Only Python's standard
-library is needed. Close any serial monitor first. After `SF done` the watch
+starts at boot, and stops at `HM done` (about 80 s). Only Python's standard
+library is needed. Close any serial monitor first. After `HM done` the watch
 keeps showing the HOT field at 20, 30 and 60 fps in turn, 10 s each, for
 judging smoothness by eye.
 
@@ -59,15 +59,15 @@ To go back to MicroPython: `tools/flash.sh <port>` (it erases the flash), then
 
 ## The log
 
-One line per measurement, `SF <step> key=value ...`:
+One line per measurement, `HM <step> key=value ...`:
 
 | Line | Meaning |
 |---|---|
-| `SF hello variant= framework=` | which build is running |
-| `SF compose fixture= step_us= blit_us=` | CPU per frame: field state and palette, then the 10 strip blits |
-| `SF push hz= wire_us= serial_us= overlap_us= floor_us=` | per frame at one SPI clock: pixels alone, draw-then-send (as MicroPython does), draw while the previous strip is on the wire, and the theoretical wire time |
-| `SF window hz= w= h= n= frame_us= us_per_window= ns_per_px=` | partial redraw: one screen sent as `n` tiles of `w` x `h`, each its own window; the cost of a window and of a pixel |
-| `SF run hz= target= fps= p50_us= p95_us= max_us= sd_us= miss= work_us=` | 3 s of HOT frames paced to `target` fps (0 = as fast as possible; the locks are 10, 20 and 30, which divide every zone period, plus 40 and 60 at 40 MHz for the ceiling): frame-interval percentiles, misses, CPU per frame |
-| `SF run_imu_task` / `SF run_imu_inline` + `SF imu where= rate= full= fifo_max= read_ms_per_s=` | 30 fps for 5 s with the BMA423 at 800 Hz, drained by a task on the other core, then from the render loop as MicroPython does |
-| `SF error what=` | a step that could not run (for example `spi_clock`) |
-| `SF done` | the benchmark finished |
+| `HM hello variant= framework=` | which build is running |
+| `HM compose fixture= step_us= blit_us=` | CPU per frame: field state and palette, then the 10 strip blits |
+| `HM push hz= wire_us= serial_us= overlap_us= floor_us=` | per frame at one SPI clock: pixels alone, draw-then-send (as MicroPython does), draw while the previous strip is on the wire, and the theoretical wire time |
+| `HM window hz= w= h= n= frame_us= us_per_window= ns_per_px=` | partial redraw: one screen sent as `n` tiles of `w` x `h`, each its own window; the cost of a window and of a pixel |
+| `HM run hz= target= fps= p50_us= p95_us= max_us= sd_us= miss= work_us=` | 3 s of HOT frames paced to `target` fps (0 = as fast as possible; the locks are 10, 20 and 30, which divide every zone period, plus 40 and 60 at 40 MHz for the ceiling): frame-interval percentiles, misses, CPU per frame |
+| `HM run_imu_task` / `HM run_imu_inline` + `HM imu where= rate= full= fifo_max= read_ms_per_s=` | 30 fps for 5 s with the BMA423 at 800 Hz, drained by a task on the other core, then from the render loop as MicroPython does |
+| `HM error what=` | a step that could not run (for example `spi_clock`) |
+| `HM done` | the benchmark finished |

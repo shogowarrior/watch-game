@@ -2,7 +2,7 @@
 #pragma once
 #include <stdint.h>
 
-namespace sf {
+namespace hm {
 
 using ticks_t = uint32_t;
 
@@ -13,4 +13,4 @@ inline ticks_t ticks_add(ticks_t t, int32_t d) { return t + (uint32_t)d; }
 inline int64_t floordiv(int64_t a, int64_t b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
 inline int64_t floormod(int64_t a, int64_t b) { return a - floordiv(a, b) * b; }
 
-}  // namespace sf
+}  // namespace hm

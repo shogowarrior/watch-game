@@ -56,8 +56,8 @@ SPEC = (
         ("WAVELENGTH_TOL_PX", 1.0, "wavelength == |speed| * period / 1000 within this"),
         ("GLOW_R_MAX_PX", 96.0, None),
         ("CONE_DRAW_MIN_DEG", 12.0, "cone half-angle is clamped to 12..60 for drawing"),
-        ("FPS_CAP_MIN", 12, None),
-        ("FPS_CAP_MAX", 20, None),
+        ("FPS_CAP_MIN", 5, "the slowest frame lock (motion.fps.locks)"),
+        ("FPS_CAP_MAX", 20, "the fastest frame lock (motion.fps.locks)"),
         ("COUNTDOWN_MAX", 99, "2-digit type.display countdown (split 30..0)"),
     )),
     ("Per-screen field extras (ui-spec §6)", (
@@ -91,6 +91,12 @@ SPEC = (
         ("SCAN_PEER_WALK_FAIL_MS", 4000, "> 4 s: no fix, FRIEND MOVED"),
         ("SCAN_HOLD_REPEAT_MS", 3000, "partner HOLD haptic repeat"),
         ("SCAN_HOLD_REPEAT_MAX", 3, None),
+    )),
+    ("Frame lock (ui-spec §4 rule 6; app/pacer.py)", (
+        ("FPS_COST_N", 16, "frame cost = 2nd largest busy ms of the last 16 frames"),
+        ("FPS_MARGIN_PCT", 10, "a faster lock needs cost + 10 % to fit its period"),
+        ("FPS_RAISE_MS", 3000, "... for this long before the lock rises one step"),
+        ("FPS_LOG_MS", 10000, "serial fps line period (main.py)"),
     )),
     ("Pairing, found, battery, power, input (ui-spec §6, §8)", (
         ("PAIR_SPLIT_S", 30, None),
@@ -562,8 +568,17 @@ def build(tok):
         raise ValueError("tokens.json motion.duration_ms.breathe_pairing != states.PAIRING.glow_breathe_ms")
     if int(du["hue_crossfade"]) != int(use["hue_ramp_crossfade"]["ms"]):
         raise ValueError("tokens.json motion.duration_ms.hue_crossfade != motion.use.hue_ramp_crossfade.ms")
+    locks = tuple(int(x) for x in mo["fps"]["locks"])
+    if list(locks) != sorted(set(locks), reverse=True) or locks[0] != int(mo["fps"]["target"]):
+        raise ValueError("tokens.json motion.fps.locks must fall strictly from motion.fps.target")
+    caps = dict(r[:2] for _, rows in SPEC for r in rows)
+    if (caps["FPS_CAP_MIN"], caps["FPS_CAP_MAX"]) != (locks[-1], locks[0]):
+        raise ValueError("SPEC FPS_CAP_MIN/MAX != the slowest/fastest of motion.fps.locks")
+    if int(tok["states"]["LOW_BATTERY"]["own_le_10pct"]["fps"]) not in locks:
+        raise ValueError("tokens.json states.LOW_BATTERY.own_le_10pct.fps is not a motion.fps.locks rate")
     sec("Motion (motion)", [
         ("FPS_TARGET", int(mo["fps"]["target"]), None),
+        ("FPS_LOCKS", locks, "frame lock rates, fastest first (app/pacer.py)"),
         ("BREATHE_PAIRING_MS", int(du["breathe_pairing"]), "PAIRING seen halo breathing"),
         ("TOAST_MS", int(du["toast_dwell"]), None),
         ("ZONE_CROSSFADE_MS", int(use["zone_param_crossfade"]["ms"]), None),

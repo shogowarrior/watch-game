@@ -6,7 +6,7 @@ Drives the real ui/renderer.py (its field part: ``_step`` then ``_palette``)
 through SEQS, the tools/bench_frame.py fixtures alone and chained, on an
 uneven frame clock (DTS), and prints one FNV-1a hash of palette entries
 0..169 per frame. native/test/test_field.cpp replays the same sequences
-through sf::FieldScene and must reach the same hashes. The renderer needs
+through hm::FieldScene and must reach the same hashes. The renderer needs
 framebuf, so this runs on MicroPython only (tests/test_native.py checks the
 committed file there).
 """

@@ -34,7 +34,7 @@ def run(args=()):
     if shutil.which("g++") is None:
         return 2, "g++ not found"
     with tempfile.TemporaryDirectory() as d:
-        exe = os.path.join(d, "sf_host_tests")
+        exe = os.path.join(d, "hm_host_tests")
         ok, log = build(exe)
         if not ok:
             return 1, log

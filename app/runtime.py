@@ -34,11 +34,14 @@ One ``step(now)`` does, in order:
           shutdown-level one never on USB; until then the game keeps its
           last value, so one sagging reading never alarms, turns the saver
           on or powers the watch off
-  render  at ``params.fps_cap`` (20, saver 15): strips -> ``display.push_strip``.
+  render  on the frame lock (app/pacer.py): the fastest of 20, 10, 8, 7, 6, 5
+          fps at or under ``params.fps_cap`` (20, saver 10) that the loop's
+          measured cost fits; each frame is drawn at its slot time, so motion
+          steps evenly (ui-spec §4 rule 6). Strips -> ``display.push_strip``.
           With the screen off the renderer still runs state-only
           (``display=None``) so heartbeats keep their time grid (ui-spec §7).
-          A frame takes ~40 ms on the watch, so the motor is serviced after
-          every strip (~4 ms) and the frame's haptic events start at the
+          A frame takes ~80 ms on the watch, so the motor is serviced after
+          every strip (~9 ms) and the frame's haptic events start at the
           post-render time (pulses keep their 60 ms ERM floor). The backlight
           follows ``params.backlight`` after each frame, so a woken panel is
           lit only over a fresh frame (§8: no stale frame)
@@ -52,6 +55,16 @@ One ``step(now)`` does, in order:
           The two-watch simulator allocates under 1.5 MB in 10 s per watch
           (fakes included) against 3.7 MB free, and MicroPython collects by
           itself if the heap ever runs out first
+
+With ``fps_log_ms`` (main.py: 10000) the loop prints one line that often:
+
+    fps 9.9 lock 10 miss 0 late 4/18 jit 2.1 max 112 cost 86 gc 1 log 0.6
+
+frames shown per second, the frame lock, slots missed, how late frames started
+after their slot (avg/max ms), the sd and max of the interval between shown
+frames (ms: the frame-time jitter), the lock's frame cost (busy ms between
+frames), collects in the window and how long the previous line took to print
+(ms; under 128 bytes it fits the UART FIFO, so print never waits on the wire).
 
 ``step`` returns the ms until the next deadline; ``run`` sleeps exactly that
 (never longer than ``MAX_SLEEP_MS``) with ``idle``, which ticks the motor
@@ -80,6 +93,7 @@ from finder import gestures as G
 from finder.game import Game
 from finder.haptic_patterns import HapticPlayer
 from finder.link import LinkMonitor, R_BAD, R_DUP
+from app.pacer import FramePacer
 from hal.axp202 import EV_SHORT, EV_LONG
 from hal.bma423 import EV_WRIST_WEAR, FEAT_OK, FEAT_PENDING
 from hal.watchdog import MODE_SOFT, Watchdog
@@ -140,9 +154,12 @@ class Runtime:
     """One watch: owns the Game, renderer, haptic player and loop timing."""
 
     def __init__(self, board, parts=PARTS, clock=None, sleep_ms=None, clock_us=None,
-                 renderer=None, telemetry=None, gc_collect=None, z_sign=None, watchdog_ms=None):
+                 renderer=None, telemetry=None, gc_collect=None, z_sign=None, watchdog_ms=None,
+                 fps_log_ms=None):
         self.board = board
         self.watchdog_ms = watchdog_ms
+        self.fps_log_ms = fps_log_ms
+        self.log_line = print                 # the fps line's sink (tests swap it)
         self.wd = None
         self.parts = parts
         self.clock = clock or ticks_ms
@@ -235,7 +252,12 @@ class Runtime:
         self._fps_t = now
         self._fps_n = 0
         self._t_tick = now
-        self._t_frame = now
+        self.pacer = FramePacer(now)
+        self._busy = 0                        # loop busy ms since the last drawn frame
+        self._gc_ms = 0
+        self._log_t = now
+        self._log_gc = 0                      # collects since the last fps line
+        self._log_us = 0                      # the last fps line's print time
         self._t_input = now
         self._t_batt = now
         self._t_chip = now
@@ -349,6 +371,8 @@ class Runtime:
             self.begin(now)
         if now is None:
             now = self.clock()
+        t0 = now
+        self._gc_ms = 0
         us = self.us
         self.loops += 1
         if self.powered_off:
@@ -372,10 +396,10 @@ class Runtime:
             if self.powered_off:
                 return MAX_SLEEP_MS
             now = self.clock()        # a panel wake blocks ~120 ms (SLPOUT)
-        if ticks_diff(now, self._t_frame) >= 0:
-            self._stage_render(now)
+        if ticks_diff(now, self.pacer.t_next) >= 0:
+            self._stage_render(now, t0)
             a = self._acc(S_RENDER, a)
-            now = self.clock()        # a frame takes ~40 ms on the watch
+            now = self.clock()        # a frame takes ~80 ms on the watch
         if self.radio is not None:
             self._stage_tx(now)
             a = self._acc(S_TX, a)
@@ -390,18 +414,24 @@ class Runtime:
         self._t_input = ticks_add(now, INPUT_MS)
         if ticks_diff(now, self._t_gc) >= GC_PERIOD_MS:
             # slack to the next frame/tick (inputs and beacons can slip a few ms)
-            nx = self._t_frame if ticks_diff(self._t_frame, self._t_tick) < 0 else self._t_tick
+            nx = self.pacer.t_next
+            if ticks_diff(self._t_tick, nx) < 0:
+                nx = self._t_tick
             if (ticks_diff(nx, self.clock()) >= GC_BUDGET_MS
                     or ticks_diff(now, self._t_gc) >= GC_FORCE_MS):
                 self._gc(now)
-        return self._wait(self.clock())
+        if self.fps_log_ms and ticks_diff(now, self._log_t) >= self.fps_log_ms:
+            self._fps_log(now)
+        t = self.clock()
+        self._busy += ticks_diff(t, t0) - self._gc_ms
+        return self._wait(t)
 
     def _wait(self, now):
         nx = self._t_input
         t = self._t_tick
         if ticks_diff(t, nx) < 0:
             nx = t
-        t = self._t_frame
+        t = self.pacer.t_next
         if ticks_diff(t, nx) < 0:
             nx = t
         r = self.radio
@@ -620,8 +650,9 @@ class Runtime:
                 except OSError:
                     self.io_errors[S_LOGIC] += 1
             self.bl_level = 0.0
+            self._busy = 0
             if on:
-                self._t_frame = now      # first frame at once (§8: no intro)
+                self.pacer.restart(now)  # first frame at once (§8: no intro)
         if on and self.renderer is None:
             self._backlight(p.backlight)  # no frames to wait for
 
@@ -656,25 +687,34 @@ class Runtime:
                 except OSError:
                     self.io_errors[S_LOGIC] += 1
 
-    def _stage_render(self, now):
+    def _stage_render(self, now, t0=None):
+        """A frame on the lock's grid: drawn at its slot time (``pacer.begin``),
+        so the animation moves on by whole lock periods; ``t0`` is when this
+        loop pass started (its busy time up to here belongs to this frame)."""
         p = self.params
         if p is None:
             return
-        cap = p.fps_cap or T.FPS_TARGET
-        per = 1000 // cap
-        nx = ticks_add(self._t_frame, per)
-        self._t_frame = nx if ticks_diff(nx, now) > 0 else ticks_add(now, per)
         r = self.renderer
+        d = self._hdisp if (r is not None and self.screen_is_on) else None
+        busy = None
+        if d is not None:                     # state-only frames leave the lock alone
+            pre = 0 if t0 is None else ticks_diff(now, t0)
+            busy = self._busy + pre
+            self._busy = -pre                 # the rest of this pass: the next frame's
+        else:
+            self._busy = 0                    # not a drawn frame's cost: never grows
+        pc = self.pacer
+        slot = pc.begin(now, p.fps_cap or T.FPS_TARGET, busy)
         event = p.haptic if self._fresh else None    # params.haptic plays once
         self._fresh = False
         if r is None:
             self._no_renderer(now, p)
             ev = _NO_EVENTS
         else:
-            d = self._hdisp if self.screen_is_on else None
-            ev = r.frame(p, d, now)
+            ev = r.frame(p, d, slot)
             now = self.clock()        # events start when the frame is out
             if d is not None:
+                pc.shown(now)
                 self._backlight(p.backlight)    # lit only over a fresh frame
                 self.frames += 1
                 self._fps_n += 1
@@ -733,7 +773,10 @@ class Runtime:
 
     def _gc(self, now):
         a = self.us()
+        t = self.clock()
         self.gc_collect()
+        self._gc_ms += ticks_diff(self.clock(), t)    # not frame cost: the lock ignores it
+        self._log_gc += 1
         d = ticks_diff(self.us(), a)
         self._t_gc = now
         self.gc_n += 1
@@ -741,6 +784,22 @@ class Runtime:
         if d > self.gc_max_us:
             self.gc_max_us = d
         self._acc(S_GC, a)
+
+    def _fps_log(self, now):
+        """The serial fps line (module docstring); its own print is timed and
+        shown on the next line. Allocates (formatting): once per fps_log_ms."""
+        pc = self.pacer
+        el = ticks_diff(now, self._log_t)
+        n = pc.frames
+        a = self.us()
+        self.log_line("fps %.1f lock %d miss %d late %d/%d jit %.1f max %d cost %d gc %d log %.1f" % (
+            n * 1000.0 / el if el > 0 else 0.0, pc.fps, pc.missed,
+            pc.late_sum // n if n else 0, pc.late_max, pc.jitter_ms(), pc.iv_max,
+            pc.cost, self._log_gc, self._log_us / 1000.0))
+        self._log_us = ticks_diff(self.us(), a)
+        self._log_t = now
+        self._log_gc = 0
+        pc.window()
 
     # ---- stats ----------------------------------------------------------------------
     def _init_stats(self):

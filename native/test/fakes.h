@@ -1,4 +1,4 @@
-// Host fakes for the sf::hal interfaces: they record traffic and keep a fake
+// Host fakes for the hm::hal interfaces: they record traffic and keep a fake
 // clock that advances as real hardware would (SPI wire time, delays).
 #pragma once
 #include <stdint.h>
@@ -7,17 +7,17 @@
 #include <string>
 #include <vector>
 
-#include "sf/hal.h"
-#include "sf/imu_sampler.h"
+#include "hm/hal.h"
+#include "hm/imu_sampler.h"
 
-namespace sft {
+namespace hmt {
 
-extern std::vector<std::string> log_lines;    // every sf::logf line
+extern std::vector<std::string> log_lines;    // every hm::logf line
 
-struct FakeClock : sf::Clock {
+struct FakeClock : hm::Clock {
   uint64_t t = 1000000;
   uint32_t now_us() override { return (uint32_t)(t += 3); }
-  sf::ticks_t now_ms() override { return (sf::ticks_t)(t / 1000); }
+  hm::ticks_t now_ms() override { return (hm::ticks_t)(t / 1000); }
   void delay_ms(uint32_t ms) override { t += (uint64_t)ms * 1000; }
   void sleep_until_us(uint32_t when) override {
     const int32_t d = (int32_t)(when - (uint32_t)t);
@@ -31,7 +31,7 @@ struct LcdOp {
   size_t pixels;               // pixel count (pixels() calls)
 };
 
-struct FakeLcd : sf::LcdBus {
+struct FakeLcd : hm::LcdBus {
   explicit FakeLcd(FakeClock& c) : clock(c) {}
   FakeClock& clock;
   uint32_t hz = 0;
@@ -53,7 +53,7 @@ struct FakeLcd : sf::LcdBus {
 };
 
 // AXP202 and BMA423 registers; the BMA423 FIFO always holds `fifo` bytes of 1 g on z.
-struct FakeI2c : sf::I2c {
+struct FakeI2c : hm::I2c {
   std::map<int, uint8_t> regs;                  // (addr << 8 | reg) -> value
   std::vector<std::pair<int, uint8_t>> writes;  // (addr << 8 | reg, value)
   int fifo = 96;
@@ -83,10 +83,10 @@ struct FakeI2c : sf::I2c {
   }
 };
 
-struct FakeImuTask : sf::ImuTask {
-  sf::ImuSampler* s = nullptr;
+struct FakeImuTask : hm::ImuTask {
+  hm::ImuSampler* s = nullptr;
   int starts = 0;
-  void start(sf::ImuSampler& sampler, int) override {
+  void start(hm::ImuSampler& sampler, int) override {
     s = &sampler;
     starts++;
     sampler.poll();                             // one poll stands in for the task
@@ -94,4 +94,4 @@ struct FakeImuTask : sf::ImuTask {
   void stop() override { s = nullptr; }
 };
 
-}  // namespace sft
+}  // namespace hmt

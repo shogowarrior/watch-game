@@ -6,7 +6,7 @@ Plain constants only; blocks marked 'ui-spec only' come from ui-spec.md.
 """
 
 TOKENS_VERSION = '0.2.0'
-TOKENS_HASH = 'ec8d2ccc98017164'
+TOKENS_HASH = 'be3fa536ca00da89'
 
 # ---- Zones (thresholds.zones_m): boundary k is between zone k and k+1
 ZONE_FAR = 0
@@ -125,7 +125,7 @@ BUMP_RUN_G = 0.5  # its run: samples above this ...
 BUMP_SPIKE_MS = (0, 10)  # ... one sample up to this wide
 
 # ---- Saver and backlight (states.LOW_BATTERY, power.backlight)
-SAVER_FPS = 15
+SAVER_FPS = 10
 SAVER_PULSE_SCALE = 0.7
 SAVER_V_MAX = 5.0
 SAVER_BACKLIGHT = 0.35
@@ -262,6 +262,7 @@ LABEL_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ~<>+%:-?,/'
 
 # ---- Motion (motion)
 FPS_TARGET = 20
+FPS_LOCKS = (20, 10, 8, 7, 6, 5)  # frame lock rates, fastest first (app/pacer.py)
 BREATHE_PAIRING_MS = 2400  # PAIRING seen halo breathing
 TOAST_MS = 2500
 ZONE_CROSSFADE_MS = 600
@@ -366,8 +367,8 @@ WAVELENGTH_MAX_PX = 140.0
 WAVELENGTH_TOL_PX = 1.0  # wavelength == |speed| * period / 1000 within this
 GLOW_R_MAX_PX = 96.0
 CONE_DRAW_MIN_DEG = 12.0  # cone half-angle is clamped to 12..60 for drawing
-FPS_CAP_MIN = 12
-FPS_CAP_MAX = 20
+FPS_CAP_MIN = 5  # the slowest frame lock (motion.fps.locks)
+FPS_CAP_MAX = 20  # the fastest frame lock (motion.fps.locks)
 COUNTDOWN_MAX = 99  # 2-digit type.display countdown (split 30..0)
 
 # ---- ui-spec only: Per-screen field extras (ui-spec §6)
@@ -401,6 +402,12 @@ SCAN_PEER_WALK_WIDEN_DEG = 15.0
 SCAN_PEER_WALK_FAIL_MS = 4000  # > 4 s: no fix, FRIEND MOVED
 SCAN_HOLD_REPEAT_MS = 3000  # partner HOLD haptic repeat
 SCAN_HOLD_REPEAT_MAX = 3
+
+# ---- ui-spec only: Frame lock (ui-spec §4 rule 6; app/pacer.py)
+FPS_COST_N = 16  # frame cost = 2nd largest busy ms of the last 16 frames
+FPS_MARGIN_PCT = 10  # a faster lock needs cost + 10 % to fit its period
+FPS_RAISE_MS = 3000  # ... for this long before the lock rises one step
+FPS_LOG_MS = 10000  # serial fps line period (main.py)
 
 # ---- ui-spec only: Pairing, found, battery, power, input (ui-spec §6, §8)
 PAIR_SPLIT_S = 30

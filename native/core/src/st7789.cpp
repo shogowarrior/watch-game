@@ -1,8 +1,8 @@
-#include "sf/st7789.h"
+#include "hm/st7789.h"
 
 #include <string.h>
 
-namespace sf {
+namespace hm {
 
 void St7789::init(uint16_t* black, int rows) {
   bus_.command(SWRESET, nullptr, 0);
@@ -45,4 +45,4 @@ void St7789::push_pixels(const uint16_t* px, size_t n) {
   first_ = false;
 }
 
-}  // namespace sf
+}  // namespace hm

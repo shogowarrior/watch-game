@@ -54,7 +54,7 @@ The table in §9 maps each critical and major critique finding to its fix.
 3. **Direction is earned, shows its doubt, and ages.** No arrow appears without a completed scan. The cone half-angle is σ. The arrow is relative to where you faced, never north. σ grows with steps and standing time until the arrow goes hollow and then disappears.
 4. **Show only what the radio knows.** Distance is shown only as bands (`<3`, `~5`, `~10`, `~20`, `~40`, `60+`). Outward bright rings mean packets are arriving. Inward rings, grey rings and silence mean no data. Stale data is always grey and always shows its age.
 5. **Readable in a 1–2 s glance in sun.** There is a sun floor: a bright core or a bright iris rim is always present. Ring crests are at least `prox.4` in FAR. Anything read while walking is 32 px tall. Text never sits on the live field.
-6. **Radial first, calm always.** Proximity effects are palette-only. Outside SCANNING, each frame adds at most 3 polygons and 2 text chips. Motion is time-based and temporally anti-aliased at the real 15–20 fps. There are no full-field flashes. This is the direct fix for the old flickering outline-circle UI.
+6. **Radial first, calm always.** Proximity effects are palette-only. Outside SCANNING, each frame adds at most 3 polygons and 2 text chips. Motion is time-based, locked to an even frame grid (§4 rule 6) and temporally anti-aliased at the real frame rate. There are no full-field flashes. This is the direct fix for the old flickering outline-circle UI.
 7. **Evoke, don't replicate.** Green glow and ripple pulses in an original geometric language: no eye emblem, no Sheikah, Hylian or Zonai script, no Nintendo fonts or chrome. No Nintendo names on screen.
 
 ---
@@ -142,7 +142,7 @@ RenderParams = namedtuple("RenderParams", (
     "heartbeat_every", # int 1..2: play the heartbeat on every Nth ring spawn (FAR = 2)
     "backlight",       # float 0..1
     "sun",             # bool: sun mode (ramp LUT lifted one stop, §8)
-    "fps_cap",         # int 12..20
+    "fps_cap",         # int 5..20: the frame lock is the fastest of 20, 10, 8, 7, 6, 5 at or under it (§4 rule 6)
 ))
 ```
 
@@ -192,7 +192,7 @@ The palette formula stays as in the design system:
 
 `v(i,t) = clamp(0, 7, vignette(i) · (floor + core(i) + glow_amp·e^(−((i−iris_r)/glow_r)²) + pulse_amp·Σ fadein·profile(i − r_k(t))))`, then `color(i) = LUT[ramp][round(v/7·63)]`.
 
-This version adds five rules.
+This version adds six rules.
 
 1. **Continuous intensity drives levels.**
    - `floor = 0.3 + 1.3·I`
@@ -204,6 +204,7 @@ This version adds five rules.
 3. **Temporal anti-aliasing.** `lead_eff = max(lead_px, 1.5·|speed|/fps_measured)`, and profiles are evaluated at fractional `r_k`. In HOT at 20 fps that is 9 px of leading edge, so crests never jump their own width. This fixes the judder and flicker findings.
 4. **Direction.** With `speed_px_s < 0`, rings spawn at r = 168 and are absorbed at the iris edge. Inward rings mean "listening, no data".
 5. **Ghost rings.** An outward ring (`speed_px_s > 0`) spawned with `ring_live = False` contributes `0.6·pulse_amp` to a separate grey channel. `color(i) = LUT.grey[v_ghost]` wherever `v_ghost > v_green`. No haptic fires for a ghost ring. Inward rings are always listening rings in the field's ramp.
+6. **Frame lock.** Frames start on an even time grid, and each is drawn at its slot time, not at the moment the loop gets to it, so every frame moves the rings the same distance. A slot the loop misses is skipped, never drawn late in a burst. The rate is the fastest of 20, 10, 8, 7, 6 and 5 fps (`motion.fps.locks`) at or under `fps_cap` whose period fits the measured frame cost (the second largest of the last 16 frames' busy time; gc pauses excluded). It drops at once when the cost passes the period and rises one step after 3 s in which the cost plus 10 % fitted the faster period. 10 and 20 fps divide every zone period, so ring spawns and their heartbeats land on a frame; 8 keeps WARM and HOT on one; 7–5 only when the watch cannot hold 8. A woken screen restarts the grid at its first frame (§8: no stale frame). `fps_measured` in rule 3 is the lock rate (`app/pacer.py`; the watch prints `fps`, `lock`, missed slots, lateness and frame-time jitter over serial every 10 s).
 
 The `burst` ring has amplitude 7 and speed 2× the zone speed, with the same lead rule. It is a travelling ring, not a flash.
 
@@ -553,7 +554,7 @@ A wide beam is the uncertainty, drawn at the pointer itself (this fixes RUNEWELL
 | Level | Visual | Behaviour | Haptic |
 |---|---|---|---|
 | 20 % | Toast (warn) `BATTERY 20%`. The StatusStrip own-battery icon turns `status.warn` and stays pinned. Partner gets toast `FRIEND BATT 20%` | — | `BATT` once |
-| 10 % | **Once**, a 2.5 s interstitial: iris r 64 with a battery glyph (64×32 rounded rect x 88–152, y 104–136, 3 px `status.warn` outline, nub x 152–158 y 114–126, fill proportional). Bottom word `SAVER ON`. The own-battery icon turns `status.critical` (pinned) | Saver: fps 15, backlight 0.35, pulse_amp ×0.7, v ≤ 5, beacons 5 Hz. Heartbeats continue | `BATT` |
+| 10 % | **Once**, a 2.5 s interstitial: iris r 64 with a battery glyph (64×32 rounded rect x 88–152, y 104–136, 3 px `status.warn` outline, nub x 152–158 y 114–126, fill proportional). Bottom word `SAVER ON`. The own-battery icon turns `status.critical` (pinned) | Saver: fps 10, backlight 0.35, pulse_amp ×0.7, v ≤ 5, beacons 5 Hz. Heartbeats continue | `BATT` |
 | 5 % | Toast (critical) `BATTERY 5%` once | Screen only on wrist raise, a press, or FOUND (its 10 s event wake, §8; the other event wakes are skipped), off 3 s after lowering; haptics carry the game | `BATT` |
 | 3 % | Word `BYE` for 2 s; one inward ring at −120 px/s closes into C (not built: outside the §3 speed range) | Goodbye beacon ×3, then AXP202 power-off. Power-off follows 1 s after the `BYE` word even if the goodbye beacons could not be sent. The MENU and a running scan close, and input is ignored until power-off (a press still wakes the screen). Partner shows `FRIEND IS OFF` | `NOPE` |
 
@@ -661,7 +662,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 | Arrow decay too fast or double-counted (RUNEWELL) | 0.7°/step, time term only while still, turn error, warmer pauses growth |
 | Scan estimator smeared or fragile; pivot steps stall it; no cancel (RUNEWELL, PINPOINT) | Raw per-packet RSSI + peer_rssi, harmonic fit, 20° floor, fault only on sustained walking, cancel with any input |
 | Calibration at 0–10 cm (all three) | Calibrate at 1 m, clamped ±6 dB; gates relative to p₁ₘ |
-| Ring judder or aliasing at the real fps (RUNEWELL, BLIP HUNT) | `lead_eff ≥ 1.5·v/fps`, sub-pixel profiles, HOT spacing 60 px, 20 fps target |
+| Ring judder or aliasing at the real fps (RUNEWELL, BLIP HUNT) | `lead_eff ≥ 1.5·v/fps`, sub-pixel profiles, HOT spacing 60 px, 20 fps target, frames on an even grid drawn at their slot time (§4 rule 6) |
 | Zone words vs trend words (RUNEWELL) | No zone words on screen |
 | Too many layers; the numeral is the hero (RUNEWELL, BLIP HUNT) | One primary element per mode; readout in `text.secondary`; StatusStrip transient |
 | 8×16 text read while moving (RUNEWELL) | New `type.word` 16×32 for anything read in motion |
@@ -672,7 +673,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 | Modal on every glance at low battery (PINPOINT) | 10 % interstitial shown once |
 | Glyph clashes: pause-like "steady", mirrored chevrons (PINPOINT) | No steady glyph; colder chevrons are hollow, blue and move down |
 | Weak simulator radio model (PINPOINT, BLIP HUNT) | The simulator uses `sim/radio.py` and shows a truth overlay |
-| Frame budget assumes PSRAM or 80 MHz (BLIP HUNT) | 20 fps target, 15 floor; strip rendering (10 × 240×24) to bound heap and GC pauses, even on the SPIRAM build; the ring map is palette-blitted into each strip from one quadrant, mirrored, top to bottom, and each strip is sent before the next is drawn (a send thread measured no faster on the watch: drawing holds the GIL it needs) |
+| Frame budget assumes PSRAM or 80 MHz (BLIP HUNT) | 20 fps target, locked to the fastest rate the watch holds (20, 10, 8, 7, 6, 5; §4 rule 6); strip rendering (10 × 240×24) to bound heap and GC pauses, even on the SPIRAM build; the ring map is palette-blitted into each strip from one quadrant, mirrored, top to bottom, and each strip is sent before the next is drawn (a send thread measured no faster on the watch: drawing holds the GIL it needs) |
 | Trend thresholds below correlated noise (BLIP HUNT) | Gated by `trend_conf`, ≥ 3 dB over 8 s, 2 evaluations and a 5 s flip limit. The < 5 % false-verdict target on tangential walks is not met yet (§5.5) |
 | Scan assumes a perfect turn; partner not asked to stop (BLIP HUNT) | 20° pacing floor, turn error, `HOLD` pattern + peer_motion check |
 | Motor trips the shake guard (BLIP HUNT) | 150 ms blanking |
@@ -689,7 +690,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 - **Typography:** new `type.word` (16×32 uppercase).
 - **Layout:** new `layout.top_slot` and `layout.core_dot`. Seeker iris set to 44.
 - **Motion:**
-  - fps target 20 (minimum 15).
+  - fps target 20, frame locks 20, 10, 8, 7, 6, 5 (`motion.fps.locks`).
   - Sweep 30°/s.
   - New rule `motion.temporal_aa`.
 - **Field:**

@@ -5,7 +5,7 @@
 #pragma once
 #include <stdint.h>
 
-namespace sf {
+namespace hm {
 namespace T {
 
 constexpr float ARROW_ANGLE_DEADBAND_DEG = 4.0f;
@@ -134,7 +134,12 @@ constexpr int32_t FOUND_PERIOD_MS = 1200;
 constexpr int32_t FOUND_TIME_MAX_S = 5999;
 constexpr int32_t FOUND_WORD_MSS_MAX_S = 599;
 constexpr int32_t FPS_CAP_MAX = 20;
-constexpr int32_t FPS_CAP_MIN = 12;
+constexpr int32_t FPS_CAP_MIN = 5;
+constexpr int32_t FPS_COST_N = 16;
+constexpr int32_t FPS_LOCKS[6] = {20, 10, 8, 7, 6, 5};
+constexpr int32_t FPS_LOG_MS = 10000;
+constexpr int32_t FPS_MARGIN_PCT = 10;
+constexpr int32_t FPS_RAISE_MS = 3000;
 constexpr int32_t FPS_TARGET = 20;
 constexpr float GHOST_AMP_SCALE = 0.6f;
 constexpr float GLOW_AMP_A = 2.0f;
@@ -247,7 +252,7 @@ constexpr int32_t RELINK_WINDOW_MS = 2000;
 constexpr int32_t RUNE_CENTERS_X[3] = {64, 120, 176};
 constexpr int32_t RUNE_STROKE = 6;
 constexpr float SAVER_BACKLIGHT = 0.35f;
-constexpr int32_t SAVER_FPS = 15;
+constexpr int32_t SAVER_FPS = 10;
 constexpr float SAVER_PULSE_SCALE = 0.7f;
 constexpr float SAVER_V_MAX = 5.0f;
 constexpr int32_t SCAN_ABORT_PAUSE_MS = 6000;
@@ -311,7 +316,7 @@ constexpr int32_t TOAST_IN_MS = 200;
 constexpr int32_t TOAST_IN_PX = 12;
 constexpr int32_t TOAST_MS = 2500;
 constexpr int32_t TOAST_OUT_MS = 150;
-constexpr const char TOKENS_HASH[] = "ec8d2ccc98017164";
+constexpr const char TOKENS_HASH[] = "be3fa536ca00da89";
 constexpr const char TOKENS_VERSION[] = "0.2.0";
 constexpr int32_t TOP_SLOT[4] = {12, 12, 216, 24};
 constexpr int32_t TOUCH_BURST_COUNT = 3;
@@ -360,4 +365,4 @@ constexpr int32_t ZONE_TRAIL_PX[4] = {22, 20, 18, 14};
 constexpr int32_t ZONE_WARM = 2;
 
 }  // namespace T
-}  // namespace sf
+}  // namespace hm
