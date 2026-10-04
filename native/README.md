@@ -49,7 +49,7 @@ python3 native/tools/capture.py $PORT logs/bench-idf-A.log --seconds 150
 ```
 
 `capture.py` restarts the watch through the USB serial reset line, so the log
-starts at boot, and stops at `SF done` (about 70 s). Only Python's standard
+starts at boot, and stops at `SF done` (about 80 s). Only Python's standard
 library is needed. Close any serial monitor first. After `SF done` the watch
 keeps showing the HOT field at 20, 30 and 60 fps in turn, 10 s each, for
 judging smoothness by eye.
@@ -66,7 +66,8 @@ One line per measurement, `SF <step> key=value ...`:
 | `SF hello variant= framework=` | which build is running |
 | `SF compose fixture= step_us= blit_us=` | CPU per frame: field state and palette, then the 10 strip blits |
 | `SF push hz= wire_us= serial_us= overlap_us= floor_us=` | per frame at one SPI clock: pixels alone, draw-then-send (as MicroPython does), draw while the previous strip is on the wire, and the theoretical wire time |
-| `SF run hz= target= fps= p50_us= p95_us= max_us= sd_us= miss= work_us=` | 3 s of HOT frames paced to `target` fps (0 = as fast as possible): frame-interval percentiles, misses, CPU per frame |
+| `SF window hz= w= h= n= frame_us= us_per_window= ns_per_px=` | partial redraw: one screen sent as `n` tiles of `w` x `h`, each its own window; the cost of a window and of a pixel |
+| `SF run hz= target= fps= p50_us= p95_us= max_us= sd_us= miss= work_us=` | 3 s of HOT frames paced to `target` fps (0 = as fast as possible; the locks are 10, 20 and 30, which divide every zone period, plus 40 and 60 at 40 MHz for the ceiling): frame-interval percentiles, misses, CPU per frame |
 | `SF run_imu_task` / `SF run_imu_inline` + `SF imu where= rate= full= fifo_max= read_ms_per_s=` | 30 fps for 5 s with the BMA423 at 800 Hz, drained by a task on the other core, then from the render loop as MicroPython does |
 | `SF error what=` | a step that could not run (for example `spi_clock`) |
 | `SF done` | the benchmark finished |

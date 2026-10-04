@@ -13,8 +13,12 @@ const FieldParams& HOT = BENCH_FIXTURES[1];
 constexpr uint32_t FRAME_BYTES = FIELD_W * FIELD_W * 2;
 constexpr uint32_t SEG_US = 3000000;                     // one timed run
 
-const int LOCKED_40[] = {15, 20, 24, 30, 40, 50, 60};
-const int LOCKED_OTHER[] = {20, 30, 60};
+// 10, 20 and 30 divide every zone period and the 200 ms scan blink
+// (/mnt/project-files/themes/fps-targets.md); 40 and 60 show the ceiling.
+const int LOCKED_40[] = {10, 20, 30, 40, 60};
+const int LOCKED_OTHER[] = {10, 20, 30};
+// Partial redraw: window sizes, from one strip down to an 8 px block.
+const uint8_t WINDOWS[][2] = {{240, 24}, {120, 120}, {60, 60}, {30, 30}, {8, 8}};
 
 }  // namespace
 
@@ -106,6 +110,33 @@ void Bench::push(uint32_t hz) {
   pause();
 }
 
+void Bench::windows(uint32_t hz) {
+  // Partial redraw cost: a full screen sent as tiles of each size, 5 times over.
+  // Each tile is its own window (CASET, RASET, RAMWR); big ones go in strip-sized chunks.
+  if (!clock(hz)) return;
+  const size_t chunk = (size_t)FIELD_W * SH;
+  const int reps = 5;
+  for (const auto& sz : WINDOWS) {
+    const int w = sz[0], h = sz[1], per_row = FIELD_W / w, n = per_row * (FIELD_W / h);
+    const uint32_t t0 = h_.clock.now_us();
+    for (int r = 0; r < reps; r++) {
+      for (int i = 0; i < n; i++) {
+        panel_.begin_window(i % per_row * w, i / per_row * h, w, h);
+        for (size_t left = (size_t)w * h, k = 0; left; k++) {
+          const size_t c = left < chunk ? left : chunk;
+          panel_.push_pixels(strips[k & 1], c);
+          left -= c;
+        }
+      }
+    }
+    panel_.end_frame();
+    const uint32_t us = (h_.clock.now_us() - t0) / reps;
+    logf("SF window hz=%u w=%d h=%d n=%d frame_us=%u us_per_window=%u ns_per_px=%u", (unsigned)hz, w, h, n,
+         (unsigned)us, (unsigned)(us / n), (unsigned)((uint64_t)us * 1000 / (FIELD_W * FIELD_W)));
+    pause();
+  }
+}
+
 void Bench::loop(Run& r, const FieldParams& p, int target, uint32_t dur_us, ImuSampler* inline_imu) {
   // Frames paced to target fps (0 = as fast as possible) for dur_us; a frame that
   // overruns its slot is a miss and the schedule restarts from now.
@@ -182,6 +213,7 @@ void Bench::imu() {
 void Bench::run() {
   compose();
   for (uint32_t hz : CLOCKS) push(hz);
+  for (uint32_t hz : CLOCKS) windows(hz);
   for (uint32_t hz : CLOCKS) {
     if (!clock(hz)) continue;
     loop(run_, HOT, 0, SEG_US, nullptr);

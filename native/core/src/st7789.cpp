@@ -35,13 +35,13 @@ void St7789::window(int x0, int y0, int x1, int y1) {
   bus_.command(RASET, r, 4);
 }
 
-void St7789::begin_frame() {
-  window(0, 0, W - 1, H - 1);
+void St7789::begin_window(int x, int y, int w, int h) {
+  window(x, y, x + w - 1, y + h - 1);
   first_ = true;
 }
 
-void St7789::push_strip(const uint16_t* px, int rows) {
-  bus_.pixels(first_ ? RAMWR : RAMWRC, px, (size_t)W * rows);
+void St7789::push_pixels(const uint16_t* px, size_t n) {
+  bus_.pixels(first_ ? RAMWR : RAMWRC, px, n);
   first_ = false;
 }
 

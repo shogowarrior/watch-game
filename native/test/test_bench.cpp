@@ -59,6 +59,23 @@ TEST(test_st7789_init_matches_hal) {
   CHECK(strip[5] == 0);
 }
 
+TEST(test_st7789_window_takes_pixels_in_chunks) {
+  sft::FakeClock clock;
+  sft::FakeLcd lcd(clock);
+  lcd.set_clock(40000000);
+  sf::St7789 panel(lcd, clock);
+  static uint16_t px[900];
+  panel.begin_window(30, 60, 30, 30);
+  panel.push_pixels(px, 500);
+  panel.push_pixels(px + 500, 400);
+  const auto& o = lcd.ops;
+  CHECK(o.size() == 4);
+  CHECK(o[0].cmd == 0x2A && o[0].data == std::vector<uint8_t>({0, 30, 0, 59}));
+  CHECK(o[1].cmd == 0x2B && o[1].data == std::vector<uint8_t>({0, 140, 0, 169}));   // GRAM rows 80..
+  CHECK(o[2].cmd == 0x2C && o[2].pixels == 500);
+  CHECK(o[3].cmd == 0x3C && o[3].pixels == 400);
+}
+
 TEST(test_axp202_turns_ldo2_on_and_keeps_dcdc3) {
   sft::FakeI2c i2c;
   i2c.regs[0x35 << 8 | 0x12] = 0x00;            // even if DCDC3 read back clear
@@ -110,14 +127,19 @@ TEST(test_bench_runs_every_step) {
   CHECK(sft::log_lines.back() == "SF done");
   CHECK(count_prefix("SF compose ") == 3);
   CHECK(count_prefix("SF push ") == 2);
-  CHECK(count_prefix("SF run hz=40000000 target=") == 1 + 7);
+  CHECK(count_prefix("SF window ") == 2 * 5);
+  CHECK(count_prefix("SF run hz=40000000 target=") == 1 + 5);
   CHECK(count_prefix("SF run hz=26666667 target=") == 1 + 3);
-  CHECK(count_prefix("SF error what=spi_clock hz=80000000") == 1 + 1 + 1);
+  CHECK(count_prefix("SF error what=spi_clock hz=80000000") == 1 + 1 + 1 + 1);
   CHECK(count_prefix("SF imu ") == 2 && imu.starts == 1);
-  // 30 fps at 40 MHz fits: about 30 frames a second and no misses
-  for (const std::string& l : sft::log_lines)
-    if (l.compare(0, 31, "SF run hz=40000000 target=30 fp") == 0) {
+  for (const std::string& l : sft::log_lines) {
+    if (l.compare(0, 9, "SF window") == 0)                       // each tiling covers the screen
+      CHECK(l.find(" n=10 ") != std::string::npos || l.find(" n=4 ") != std::string::npos ||
+            l.find(" n=16 ") != std::string::npos || l.find(" n=64 ") != std::string::npos ||
+            l.find(" n=900 ") != std::string::npos);
+    if (l.compare(0, 31, "SF run hz=40000000 target=30 fp") == 0) {   // fits: ~30 fps, no misses
       CHECK(l.find("fps=29.") != std::string::npos || l.find("fps=30.") != std::string::npos);
       CHECK(l.find("miss=0") != std::string::npos);
     }
+  }
 }
