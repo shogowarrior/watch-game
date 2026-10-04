@@ -1,17 +1,17 @@
 // Display and motion-sensor benchmark shared by every native runtime, so the
 // Arduino and ESP-IDF builds run the same steps and print the same lines
-// ("SF <step> key=value ...", parsed by native/tools/bench_report.py).
+// ("HM <step> key=value ...", parsed by native/tools/bench_report.py).
 #pragma once
 #include <stdint.h>
 
-#include "sf/bench_scene.h"
-#include "sf/bma423.h"
-#include "sf/hal.h"
-#include "sf/imu_sampler.h"
-#include "sf/st7789.h"
-#include "sf/stats.h"
+#include "hm/bench_scene.h"
+#include "hm/bma423.h"
+#include "hm/hal.h"
+#include "hm/imu_sampler.h"
+#include "hm/st7789.h"
+#include "hm/stats.h"
 
-namespace sf {
+namespace hm {
 
 struct BenchHost {
   const char* variant;      // e.g. "arduino-lovyangfx"
@@ -30,8 +30,8 @@ class Bench {
 
   explicit Bench(BenchHost& h);
   bool setup();               // power, panel, ring map; false (logged) if the hardware is missing
-  void run();                 // every measurement, then "SF done"
-  // Show the HOT field at target fps for seconds s (0 = unlocked); logs one "SF show" line.
+  void run();                 // every measurement, then "HM done"
+  // Show the HOT field at target fps for seconds s (0 = unlocked); logs one "HM show" line.
   void show(uint32_t hz, int target, int s);
 
  private:
@@ -60,4 +60,4 @@ class Bench {
   Run run_;
 };
 
-}  // namespace sf
+}  // namespace hm

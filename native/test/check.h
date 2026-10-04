@@ -2,7 +2,7 @@
 #pragma once
 #include <stdio.h>
 
-namespace sft {
+namespace hmt {
 
 struct Test {
   const char* name;
@@ -17,18 +17,18 @@ struct Reg {
   Reg(const char* name, void (*fn)()) : t{name, fn, tests} { tests = &t; }
 };
 
-}  // namespace sft
+}  // namespace hmt
 
 #define TEST(name)                                  \
   static void name();                               \
-  static sft::Reg name##_reg(#name, name);          \
+  static hmt::Reg name##_reg(#name, name);          \
   static void name()
 
 #define CHECK(cond)                                                       \
   do {                                                                    \
     if (!(cond)) {                                                        \
       printf("  %s:%d: CHECK(%s) failed\n", __FILE__, __LINE__, #cond);   \
-      sft::failures++;                                                    \
+      hmt::failures++;                                                    \
       return;                                                             \
     }                                                                     \
   } while (0)

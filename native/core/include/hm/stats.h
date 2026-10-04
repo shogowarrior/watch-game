@@ -2,7 +2,7 @@
 #pragma once
 #include <stdint.h>
 
-namespace sf {
+namespace hm {
 
 class Stats {
  public:
@@ -25,4 +25,4 @@ class Stats {
   uint64_t total_ = 0;
 };
 
-}  // namespace sf
+}  // namespace hm

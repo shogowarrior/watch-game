@@ -3,9 +3,9 @@
 #pragma once
 #include <stdint.h>
 
-#include "sf/hal.h"
+#include "hm/hal.h"
 
-namespace sf {
+namespace hm {
 namespace axp202 {
 
 constexpr uint8_t ADDR = 0x35;
@@ -18,4 +18,4 @@ constexpr uint8_t BIT_LDO2 = 0x04;       // panel and backlight on the V1
 bool panel_power_on(I2c& i2c);
 
 }  // namespace axp202
-}  // namespace sf
+}  // namespace hm

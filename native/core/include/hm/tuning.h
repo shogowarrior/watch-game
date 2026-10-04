@@ -5,7 +5,7 @@
 #pragma once
 #include <stdint.h>
 
-namespace sf {
+namespace hm {
 namespace T {
 
 constexpr float ARROW_ANGLE_DEADBAND_DEG = 4.0f;
@@ -347,4 +347,4 @@ constexpr int32_t ZONE_TRAIL_PX[4] = {22, 20, 18, 14};
 constexpr int32_t ZONE_WARM = 2;
 
 }  // namespace T
-}  // namespace sf
+}  // namespace hm

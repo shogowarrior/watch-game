@@ -1,4 +1,4 @@
-#include "sf/esp32.h"
+#include "hm/esp32.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -7,9 +7,9 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "sf/tuning.h"
+#include "hm/tuning.h"
 
-namespace sf {
+namespace hm {
 
 void logf(const char* fmt, ...) {
   char buf[256];
@@ -47,8 +47,8 @@ void CoreImuTask::start(ImuSampler& s, int poll_ms) {
   poll_ms_ = poll_ms;
   run_ = true;
   done_ = false;
-  if (xTaskCreatePinnedToCore(body, "sf_imu", 4096, this, 10, nullptr, 0) != pdPASS) {
-    logf("SF error what=imu_task");
+  if (xTaskCreatePinnedToCore(body, "hm_imu", 4096, this, 10, nullptr, 0) != pdPASS) {
+    logf("HM error what=imu_task");
     run_ = false;
     done_ = true;
   }
@@ -98,4 +98,4 @@ void backlight(bool on) {
 }
 
 }  // namespace esp
-}  // namespace sf
+}  // namespace hm

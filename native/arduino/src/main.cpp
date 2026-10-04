@@ -1,18 +1,18 @@
 // Display and motion-sensor benchmark on Arduino-ESP32 with LovyanGFX's SPI bus
-// (DMA). Steps and log lines are the shared ones in native/core (sf::Bench).
+// (DMA). Steps and log lines are the shared ones in native/core (hm::Bench).
 #include <Arduino.h>
 #include <Wire.h>
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 #include <esp_arduino_version.h>
 
-#include "sf/bench.h"
-#include "sf/esp32.h"
+#include "hm/bench.h"
+#include "hm/esp32.h"
 
 namespace {
 
 // I2C0 (AXP202, BMA423) through Wire; reads stay within Wire's 128-byte buffer.
-struct WireI2c : sf::I2c {
+struct WireI2c : hm::I2c {
   bool write(uint8_t addr, uint8_t reg, const uint8_t* d, size_t n) override {
     Wire.beginTransmission(addr);
     Wire.write(reg);
@@ -30,7 +30,7 @@ struct WireI2c : sf::I2c {
 };
 
 // The panel is the bus's only device, so CS stays low and one transaction stays open.
-class LgfxBus : public sf::LcdBus {
+class LgfxBus : public hm::LcdBus {
  public:
   bool begin(uint32_t hz) {
     auto c = bus_.config();
@@ -73,12 +73,12 @@ class LgfxBus : public sf::LcdBus {
 };
 
 char framework[80];
-sf::esp::EspClock clock_;
+hm::esp::EspClock clock_;
 WireI2c i2c0;
 LgfxBus lcd;
-sf::esp::CoreImuTask imu;
-sf::BenchHost host{"arduino-lovyangfx", framework, clock_, lcd, i2c0, imu, sf::esp::backlight};
-sf::Bench bench(host);
+hm::esp::CoreImuTask imu;
+hm::BenchHost host{"arduino-lovyangfx", framework, clock_, lcd, i2c0, imu, hm::esp::backlight};
+hm::Bench bench(host);
 bool ready = false;
 
 }  // namespace
@@ -98,14 +98,14 @@ void setup() {
         wire_done = true;
         vTaskDelete(nullptr);
       },
-      "sf_wire", 4096, nullptr, 5, nullptr, 0);
+      "hm_wire", 4096, nullptr, 5, nullptr, 0);
   while (!wire_done) delay(1);
   if (!wire_ok) {
-    sf::logf("SF error what=i2c_bus");
+    hm::logf("HM error what=i2c_bus");
     return;
   }
-  if (!lcd.begin(sf::Bench::CLOCKS[0])) {
-    sf::logf("SF error what=spi_bus");
+  if (!lcd.begin(hm::Bench::CLOCKS[0])) {
+    hm::logf("HM error what=spi_bus");
     return;
   }
   ready = bench.setup();
@@ -120,5 +120,5 @@ void loop() {
     delay(1000);
     return;
   }
-  bench.show(sf::Bench::CLOCKS[1], targets[i++ % 3], 10);
+  bench.show(hm::Bench::CLOCKS[1], targets[i++ % 3], 10);
 }

@@ -1,5 +1,5 @@
 {
-  "name": "sf-esp32",
+  "name": "homing-esp32",
   "version": "0.1.0",
   "description": "Homing ESP32 clock, log, backlight and IMU task (Arduino and ESP-IDF)",
   "frameworks": ["arduino", "espidf"],
