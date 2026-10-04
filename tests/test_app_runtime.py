@@ -2188,6 +2188,99 @@ class CostDisplay(SlowDisplay):
         self.pushes += 1
 
 
+class BeatRenderer(StubRenderer):
+    """Rings spawn every ``period`` ms from ``t0``, each with a TICK heartbeat;
+    with ``announce`` it also says when the next one spawns (``hb_next_t``,
+    ``hb_next``) and when the returned one did (``hb_t0``), as ui.renderer
+    does. ``period`` may change between frames (a new tempo re-times it)."""
+
+    def __init__(self, period, t0, announce=True):
+        StubRenderer.__init__(self)
+        self.period = period
+        self.next = t0
+        self.announce = announce
+        if announce:
+            self.hb_next_t = t0
+            self.hb_next = "TICK"
+            self.hb_t0 = None
+
+    def frame(self, p, display=None, now=0):
+        hb = ()
+        if self.next is not None and now - self.next >= 0:
+            if self.announce:
+                self.hb_t0 = self.next
+            self.next += self.period
+            hb = ["TICK"]
+        if self.announce:
+            self.hb_next_t = self.next
+        if display is not None:
+            for k in range(5):
+                display.service()
+            for k in range(4):
+                display.push_strip(k * 60, 60, self.buf)
+        return hb
+
+
+def _beat_watch(clock, renderer, costs=(11,)):
+    from app.runtime import Runtime
+    rt = Runtime(Board(display=CostDisplay(clock, costs), imu=FakeIMU(clock),
+                       haptics=RecMotor(clock)),
+                 parts=("display", "imu", "haptics"), clock=clock, sleep_ms=clock.sleep,
+                 renderer=renderer, gc_collect=lambda: None)
+    return rt
+
+
+def _beat_starts(rt):
+    return [t for t, on in rt.motor.log if on]
+
+
+def test_heartbeats_land_on_their_spawns_below_10_fps():
+    """Frames of ~108 ms hold only 8 fps (125 ms), and FAR/NEAR ring periods
+    (2400, 1600) are not whole frames at 8 fps. A beat the renderer announces
+    is handed to the player at its spawn time, so it starts on its ring (at
+    most one band late while a frame is drawing) and only once; without the
+    announcement it starts when the frame that spawned it is out."""
+    fakes.install()
+    grid = [1037 + 1600 * k for k in range(7)]
+    clock = Clock(0)
+    rt = _beat_watch(clock, BeatRenderer(1600, grid[0]))
+    rt.run(max_ms=11500)
+    assert rt.pacer.fps == 8, rt.pacer.fps
+    starts = _beat_starts(rt)
+    assert len(starts) == len(grid), (starts, grid)
+    band = 11 * 60 // 24
+    for t, g in zip(starts, grid):
+        assert 0 <= t - g <= band, (starts, grid)
+    assert any(t == g for t, g in zip(starts, grid)), starts    # due while idle: exact
+    clock = Clock(0)
+    rt = _beat_watch(clock, BeatRenderer(1600, grid[0], announce=False))
+    rt.run(max_ms=11500)
+    late = [t - g for t, g in zip(_beat_starts(rt), grid)]
+    assert len(late) == len(grid) and min(late) >= 4 * band, late   # a whole frame late
+
+
+def test_announced_beat_follows_a_moved_spawn():
+    """The announcement is re-read every frame: a spawn that moves later
+    drops the beat handed over for the old time, and the new time plays."""
+    fakes.install()
+    clock = Clock(0)
+    r = BeatRenderer(1600, 1037)
+    rt = _beat_watch(clock, r)
+    rt.run(max_ms=950)
+    assert rt.player.beat_due == 1037 and not rt.player.active
+    r.next = 1337                            # a new tempo re-times the next spawn
+    rt.run(max_ms=1000)
+    starts = _beat_starts(rt)
+    assert 1037 not in starts and len(starts) == 1, starts
+    assert 0 <= starts[0] - 1337 <= 11 * 60 // 24, starts
+    r.next = None                            # MENU: no ring schedule
+    r.hb_next_t = None
+    rt.player.heartbeat("TICK", clock.now + 100)
+    rt._hb_at = clock.now + 100
+    rt.run(max_ms=500)
+    assert len(_beat_starts(rt)) == 1, rt.motor.log
+
+
 def _paced_watch(clock, display, **kw):
     from app.runtime import Runtime
     rt = Runtime(Board(display=display, imu=FakeIMU(clock), haptics=RecMotor(clock)),

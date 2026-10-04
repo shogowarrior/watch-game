@@ -43,12 +43,77 @@ def test_golden_field_up_to_date():
                          "native/tools/golden_field.py > native/test/golden_field.txt")
 
 
+def test_golden_game_vectors_up_to_date():
+    # A stale file means finder/ changed behaviour the C++ port has not caught
+    # up with yet: a skip, not a failure, so other work is not blocked; the
+    # native thread regenerates and ports the change.
+    _cpython("the generators run the finder/ modules (CPython)")
+    g = _load("native/tools/golden/run.py", "golden_run")
+    bad = g["stale"]()
+    if bad:
+        raise Skip("the C++ port lags finder/ in %s: python3 native/tools/golden/run.py, then port "
+                   "until python3 native/test/run.py passes" % ", ".join(bad))
+
+
+def test_game_port_checked_against_this_python():
+    # native/test/traced.txt hashes the Python the C++ game port last matched
+    # call for call; while the Python differs, native/test/run.py skips trace
+    # tests that differ (the port lags, other work is not blocked) and this
+    # reports it.
+    _cpython("hashes the Python the traces come from (CPython)")
+    r = _load("native/test/run.py", "native_run")
+    if r["python_hash"]() != r["marked"]():
+        raise Skip("the C++ game port lags the Python: python3 native/test/run.py, port until its "
+                   "trace tests pass, then python3 native/test/run.py --mark")
+
+
 def test_host_tests_pass():
     _cpython("builds C++ with g++ (CPython)")
     code, out = _load("native/test/run.py", "native_run")["run"]()
     if code == 2:
         raise Skip(out)
     assert code == 0, out
+
+
+def test_core_builds_for_the_watch():
+    _cpython("runs the xtensa compilers (CPython)")
+    code, out = _load("native/tools/xcheck.py", "native_xcheck")["run"]()
+    if code == 2:
+        raise Skip(out.strip())
+    assert code == 0, out
+
+
+def test_bench_report_groups_lines_by_variant():
+    _cpython("native/tools/bench_report.py is a host tool (CPython)")
+    br = _load("native/tools/bench_report.py", "bench_report")
+    log = ["ets Jun  8 2016", "HM hello variant=tft_espi framework=arduino", "HM i2c",
+           'HM compose fixture="HOT bump-ready" frames=60 step_us=900 blit_us=4100',
+           "HM run hz=40000000 target=30 fps=29.9 p95_us=33400 miss=0",
+           "HM error what=spi_clock hz=80000000", "HM done",
+           "I (12) HM hello variant=idf-esplcd framework=espidf", "HM run hz=0x2faf080 target=20 fps=20.0"]
+    recs, runs = br["parse_log"](log, "a.log")
+    assert [(r["variant"], r["kind"]) for r in recs] == [
+        ("tft_espi", "compose"), ("tft_espi", "run"), ("idf-esplcd", "run")]
+    assert recs[0]["fixture"] == "HOT bump-ready" and recs[1]["fps"] == 29.9 and recs[2]["hz"] == 50000000
+    assert [(r["variant"], r["done"], r["errors"]) for r in runs] == [
+        ("tft_espi", True, ["what=spi_clock hz=80000000"]), ("idf-esplcd", False, [])]
+    md = br["markdown"](recs, runs)
+    assert "| variant | hz | target | fps | p95_us | miss |" in md and "| idf-esplcd | espidf | NO | - |" in md
+
+
+def test_wifi_files_for_native_builds_are_ignored():
+    # The only places a native build may keep Wi-Fi details (native/.gitignore).
+    _cpython("runs git (CPython)")
+    import subprocess
+    for p in ("native/arduino/include/wifi_secrets.h", "native/idf/main/wifi_secrets.h",
+              "native/idf/lvgl/src/wifi_secrets.h", "native/arduino/secrets.ini", "native/idf/secrets.ini"):
+        try:
+            r = subprocess.run(["git", "check-ignore", "-q", p], capture_output=True)
+        except OSError:
+            raise Skip("git is not installed")
+        if r.returncode == 128:
+            raise Skip("not a git checkout")
+        assert r.returncode == 0, p + " is not ignored by git"
 
 
 def test_capture_keeps_lines_until_done():

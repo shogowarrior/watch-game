@@ -2,9 +2,9 @@
 // library (bench_env.h). Steps and log lines are the shared ones in native/core (hm::Bench).
 #include <Arduino.h>
 #include <Wire.h>
-#include <esp_arduino_version.h>
 
 #include "bench_env.h"
+#include "framework.h"
 #include "hm/esp32.h"
 
 namespace {
@@ -45,8 +45,7 @@ hm::Bench& bench() {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  snprintf(framework, sizeof framework, "arduino-esp32_%d.%d.%d_idf_%s_%s", ESP_ARDUINO_VERSION_MAJOR,
-           ESP_ARDUINO_VERSION_MINOR, ESP_ARDUINO_VERSION_PATCH, esp_get_idf_version(), bench_env().library);
+  framework_name(framework, sizeof framework, bench_env().library);
   // Install the I2C driver from core 0 so its interrupt runs beside the sensor
   // task, not the renderer (as the ESP-IDF build does).
   static volatile bool wire_ok = false, wire_done = false;
