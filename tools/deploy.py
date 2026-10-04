@@ -7,10 +7,11 @@
     python3 tools/deploy.py --app              # remove /noapp again
     python3 tools/deploy.py --tele A           # field test: log to /log/<n>_A.jsonl
     python3 tools/deploy.py --no-tele          # stop logging (remove /tele)
-    python3 tools/deploy.py --debug A          # debug mode: watch A shows up on this laptop
-    python3 tools/deploy.py --debug B --debug-host 192.168.1.23   # ... at this address
+    python3 tools/deploy.py --debug A          # debug mode: watch A shows up on this laptop (USB)
+    python3 tools/deploy.py --debug A --wifi   # ... over Wi-Fi (run tools/wifi_setup.py first)
+    python3 tools/deploy.py --debug B --wifi --debug-host 192.168.1.23   # ... to this address
     python3 tools/deploy.py --no-debug         # debug mode off (removes /debug, secrets.py)
-    python3 tools/deploy.py --secrets          # ALSO copy secrets.py (Wi-Fi name and password)
+    python3 tools/deploy.py --secrets          # ALSO copy the Wi-Fi name and password
 
 Copies app/, finder/, hal/, ui/, bma423conf.bin (optional, BMA423
 feature-engine blob) and then boot.py and main.py into the watch root
@@ -26,18 +27,24 @@ game starts on USB with the stoppable watchdog (app/runtime.py). The copy
 then runs in ONE mpremote session and ends with another hard reset, so
 main.py starts the game (or stops at /noapp; mpremote's soft-reset would
 leave the watch at the raw REPL). Normal play is ESP-NOW only and never joins
-a Wi-Fi network, so secrets.py is NOT copied unless ``--debug`` (or
-``--secrets``) is given. Needs ``pip install mpremote``.
+a Wi-Fi network, so the Wi-Fi name and password are NOT copied unless
+``--wifi`` (or ``--secrets``) is given. Needs ``pip install mpremote``.
 
-Debug mode (docs/design/debug-mode.md): ``--debug A`` copies secrets.py
-(the Wi-Fi name and password, from secrets.example.py) and writes /debug
-(``{"dev": "A", "host": <this laptop's address>, "port": 47268}``); on boot
-the watch joins that Wi-Fi and sends what it does to
-``tools/debug_server.py`` on this laptop. The address is found by asking the
-OS which one it would use to reach another network (no packet is sent);
-``--debug-host`` sets it instead. Without one the watch broadcasts to the
-whole Wi-Fi network, which is less reliable. Both watches must use the same
-Wi-Fi. ``--no-debug`` removes /debug and secrets.py from the watch.
+Debug mode (docs/design/debug-mode.md): ``--debug A`` writes /debug
+(``{"dev": "A", "link": "usb"}``) and copies nothing secret; on boot the
+watch writes what it does on its USB serial port, which
+``tools/debug_server.py --serial`` on this laptop reads. ``--debug A
+--wifi`` writes the Wi-Fi /debug (``{"dev": "A", "link": "wifi", "host":
+<this laptop's address>, "port": 47268}``) and copies the Wi-Fi file to the
+watch as secrets.py: the one ``tools/wifi_setup.py`` saved outside the
+repo, else an older secrets.py in the repo root (with a hint to move it).
+On boot the watch joins that Wi-Fi and sends what it does to the laptop.
+The address is found by asking the OS which one it would use to reach
+another network (no packet is sent); ``--debug-host`` sets it instead.
+Without one the watch broadcasts to the whole Wi-Fi network, which is less
+reliable. Both watches must use the same Wi-Fi. ``--no-debug`` removes
+/debug and secrets.py from the watch. The Wi-Fi file's contents are never
+printed.
 """
 
 import argparse
@@ -54,19 +61,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 from hal.debuglink import DEBUG_PORT  # noqa: E402  (after the path fix: run as a script)
+from tools import wifi_setup  # noqa: E402
 
 FILES = ("boot.py", "main.py")
 DIRS = ("app", "finder", "hal", "ui")
 OPTIONAL = ("bma423conf.bin",)
-SECRETS = "secrets.py"           # Wi-Fi credentials: copied only with --debug or --secrets
+SECRETS = "secrets.py"           # the Wi-Fi file on the watch: copied only with --wifi or --secrets
 EXTS = (".py", ".json", ".bin")
 RESET_WAIT_S = 3                 # safe-boot window (1 s) + Board init; with /debug the watch may still be joining the Wi-Fi, which mpremote's Ctrl-C stops safely
 
 
-def collect(root=ROOT, secrets=False, debug=False):
-    """-> (dirs to create, [(local, remote)], notes). ``secrets`` also
-    copies secrets.py (with a warning note); so does ``debug`` (debug mode
-    needs it)."""
+def collect(root=ROOT, wifi=None, debug=False):
+    """-> (dirs to create, [(local, remote)], notes). ``wifi``: the Wi-Fi
+    file to copy as secrets.py, with a warning note unless ``debug`` mode
+    needs it."""
     dirs, files, notes = [], [], []
     for d in DIRS:
         top = os.path.join(root, d)
@@ -86,19 +94,13 @@ def collect(root=ROOT, secrets=False, debug=False):
             files.append((p, f))
         else:
             notes.append("optional %s not found, skipped" % f)
-    p = os.path.join(root, SECRETS)
-    if secrets or debug:
-        if not os.path.isfile(p):
-            notes.append("%s not found, not copied" % SECRETS)
-        elif debug:
-            files.append((p, SECRETS))
-            notes.append("copying %s: debug mode joins the Wi-Fi with it" % SECRETS)
+    if wifi:
+        files.append((wifi, SECRETS))
+        if debug:
+            notes.append("copying %s as %s: debug mode joins the Wi-Fi with it" % (wifi, SECRETS))
         else:
-            files.append((p, SECRETS))
-            notes.append("WARNING: copying %s (WiFi credentials) to the watch; "
-                         "only debug mode (--debug) needs it" % SECRETS)
-    elif os.path.isfile(p):
-        notes.append("%s NOT copied (--debug copies it)" % SECRETS)
+            notes.append("WARNING: copying %s (the Wi-Fi name and password) to the watch as %s; "
+                         "only debug mode over Wi-Fi (--debug A --wifi) needs it" % (wifi, SECRETS))
     for f in FILES:                   # last: an interrupted copy keeps the old ones
         p = os.path.join(root, f)
         if os.path.isfile(p):
@@ -130,12 +132,15 @@ def _write_code(path, text):
     return "f=open(%r,'w')\nf.write(%r)\nf.close()" % (path, text)
 
 
-def debug_config(dev, host, port=DEBUG_PORT):
-    """The /debug file's contents (hal/debuglink.read_config reads it); no
-    ``host`` makes the watch broadcast."""
-    d = {"dev": dev, "port": port}
-    if host:
-        d["host"] = host
+def debug_config(dev, wifi=False, host=None, port=DEBUG_PORT):
+    """The /debug file's contents (hal/debuglink.read_config reads it): the
+    USB link, or with ``wifi`` the Wi-Fi link to ``host:port`` (no ``host``
+    makes the watch broadcast)."""
+    d = {"dev": dev, "link": "wifi" if wifi else "usb"}
+    if wifi:
+        if host:
+            d["host"] = host
+        d["port"] = port
     return json.dumps(d)
 
 
@@ -190,6 +195,27 @@ def is_ipv4(s):
     return True
 
 
+def wifi_file(root, need):
+    """The Wi-Fi file to copy as secrets.py -> (path or None, error line or
+    None); with ``need`` (--wifi) having none is an error. The file must be
+    one the watch can read; its values are never printed."""
+    path, hint = wifi_setup.find_wifi(root)
+    if path is None:
+        if need:
+            return None, ("--wifi needs your Wi-Fi name and password: run %s first"
+                          % wifi_setup.SETUP)
+        print("note: no Wi-Fi name and password to copy (%s saves them)" % wifi_setup.SETUP)
+        return None, None
+    if hint:
+        print("note:", hint)
+    try:
+        wifi_setup.read_wifi(path)
+    except ValueError as e:
+        return None, ("cannot use the Wi-Fi file %s: %s. Run %s to save it again."
+                      % (path, e, wifi_setup.SETUP))
+    return path, None
+
+
 def find_mpremote():
     exe = shutil.which("mpremote")
     return [exe] if exe else [sys.executable, "-m", "mpremote"]
@@ -209,40 +235,51 @@ def main(argv=None):
     ap.add_argument("--no-reset", action="store_true",
                     help="no hard reset after the copy (the one before it still runs)")
     ap.add_argument("--secrets", action="store_true",
-                    help="also copy secrets.py (WiFi credentials; only debug mode needs it)")
+                    help="also copy the Wi-Fi name and password (only --debug A --wifi needs them)")
     d = ap.add_mutually_exclusive_group()
     d.add_argument("--debug", metavar="DEV", choices=("A", "B"),
-                   help="debug mode: the watch joins the Wi-Fi in secrets.py and sends what it "
-                        "does to tools/debug_server.py on this laptop; DEV (A or B) is its "
-                        "name on the page")
+                   help="debug mode: the watch sends what it does to tools/debug_server.py on "
+                        "this laptop over the USB cable (--wifi: over Wi-Fi); DEV (A or B) is "
+                        "its name on the page")
     d.add_argument("--no-debug", action="store_true",
                    help="debug mode off: remove /debug and secrets.py from the watch")
+    ap.add_argument("--wifi", action="store_true",
+                    help="with --debug: send over Wi-Fi, and copy the Wi-Fi name and password "
+                         "saved by tools/wifi_setup.py to the watch")
     ap.add_argument("--debug-host", metavar="IP",
-                    help="with --debug: this laptop's address (default: found automatically)")
+                    help="with --wifi: this laptop's address (default: found automatically)")
     a = ap.parse_args(argv)
 
-    if a.debug_host and not a.debug:
-        ap.error("--debug-host needs --debug")
+    if a.wifi and not a.debug:
+        ap.error("--wifi needs --debug A or --debug B")
+    if a.debug_host and not a.wifi:
+        ap.error("--debug-host needs --wifi (the USB link has no address)")
     if a.no_debug and a.secrets:
         ap.error("--no-debug removes secrets.py: do not pass --secrets with it")
+    host = (a.debug_host or lan_ip()) if a.wifi else None
+    if host and not is_ipv4(host):
+        ap.error("--debug-host must be an address like 192.168.1.23, not a name")
+    wifi = None
+    if a.wifi or a.secrets:
+        wifi, err = wifi_file(ROOT, a.wifi)
+        if err:
+            print(err)
+            return 2
     debug = False if a.no_debug else None
     if a.debug:
-        if not os.path.isfile(os.path.join(ROOT, SECRETS)):
-            print("--debug needs %s: copy secrets.example.py to %s and put your Wi-Fi "
-                  "name and password in it" % (SECRETS, SECRETS))
-            return 2
-        host = a.debug_host or lan_ip()
-        if host and not is_ipv4(host):
-            ap.error("--debug-host must be an address like 192.168.1.23, not a name")
-        debug = debug_config(a.debug, host)
-        if host:
-            print("debug mode: watch %s will send to %s:%d" % (a.debug, host, DEBUG_PORT))
+        debug = debug_config(a.debug, a.wifi, host)
+        if not a.wifi:
+            print("debug mode: watch %s will send over the USB cable "
+                  "(python3 tools/debug_server.py --serial reads it)" % a.debug)
+        elif host:
+            print("debug mode: watch %s will send over Wi-Fi to %s:%d"
+                  % (a.debug, host, DEBUG_PORT))
         else:
             print("debug mode: could not find this laptop's address, so watch %s will "
                   "broadcast to the whole Wi-Fi (less reliable; --debug-host IP fixes it)"
                   % a.debug)
 
-    dirs, files, notes = collect(ROOT, a.secrets, bool(a.debug))
+    dirs, files, notes = collect(ROOT, wifi, a.wifi)
     for n in notes:
         print("note:", n)
     total = sum(os.path.getsize(p) for p, _ in files)

@@ -1,18 +1,26 @@
 """Wi-Fi credentials never reach git (docs/design/debug-mode.md decision 6).
 
-If a local secrets.py exists, its string values are read with ``ast`` (never
-run, never printed) and no file git would commit (tracked, or new and not
-ignored) may contain one; a failure names the variable and the file only.
+The Wi-Fi name and password are read from every Wi-Fi file there is (the one
+tools/wifi_setup.py saved, and an older secrets.py in the repo) with its
+shared reader (never run, never printed), and no file git would commit
+(tracked, or new and not ignored) may contain one; a failure names the
+variable and the files only. Without a Wi-Fi file the check skips, so it
+also runs on a made-up one (test_guard_checks_every_wifi_file).
 secrets.py, webrepl_cfg.py and logs/ must be ignored. Needs git and
 subprocess: skipped under MicroPython and outside a git checkout."""
 
-import os
-
 from tests import Skip
 
-SECRETS = "secrets.py"
 TEMPLATE = "secrets.example.py"
 MIN_LEN = 6                # shorter strings would match ordinary words
+
+
+def _wifi_setup():
+    try:
+        from tools import wifi_setup as w      # CPython host tool only
+    except ImportError:
+        raise Skip("tools/wifi_setup.py is a CPython host tool")
+    return w
 
 
 def _git(*args):
@@ -30,31 +38,12 @@ def _git(*args):
     return r
 
 
-def _strings(path):
-    """[(name, value)]: every string in each top-level assignment of ``path``."""
-    import ast
-    with open(path, encoding="utf-8") as f:
-        tree = ast.parse(f.read(), path)
-    out = []
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets = [node.target]
-        else:
-            continue
-        name = ",".join(t.id for t in targets if isinstance(t, ast.Name)) or "?"
-        for n in ast.walk(node.value):
-            if isinstance(n, ast.Constant) and isinstance(n.value, str):
-                out.append((name, n.value))
-    return out
-
-
-def _secret_values(path, template=None):
-    """[(name, value)] worth guarding in ``path``: long enough, and not one of
-    the template's placeholders."""
-    skip = set(v for _, v in _strings(template)) if template and os.path.isfile(template) else set()
-    return [(n, v) for n, v in _strings(path) if len(v) >= MIN_LEN and v not in skip]
+def _secret_values(w, path, template):
+    """[(name, value)] worth guarding in the Wi-Fi file ``path``: long
+    enough, and not one of the template's placeholders."""
+    skip = set(w.read_wifi(template))
+    values = zip(w.NAMES, w.read_wifi(path))
+    return [(n, v) for n, v in values if len(v) >= MIN_LEN and v not in skip]
 
 
 def _leaks(secrets, paths):
@@ -80,39 +69,84 @@ def _committable():
 
 
 def test_no_secret_in_committable_files():
-    if not os.path.isfile(SECRETS):
-        raise Skip("no local secrets.py")
+    w = _wifi_setup()
+    wifi = w.wifi_files(w.ROOT)
+    if not wifi:
+        raise Skip("no Wi-Fi file (tools/wifi_setup.py saves one)")
     files = _committable()
-    secrets = _secret_values(SECRETS, TEMPLATE)
-    if not secrets:
-        raise Skip("secrets.py holds no value to guard")
-    leaks = _leaks(secrets, files)
-    assert not leaks, "a value from secrets.py is in a file git would commit: " + \
-        "; ".join("%s in %s" % x for x in leaks)
+    for path in wifi:
+        try:
+            secrets = _secret_values(w, path, TEMPLATE)
+        except ValueError as e:
+            raise AssertionError("cannot check %s: %s" % (path, e))
+        leaks = _leaks(secrets, files)
+        assert not leaks, "a value from %s is in a file git would commit: %s" % (
+            path, "; ".join("%s in %s" % x for x in leaks))
 
 
 def test_secret_files_and_logs_are_ignored():
-    for p in (SECRETS, "webrepl_cfg.py", "logs/debug-20260101-120000.jsonl"):
+    for p in ("secrets.py", "webrepl_cfg.py", "logs/debug-20260101-120000.jsonl"):
         assert _git("check-ignore", "-q", p).returncode == 0, p + " is not ignored by git"
 
 
 def test_guard_finds_a_planted_value():
-    try:
-        import tempfile
-    except ImportError:
-        raise Skip("needs tempfile (CPython)")
+    w = _wifi_setup()
+    import os
+    import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         def put(name, text):
             p = os.path.join(tmp, name)
-            with open(p, "w") as f:
+            with open(p, "w", encoding="utf-8") as f:
                 f.write(text)
             return p
-        tpl = put("example.py", 'WIFI_SSID = "your-ssid"\nWIFI_PASSWORD = "your-password"\n')
-        fake = put("secrets.py", '"""Doc."""\nWIFI_SSID = "FakeNet-42"\nWIFI_PASSWORD = "your-password"\n'
-                   'EXTRA: list = [("Cafe-Guest", "not-a-real-pass-7")]\nN = 3\nSHORT = "abc"\n')
-        found = _secret_values(fake, tpl)
-        assert sorted(found) == [("EXTRA", "Cafe-Guest"), ("EXTRA", "not-a-real-pass-7"),
-                                 ("WIFI_SSID", "FakeNet-42")], [n for n, _ in found]
-        clean = put("clean.md", "Join your-password Wi-Fi with FakeNet-4 (not the same)\n")
+        # the template's placeholder password is not guarded
+        fake = put("wifi.py", 'WIFI_SSID = "FakeNet-42"\nWIFI_PASSWORD = "your-password"\n')
+        assert _secret_values(w, fake, TEMPLATE) == [("WIFI_SSID", "FakeNet-42")]
+        # nor is a name too short to tell from ordinary words
+        fake = put("wifi.py", 'WIFI_SSID = "Cafe"\nWIFI_PASSWORD = "not-a-real-pass-7"\n')
+        found = _secret_values(w, fake, TEMPLATE)
+        assert found == [("WIFI_PASSWORD", "not-a-real-pass-7")], [n for n, _ in found]
+        clean = put("clean.md", "Join your-password Wi-Fi at the Cafe with not-a-real-pass\n")
         leaky = put("notes.ipynb", '{"out": "connected, pw=not-a-real-pass-7"}')
-        assert _leaks(found, [clean, leaky, os.path.join(tmp, "gone.py")]) == [("EXTRA", leaky)]
+        gone = os.path.join(tmp, "gone.py")
+        assert _leaks(found, [clean, leaky, gone]) == [("WIFI_PASSWORD", leaky)]
+
+
+def _guard_fails():
+    """The AssertionError message of test_no_secret_in_committable_files, or None."""
+    try:
+        test_no_secret_in_committable_files()
+    except AssertionError as e:
+        return str(e)
+    return None
+
+
+def test_guard_checks_every_wifi_file():
+    w = _wifi_setup()
+    import os
+    import tempfile
+    g = globals()
+    pw = "made-up-" + str(os.getpid()) + "-pw"      # built at run time: in no committed file
+    old_env, old_files = os.environ.get(w.ENV), g["_committable"]
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = os.path.join(tmp, "wifi.py")
+        w.save(fake, "MadeUpNet-" + str(os.getpid()), pw)
+        os.environ[w.ENV] = fake
+        try:
+            assert _guard_fails() is None                # nothing committed holds them
+            leaky = os.path.join(tmp, "notes.md")
+            with open(leaky, "w") as f:
+                f.write("pw=" + pw)
+            g["_committable"] = lambda: [leaky]
+            msg = _guard_fails()
+            assert msg and "WIFI_PASSWORD" in msg and pw not in msg, "guard missed it"
+            with open(fake, "w") as f:
+                f.write("WIFI_PASSWORD = " + repr(pw) + " +\n")
+            msg = _guard_fails()
+            assert msg and "cannot check" in msg and pw not in msg, "unreadable file passed"
+        finally:
+            g["_committable"] = old_files
+            if old_env is None:
+                os.environ.pop(w.ENV, None)
+            else:
+                os.environ[w.ENV] = old_env
