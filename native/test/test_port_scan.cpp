@@ -40,11 +40,14 @@ static void sample_state(const scan::ScanSession& o, State& s) {
   s("src", last.jsrc);
 }
 
-static scan::Phase phase_of(const std::string& s) {
-  for (int p = scan::READY; p <= scan::RESULT; p++)
-    if (s == scan::name((scan::Phase)p)) return (scan::Phase)p;
-  throw Mismatch("not a scan phase: " + s);
-}
+// A test's calls of private methods.
+namespace hm {
+namespace scan {
+struct Probe {
+  static void start_sweep(ScanSession& o, ticks_t t) { o.start_sweep_(t); }
+};
+}  // namespace scan
+}  // namespace hm
 
 TEST(trace_scan_session) {
   Port<scan::ScanSession> p;
@@ -68,6 +71,7 @@ TEST(trace_scan_session) {
       return J(std::vector<Json>{J(sw->wedge_deg), Jarr(sw->bins, scan::BINS), J(sw->active_bin), J(sw->paused)});
     }
     if (m == "done") return J(o.done(tick(a[0])));
+    if (m == "_start_sweep") return scan::Probe::start_sweep(o, tick(a[0])), J();
     unported(m);
   };
   p.state = [](const scan::ScanSession& o, State& s) {
@@ -103,18 +107,6 @@ TEST(trace_scan_session) {
     const std::optional<scan::Result> r = o.result();
     s("result", r ? J(std::vector<Json>{J(r->theta_deg), J(r->s0_deg)}) : J());
     s("active_bin", J(o.active_bin()));
-  };
-  // test_scan starts sweeps by calling the private _start_sweep
-  p.set = [](scan::ScanSession& o, const std::string& f, const Json& v) {
-    if (f == "phase") return o.phase = phase_of(v.str()), true;
-    if (f == "t_sweep") return o.t_sweep = opt_tick(v), true;
-    if (f == "countdown") return o.countdown = opt_i32(v), true;
-    if (f == "active_ms") return o.active_ms = (int32_t)v.in(), true;
-    if (f == "pause_ms") return o.pause_ms = (int32_t)v.in(), true;
-    if (f == "steps") return o.steps = (int32_t)v.in(), true;
-    if (f == "peer_walk_ms") return o.peer_walk_ms = (int32_t)v.in(), true;
-    if (f == "wedge_deg") return o.wedge_deg = v.num(), true;
-    return false;
   };
   CHECK_REPLAY(p);
 }

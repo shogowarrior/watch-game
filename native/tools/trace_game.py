@@ -15,7 +15,8 @@ OUTDIR/<module>.<Class>.jsonl:
 
 Arguments are bound to the signature and defaults are filled in, so every call
 lists every parameter in order. Only a method's outermost call on an object is
-recorded (one it makes on itself runs inside it). A function passed to a traced
+recorded (one it makes on itself runs inside it), a private one too (a test
+that calls it). A function passed to a traced
 object is recorded each time the object calls it, before the line of the call
 it happened in, so a replay can answer it. A "set" line comes before a call
 when the object's state changed since its previous line: other code wrote its
@@ -147,6 +148,7 @@ _PLAIN = frozenset((type(None), bool, int, float, str))
 _class_names = {}   # type -> its public slots and properties
 _names = {}         # (type, instance attribute names) -> public names, sorted
 _traced = set()     # the TRACED classes
+_reading = 0        # > 0 while _items reads an object's attributes
 _sigs = {}          # function -> its signature
 _ROUTINES = (types.FunctionType, types.MethodType, types.BuiltinFunctionType, types.BuiltinMethodType)
 
@@ -173,12 +175,17 @@ def _items(obj):
                    or t not in _traced and not callable(a) and not isinstance(a, (staticmethod, classmethod))]
                 if not k.startswith("_"))
         names = _names[key] = sorted(fixed.union(k for k in key[1] if not k.startswith("_")))
+    global _reading
     out = []
-    for k in names:
-        try:
-            out.append((k, getattr(obj, k)))
-        except Exception:  # noqa: BLE001
-            pass
+    _reading += 1   # a property that calls a method is no call to record
+    try:
+        for k in names:
+            try:
+                out.append((k, getattr(obj, k)))
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        _reading -= 1
     return out
 
 
@@ -265,7 +272,7 @@ def _wrap(cls_key, name, fn):
     @functools.wraps(fn)
     def method(self, *args, **kw):
         k = id(self)
-        if _depth.get(k, 0) or k not in _ids:
+        if _reading or _depth.get(k, 0) or k not in _ids:
             return fn(self, *args, **kw)
         written = _changed(self)
         if written:   # deep, so a replay can rebuild an object put in an attribute
@@ -295,7 +302,7 @@ def install(outdir):
         for attr, fn in inspect.getmembers(cls, inspect.isfunction):   # inherited ones too
             if attr == "__init__":
                 w[attr] = (fn, _wrap_init(key, fn), _wrap_id(key, fn))
-            elif not attr.startswith("_"):
+            elif not attr.startswith("__"):   # a test's call of a private method too
                 w[attr] = (fn, _wrap(key, attr, fn), fn)
         _wrappers[key] = (cls, w)
 
@@ -328,9 +335,9 @@ TESTS = (
     ("test_haptics", ("finder.haptic_patterns.BlankWindow", "finder.haptic_patterns.HapticPlayer")),
     ("test_proximity", None), ("test_scan", None),
     ("test_arrow", ("finder.arrow.Arrow",)),
-    ("test_episode", ("finder.arrow.Arrow",)),    # real scan values: float order
+    ("test_episode", ("finder.arrow.Arrow", "finder.game.Game")),   # real estimates, scans and arrows
     ("test_game", ("finder.pairing.Pairing", "finder.pairing.Calibrator", "finder.session.MotionSnap",
-                   "finder.session.PeerView", "finder.session.LiveMirror")),
+                   "finder.session.PeerView", "finder.session.LiveMirror", "finder.game.Game")),
 )
 
 

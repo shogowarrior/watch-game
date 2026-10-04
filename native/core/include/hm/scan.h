@@ -229,6 +229,8 @@ class ScanSession {
   double next_tick_;
   bool peer_walk_;
   haptic_patterns::Haptic haptic_;
+
+  friend struct Probe;   // the trace test: a Python test's call of a private method
 };
 
 }  // namespace scan
