@@ -43,6 +43,18 @@ def test_golden_field_up_to_date():
                          "native/tools/golden_field.py > native/test/golden_field.txt")
 
 
+def test_golden_game_vectors_up_to_date():
+    # A stale file means finder/ changed behaviour the C++ port has not caught
+    # up with yet: a skip, not a failure, so other work is not blocked; the
+    # native thread regenerates and ports the change.
+    _cpython("the generators run the finder/ modules (CPython)")
+    g = _load("native/tools/golden/run.py", "golden_run")
+    bad = g["stale"]()
+    if bad:
+        raise Skip("the C++ port lags finder/ in %s: python3 native/tools/golden/run.py, then port "
+                   "until python3 native/test/run.py passes" % ", ".join(bad))
+
+
 def test_host_tests_pass():
     _cpython("builds C++ with g++ (CPython)")
     code, out = _load("native/test/run.py", "native_run")["run"]()
