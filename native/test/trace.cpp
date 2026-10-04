@@ -379,10 +379,20 @@ Json Jbytes(const uint8_t* p, size_t n) {
   return j;
 }
 
+Json Jarray(char typecode, const void* data, size_t n, size_t item) {
+  uint32_t crc = 0xFFFFFFFF;   // zlib's CRC-32
+  const uint8_t* p = (const uint8_t*)data;
+  for (size_t k = 0; k < n * item; k++) {
+    crc ^= p[k];
+    for (int b = 0; b < 8; b++) crc = crc >> 1 ^ (0xEDB88320 & -(crc & 1));
+  }
+  return Jobj(nullptr, {{"t", J(std::string(1, typecode))}, {"n", J(n)}, {"crc", J(crc ^ 0xFFFFFFFF)}});
+}
+
 Json Jobj(const char* cls, std::vector<std::pair<std::string, Json>> fields) {
   Json j;
   j.k = Json::OBJ;
-  j.o.emplace_back("@", J(cls));
+  if (cls) j.o.emplace_back("@", J(cls));
   for (auto& f : fields) j.o.push_back(std::move(f));
   return j;
 }
