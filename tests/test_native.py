@@ -63,6 +63,14 @@ def test_host_tests_pass():
     assert code == 0, out
 
 
+def test_core_builds_for_the_watch():
+    _cpython("runs the xtensa compilers (CPython)")
+    code, out = _load("native/tools/xcheck.py", "native_xcheck")["run"]()
+    if code == 2:
+        raise Skip(out.strip())
+    assert code == 0, out
+
+
 def test_capture_keeps_lines_until_done():
     # native/tools/capture.py on a pseudo-terminal: every line kept, CRs dropped,
     # partial lines held until their newline, stop at the --until text.
