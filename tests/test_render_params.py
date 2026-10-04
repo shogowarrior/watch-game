@@ -3,7 +3,7 @@ import json
 from finder import tuning as T
 from finder.render_params import (
     FIELDS, RenderParams, DEFAULTS, make_params, replace, validate, to_dict, from_dict,
-    arrow_style, wavelength,
+    arrow_style, wavelength, BUMP_ICONS_MAX, _W_BUMP,
 )
 
 # ui-spec §3 example: WARM, locked arrow, getting warmer.
@@ -12,7 +12,7 @@ SPEC_EXAMPLE = (
     ' "intensity": 0.55, "speed_px_s": 80, "pulse_period_ms": 1000, "wavelength_px": 80,'
     ' "glow_r_px": 42, "ring_live": true, "burst": false,'
     ' "glyph": "arrow", "arrow_deg": 0, "cone_deg": 31, "arrow_style": "solid_b",'
-    ' "trend": 1, "trend_strong": false, "countdown": null, "runes": null,'
+    ' "trend": 1, "trend_strong": false, "countdown": null, "runes": null, "bump_icons": null,'
     ' "dist_band": "~10", "dist_stale": false, "word": null, "top_text": null, "banner": null,'
     ' "status": [64, 71, 4, false, false], "menu_rows": null, "sweep": null,'
     ' "haptic": null, "heartbeat": "DOUBLE", "heartbeat_every": 1, "backlight": 0.6,'
@@ -38,7 +38,7 @@ def _has(viol, field):
 
 
 def test_fields_and_namedtuple():
-    assert len(FIELDS) == 34 and len(set(FIELDS)) == 34
+    assert len(FIELDS) == 35 and len(set(FIELDS)) == 35
     assert set(DEFAULTS) == set(FIELDS)
     rp = make_params()
     assert isinstance(rp, tuple) and len(rp) == len(FIELDS)
@@ -139,15 +139,15 @@ def test_valid_other_screens():
     rp = make_params(screen="LINK_LOST", zone=1, ramp=ll[0], intensity=0.3,
                      speed_px_s=ll[2], pulse_period_ms=ll[3], glow_r_px=ll[4],
                      glyph="seeker", dist_band="~20", dist_stale=True,
-                     top_text="LAST ~20M", banner=("LOST 0:12", "warn", True))
+                     top_text="LAST ~20M", banner=("SIGNAL LOST", "warn", True))
     assert validate(rp) == [], validate(rp)
     pl = T.FIELD_PAIRING_LOOKING
     rp = make_params(screen="PAIRING", sub="looking", ramp=pl[0], intensity=pl[1],
                      speed_px_s=pl[2], pulse_period_ms=pl[3], glow_r_px=pl[4],
-                     glyph="glow", top_text="PAIR", word="LOOKING")
+                     glyph="glow", top_text="START OTHER WATCH", word="LOOKING")
     assert validate(rp) == [], validate(rp)
     rp = make_params(screen="PAIRING", sub="seen", ramp="green", speed_px_s=0.0,
-                     glyph="runes", runes=(0, 7, 3), top_text="SAME RUNES?", word="TAP = YES")
+                     glyph="runes", runes=(0, 7, 3), top_text="SAME RUNES?", word="BUMP = YES")
     assert validate(rp) == [], validate(rp)
     rp = make_params(screen="PAIRING", sub="split", ramp="green", glyph="countdown",
                      countdown=30, speed_px_s=40.0, pulse_period_ms=2400,
@@ -165,19 +165,84 @@ def test_valid_other_screens():
 
 
 def test_spec_copy_fits_font_and_length():
-    words = ("LOOKING", "TAP = YES", "WAITING", "HOLD STILL", "SPLIT UP", "GO", "SEARCHING",
-             "WALK ABOUT", "BUMP!", "FOUND", "TAP=AGAIN", "TURN RIGHT", "TURN LEFT",
-             "4 O'CLOCK", "12 O'CLOCK", "AHEAD", "BEHIND", "WALK", "SAVER ON", "BYE")
-    labels = ("PAIR", "SAME RUNES?", "STAND 1 STEP APART", "NO PEEKING", "TAP TO SCAN",
-              "LOOK AROUND", "TAP WATCHES", "TIME 12:48", "HOLD AT CHEST", "HOLD FLAT",
+    words = ("LOOKING", "BUMP = YES", "YOU'RE IN", "HOLD STILL", "SPLIT UP", "GO", "SEARCHING",
+             "WALK ABOUT", "BUMP!", "FOUND", "FOUND 1:48", "FOUND 9:59", "FOUND12:48",
+             "FOUND 1H+", "TURN RIGHT", "TURN LEFT",
+             "4 O'CLOCK", "12 O'CLOCK", "AHEAD", "BEHIND", "WALK", "SAVER ON", "BYE",
+             "PAIR UP", "GET CLOSER")
+    labels = ("START OTHER WATCH", "WAITING FOR FRIEND", "SAME RUNES?", "STAND 1 STEP APART",
+              "NO PEEKING", "FIND YOUR FRIEND", "FASTER IS CLOSER", "TAP TO SCAN",
+              "LOOK UP", "BUMP WRISTS", "FRIEND NOT READY", "ONLY YOU FELT IT",
+              "FRIEND FELT IT", "TIME 12:48", "TIME 99:59",
+              "BUTTON: PLAY AGAIN", "HOLD AT CHEST", "HOLD FLAT",
               "FRIEND SCANNING", "TAP TO RESCAN", "WRONG WAY? RESCAN", "LAST ~20M",
-              "CAL SKIPPED", "FRIEND BATT 20%")
+              "CAL SKIPPED", "FRIEND BATT 20%", "HOW TO PLAY 1/4", "HOW TO PLAY 4/4")
     for w in words:
         assert validate(_zone_frame(0, word=w)) == [], w
     for s in labels:
         assert validate(_zone_frame(0, top_text=s)) == [], s
-    for s in ("NO FIX, TRY AGAIN", "LOST 0:27 GO BACK", "BACK IN RANGE", "BATTERY 5%"):
+    for s in ("NO FIX, TRY AGAIN", "NEW ROUND", "SIGNAL LOST", "LOST: GO BACK", "LOST: KEEP ON",
+              "BACK IN RANGE", "BATTERY 5%", "SWIPE: HOW TO PLAY", "PRESS 2X TO SCAN",
+              "PRESS THE BUTTON"):
         assert validate(_zone_frame(0, banner=(s, "info", False))) == [], s
+
+
+_LOOK = dict(screen="PAIRING", zone=None, ramp="green", intensity=0.1, speed_px_s=-30,
+             pulse_period_ms=3000, wavelength_px=90, glow_r_px=30, ring_live=False)
+
+
+def _card(k, **kw):
+    from finder import howto as HT
+    top, word, glyph, runes, cd, trend, bump = HT.CARDS[k - 1]
+    d = dict(_LOOK, sub="howto", top_text=top, word=word, glyph=glyph, runes=runes,
+             countdown=cd, trend=trend, bump_icons=bump)
+    d.update(kw)
+    return make_params(**d)
+
+
+def test_howto_frames_validate():
+    for k in (1, 2, 3, 4):
+        assert validate(_card(k)) == [], (k, validate(_card(k)))
+    hint = make_params(**dict(_LOOK, sub="looking", glyph="runes", top_text="START OTHER WATCH",
+                              word="LOOKING", banner=("SWIPE: HOW TO PLAY", "info", False)))
+    assert validate(hint) == [], validate(hint)
+
+
+def test_howto_violations():
+    look = dict(_LOOK, sub="looking", glyph="runes", top_text="START OTHER WATCH", word="LOOKING")
+    assert _has(validate(make_params(**dict(look, glyph="chevrons"))), "glyph")
+    assert _has(validate(make_params(**dict(look, ring_live=True))), "ring_live")
+    assert _has(validate(make_params(**dict(look, speed_px_s=40, pulse_period_ms=2400,
+                                            wavelength_px=96))), "ring_live")
+    split = dict(_LOOK, sub="split", glyph="countdown", countdown=20, trend=1)
+    assert _has(validate(make_params(**split)), "trend")
+    assert _has(validate(_card(1, ring_live=True)), "ring_live")
+    assert _has(validate(_card(1, speed_px_s=40, pulse_period_ms=2400, wavelength_px=96)),
+                "ring_live")
+    assert _has(validate(_card(1, glyph="check", runes=None)), "glyph")
+    assert _has(validate(_card(3, trend_strong=True)), "trend_strong")
+    assert _has(validate(_card(3, trend=-1)), "trend")
+    assert _has(validate(_card(1, runes=None)), "runes")
+    assert _has(validate(_card(2, word=None)), "top_text/word")
+    assert _has(validate(_card(4, bump_icons=None)), "bump_icons")
+
+
+def test_bump_icons_rules():
+    from finder import game
+    assert game.W_BUMP == _W_BUMP and BUMP_ICONS_MAX == 5
+    hot = dict(glyph="bump", dist_band="<3")
+    for v in range(BUMP_ICONS_MAX + 1):
+        assert validate(_zone_frame(3, bump_icons=v, **hot)) == [], v
+    assert validate(_zone_frame(3, bump_icons=0, word="BUMP!", top_text="BUMP WRISTS",
+                                **hot)) == []
+    for v in (6, 7, -1, True, 1.0, "1"):
+        assert _has(validate(_zone_frame(3, bump_icons=v, **hot)), "bump_icons"), v
+    assert _has(validate(_zone_frame(3, glyph="bump", dist_band="<3")), "bump_icons")
+    assert _has(validate(_zone_frame(3, bump_icons=0, dist_band="<3")), "bump_icons")
+    assert _has(validate(_zone_frame(2, bump_icons=0, glyph="bump")), "glyph")
+    assert _has(validate(_zone_frame(3, bump_icons=0, sub="walk", **hot)), "glyph")
+    assert _has(validate(_zone_frame(3, bump_icons=4, word="BUMP!", **hot)), "word")
+    assert validate(_zone_frame(3, bump_icons=1, word="BUMP!", **hot)) == []
 
 
 def test_violations_detected():

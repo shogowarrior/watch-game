@@ -10,14 +10,16 @@ from finder import tuning as T
 from finder.game import (Game, M_HUNT, M_SCANNING, M_FOUND, M_LINK_LOST, M_SEARCHING, M_PAIRING,
                          BUZZ_OFF)
 from finder.pairing import Calibrator, Pairing, rune_ids, fnv1a32, UNSTABLE_SHOW_MS
-from finder.session import (PeerView, LiveMirror, fmt_mss, screen_code, SC_PAIRING, SC_FAR,
+from finder.session import (PeerView, LiveMirror, fmt_found, screen_code, PEER_FRESH_MS,
+                            SC_PAIRING, SC_FAR,
                             SC_NEAR, SC_WARM, SC_HOT, SC_FOUND, SC_SCANNING, SC_PAIRED, SC_BYE,
                             SC_MASK, ST_PRESS, ST_GOODBYE, ST_CONFIRMED, ST_TAP_HOT)
-from finder.gestures import GestureRecognizer, TAP as G_TAP
+from finder.gestures import GestureRecognizer, TAP as G_TAP, SWIPE_L as G_SWIPE_L, SWIPE_R as G_SWIPE_R
 from finder.render_params import validate
 from finder.estimators import NAMES, make
 from finder.estimators.base import RangeEstimator, MotionInfo, ACT_STILL, ACT_WALK
 from finder import arrow as A
+from finder.compat import ticks_add, ticks_diff
 
 MAC_A = b"\x24\x0a\xc4\x10\x00\x0a"
 MAC_B = b"\x24\x0a\xc4\x10\x00\x0b"
@@ -343,8 +345,6 @@ def test_pairing_tracks_several_candidates_and_takes_the_strongest():
 
 
 def test_session_helpers():
-    assert fmt_mss(12000) == "0:12" and fmt_mss(87000) == "1:27"
-    assert fmt_mss(599999) == "9:59" and fmt_mss(600000) == "10M+"
     assert screen_code("PAIRING") == SC_PAIRING and screen_code("HOT") == SC_HOT
     assert screen_code("FOUND") == SC_FOUND and screen_code("SCANNING") == SC_SCANNING
     assert screen_code("NEAR") == SC_NEAR and screen_code("WARM") == SC_WARM
@@ -415,7 +415,8 @@ def test_pairing_flow_button_confirm_calibrate_split():
     assert g.pair.runes == rune_ids(MAC_A, MAC_B) and r.p.runes == g.pair.runes
     r.g.on_button(r.t)
     r.run(300)
-    assert r.p.sub == "confirmed" and r.p.word == "WAITING"
+    assert r.p.sub == "confirmed" and r.p.word == "YOU'RE IN"
+    assert r.p.top_text == "WAITING FOR FRIEND"
     assert g.state_byte & ST_CONFIRMED
     r.state = SC_PAIRED | ST_CONFIRMED          # the partner confirms second: calibrate
     r.rssi = -44
@@ -426,7 +427,7 @@ def test_pairing_flow_button_confirm_calibrate_split():
     assert r.p.sub == "split" and r.est.cal == -44.0
     assert r.haptics().count("TICK") >= 3 and "CLOSER" in r.haptics()
     assert r.p.top_text == "NO PEEKING" and r.p.word == "SPLIT UP" and r.p.heartbeat is None
-    assert r.p.countdown == 30
+    assert r.p.countdown == 30 and r.p.banner == ("NEW ROUND", "info", False)
     t0 = r.t
     r.rssi = -60
     n = 0
@@ -438,7 +439,7 @@ def test_pairing_flow_button_confirm_calibrate_split():
     assert r.haptics(t0) == ["TICK", "TICK", "TICK", "CLOSER"], r.haptics(t0)
     r.run(1000)
     assert g.mode == M_HUNT and r.p.screen == "FAR" and r.p.dist_band == "~40"
-    assert r.p.runes is None
+    assert r.p.runes is None and r.p.top_text == "FIND YOUR FRIEND"
 
 
 def test_split_length_is_settable():
@@ -573,6 +574,7 @@ def test_split_without_link_goes_to_searching_then_zone_on_three_packets():
     assert r.g.mode == M_SEARCHING and r.p.screen == "SEARCHING"
     assert r.p.ramp == "grey" and r.p.speed_px_s < 0 and r.p.dist_band is None
     assert r.p.word == "SEARCHING" and r.p.haptic is None and r.p.heartbeat is None
+    assert r.p.top_text == "FIND YOUR FRIEND"
     r.run(46000, packets=False)
     assert r.p.word == "WALK ABOUT"
     r.state = SC_FAR
@@ -586,7 +588,7 @@ def test_split_without_link_goes_to_searching_then_zone_on_three_packets():
     r.packet()
     r.run(100, packets=False)
     assert r.p.screen == "FAR" and r.p.burst and r.p.haptic == "CLOSER"
-    assert r.p.top_text == "TAP TO SCAN"
+    assert r.p.top_text == "FASTER IS CLOSER"      # the round's first FAR
 
 
 def test_bump_confirms_pairing_on_both_sides_at_once():
@@ -619,7 +621,7 @@ def test_zone_screens_follow_distance_with_haptics():
     assert r.p.screen == "HOT" and r.p.dist_band == "~5"
     assert "CLOSER" in r.haptics(t0)
     assert any(p.burst for p in r.params if p.t_ms > t0)
-    assert any(p.top_text == "LOOK AROUND" for p in r.params if p.t_ms > t0)
+    assert any(p.top_text == "LOOK UP" for p in r.params if p.t_ms > t0)
     assert r.g.beacon_hz == 20
     r.est.fixed = 12.0
     t0 = r.t
@@ -636,8 +638,250 @@ def test_bump_ready_word_and_double():
     r.est.fixed = 1.5
     t0 = r.t
     r.run(2500)
-    assert r.p.word == "BUMP!" and r.p.top_text == "TAP WATCHES"
+    assert r.p.word == "BUMP!" and r.p.top_text == "BUMP WRISTS"
+    assert r.p.glyph == "bump" and r.p.bump_icons == 0
     assert r.haptics(t0).count("DOUBLE") == 1
+
+
+def _bump_ready(r):
+    """Band <3 held until bump-ready (the friend's state is the test's)."""
+    r.est.fixed = 1.5
+    n = 0
+    while not r.g.bump_ready:
+        r.run(100)
+        n += 1
+        assert n < 40
+
+
+def test_bump_view_waits_for_a_ready_friend():
+    r = hot_rig(4.0)
+    r.state = SC_WARM                           # the friend's screen cannot count a bump
+    t0 = r.t
+    _bump_ready(r)
+    r.run(1000)
+    p = r.p
+    assert p.glyph == "bump" and p.bump_icons == 4 and p.word is None
+    assert p.dist_band == "<3" and p.top_text == "FRIEND NOT READY"
+    assert "DOUBLE" not in r.haptics(t0)
+    r.state = SC_HOT                            # it reaches HOT: BUMP! and the DOUBLE now
+    t1 = r.t
+    r.run(300)
+    p = r.p
+    assert p.word == "BUMP!" and p.top_text == "BUMP WRISTS" and p.bump_icons == 0
+    assert r.haptics(t1).count("DOUBLE") == 1
+    r.state = SC_WARM                           # gone and back in one stretch: no 2nd DOUBLE
+    r.run(500)
+    r.state = SC_HOT
+    r.run(500)
+    assert r.haptics(t1).count("DOUBLE") == 1 and r.p.word == "BUMP!"
+
+
+def test_friend_not_ready_when_its_beacons_go_stale():
+    r = hot_rig(4.0)
+    _bump_ready(r)
+    r.run(300)
+    assert r.p.word == "BUMP!"
+    r.run(PEER_FRESH_MS + 100, packets=False)
+    p = r.p
+    assert r.g.mode == M_HUNT and p.bump_icons & 4 and p.word != "BUMP!"
+    assert p.top_text == "FRIEND NOT READY"
+
+
+def test_bump_icons_light_for_a_second():
+    r = hot_rig(4.0)
+    _bump_ready(r)
+    r.run(500)
+    g = r.g
+    assert g.on_accel_tap(r.t)
+    r.run(100)
+    assert r.p.bump_icons == 1
+    r.run(T.BUMP_LIT_MS)
+    assert r.p.bump_icons == 0
+    r.state = SC_HOT | ST_TAP_HOT               # the friend's spike, made in its HOT
+    r.peer_tap(r.t, 1)
+    r.run(200)
+    assert r.p.bump_icons == 2
+    r.run(T.BUMP_LIT_MS)
+    assert r.p.bump_icons == 0
+    r.state = SC_HOT                            # a friend spike made outside HOT never lights
+    r.peer_tap(r.t, 2)
+    r.run(200)
+    assert r.p.bump_icons == 0
+
+
+def test_one_sided_knock_says_who_felt_it():
+    r = hot_rig(4.0)
+    _bump_ready(r)
+    r.run(500)
+    g = r.g
+    t0 = r.t
+    assert g.on_accel_tap(t0)                   # only this watch felt it
+    r.run(400)
+    assert r.p.top_text == "BUMP WRISTS"        # judged KNOCK_WAIT_MS after the spike
+    r.run(200)
+    assert r.p.top_text == "ONLY YOU FELT IT" and r.p.word == "BUMP!"
+    assert g.mode == M_HUNT and "DOUBLE" not in r.haptics(t0 + 100)
+    r.run(T.TOAST_MS)
+    assert r.p.top_text == "BUMP WRISTS"
+    r.state = SC_HOT | ST_TAP_HOT               # only the friend felt one
+    r.peer_tap(r.t, 1)
+    r.run(700)
+    assert r.p.top_text == "FRIEND FELT IT" and g.mode == M_HUNT
+    r.run(T.TOAST_MS)
+    # a matched knock (60 ms apart) gives FOUND and no felt-it message
+    assert g.on_accel_tap(r.t)
+    r.peer_tap(r.t + 60, 2)
+    r.run(200)
+    assert g.mode == M_FOUND
+    r.run(1000)
+    assert all(p.top_text not in ("ONLY YOU FELT IT", "FRIEND FELT IT")
+               for p in r.params[-10:])
+
+
+def test_only_you_felt_it_needs_a_ready_friend():
+    r = hot_rig(4.0)
+    r.state = SC_WARM
+    _bump_ready(r)
+    r.run(500)
+    assert r.g.on_accel_tap(r.t)
+    ps = r.run(T.BUMP_LIT_MS - 100)
+    assert all(p.bump_icons == 5 for p in ps)
+    ps += r.run(1000)
+    assert all(p.top_text == "FRIEND NOT READY" for p in ps)
+
+
+def test_spikes_from_before_hot_are_never_judged():
+    r = paired_rig(d=8.0)
+    r.state = SC_HOT | ST_TAP_HOT
+    r.run(1000)
+    assert r.p.screen == "WARM"
+    assert r.g.on_accel_tap(r.t)                # made in WARM
+    r.peer_tap(r.t - 900, 1)                    # and an old friend spike
+    r.est.fixed = 2.0
+    ps = r.run(4000)
+    assert r.p.screen == "HOT"
+    assert all(p.top_text not in ("ONLY YOU FELT IT", "FRIEND FELT IT") for p in ps)
+    for case in ("friend", "own"):              # made before entry, reported after it
+        h = paired_rig(d=8.0)
+        h.state = SC_HOT | ST_TAP_HOT
+        h.est.fixed = 2.0
+        while h.p.screen != "HOT":
+            h.run(100)
+        entry = h.t
+        if case == "friend":
+            h.peer_tap(entry - 150, 1)
+        else:
+            h.g.on_accel_tap(entry - 50)
+        ps = h.run(1500)
+        assert all(p.top_text not in ("ONLY YOU FELT IT", "FRIEND FELT IT") for p in ps), case
+
+
+def test_walk_arrow_drops_silently_under_the_bump_view():
+    r = hot_rig(4.0)
+    g = r.g
+    g.arrow = A.make(10.0, 20.0, r.t)
+    r.run(5000)
+    assert g.arrow.phase == A.PH_WALK and r.p.glyph == "arrow"
+    t0 = r.t
+    _bump_ready(r)
+    r.run(100)
+    p = r.p
+    assert p.glyph == "bump" and p.arrow_deg is None and p.sub is None and g.arrow is None
+    after = [p for p in r.params if p.t_ms > t0]
+    assert all(p.banner is None for p in after)                  # no SCAN AGAIN
+    assert all(p.haptic in (None, "DOUBLE") for p in after)      # no FARTHER
+    r.est.fixed = 12.0                          # bump-ready ends: no arrow comes back
+    r.run(300)
+    assert r.p.screen == "HOT" and not g.bump_ready and r.p.glyph != "arrow"
+
+
+def test_arrow_in_turn_keeps_the_centre_until_walk():
+    r = hot_rig(4.0)
+    g = r.g
+    _bump_ready(r)
+    g.arrow = A.make(10.0, 20.0, r.t)           # a scan's new arrow, revealing
+    r.run(100)
+    assert g.arrow is not None and g.arrow.phase != A.PH_WALK and r.p.glyph == "arrow"
+    n = 0
+    while g.arrow is not None:
+        r.run(100)
+        n += 1
+        assert n < 200
+    r.run(100)
+    assert r.p.glyph == "bump"
+
+
+def test_pairing_one_sided_bump_toasts_and_match_calibrates():
+    r = Rig()
+    r.rssi = -50
+    r.run(1500)                                 # seen, past the DOUBLE's blanking
+    g = r.g
+    assert g.pair.sub == "seen"
+    assert g.on_accel_tap(r.t)                  # only this watch
+    r.run(600)
+    assert r.p.banner == ("ONLY YOU FELT IT", "info", False) and g.pair.sub == "seen"
+    assert r.p.word == "BUMP = YES" and r.p.top_text == "SAME RUNES?"
+    r.run(T.TOAST_MS)
+    r.peer_tap(r.t, 1)                          # only the friend (its watch in PAIRING)
+    r.run(T.KNOCK_WAIT_MS + T.FELT_CONFIRM_GRACE_MS - 200)
+    assert r.p.banner is None                   # PAIRING: waits for a confirm the tap made
+    r.run(300)
+    assert r.p.banner == ("FRIEND FELT IT", "info", False)
+    assert g.on_accel_tap(r.t)                  # a matched bump: both confirmed, calibrate
+    r.peer_tap(r.t + 50, 2)
+    r.run(200)
+    assert g.pair.sub == "calibrate" and r.p.banner is None
+
+
+def test_pairing_tap_spikes_get_no_felt_toast():
+    r = Rig()
+    r.rssi = -50
+    r.run(1500)                                 # seen, past the DOUBLE's blanking
+    g = r.g
+    t = r.t                                     # a finger tap that spikes the accelerometer
+    g.on_touch_down(t)
+    assert g.on_accel_tap(t + 20)
+    g.on_gesture(t + 120, 1, 120, 120, t)
+    ps = r.run(T.KNOCK_WAIT_MS + 1000)
+    assert g.pair.sub == "confirmed"            # the tap confirmed, after the knock wait
+    assert all(p.banner is None for p in ps), [p.banner for p in ps]
+    # the friend's confirming tap: its spike, then its confirm a beacon after the knock wait
+    r2 = Rig()
+    r2.rssi = -50
+    r2.run(1500)
+    t = r2.t
+    r2.peer_tap(t, 1)
+    r2.run(T.KNOCK_WAIT_MS + 100)
+    r2.state = SC_PAIRING | ST_CONFIRMED
+    ps = r2.run(2000)
+    assert r2.g.pair.peer_confirmed and r2.g.pair.sub == "seen"
+    assert all(p.banner is None for p in ps), [p.banner for p in ps]
+
+
+def test_two_watches_one_sided_knock_feedback():
+    w = Two()
+    w.run(1000)
+    w.a.on_button(w.t)
+    w.b.on_button(w.t)
+    w.run(5000)
+    w.run(35000)                                # split, then HOT at 1 m
+    while not (w.a.bump_ready and w.b.bump_ready):
+        w.run(100)
+    w.run(500)
+    assert w.a.params.word == "BUMP!" and w.b.params.word == "BUMP!"
+    assert w.a.on_accel_tap(w.t)                # A felt it, B did not
+    w.run(200)                                  # B hears it (and A's ST_TAP_HOT) a beacon later
+    assert w.a.params.bump_icons == 1 and w.b.params.bump_icons == 2
+    w.run(500)
+    assert w.a.params.top_text == "ONLY YOU FELT IT"
+    assert w.b.params.top_text == "FRIEND FELT IT"
+    w.run(T.TOAST_MS)
+    assert w.a.on_accel_tap(w.t)                # a real knock: both spike 60 ms apart
+    w.t += 60
+    assert w.b.on_accel_tap(w.t)
+    w.t -= 60
+    w.run(300)
+    assert w.a.mode == M_FOUND and w.b.mode == M_FOUND
 
 
 def test_buzz_off_does_not_blank_the_bump_tap():
@@ -675,7 +919,8 @@ def test_found_needs_both_taps_within_400ms_in_hot():
     assert r.p.haptic == "FOUND" and r.p.ramp == "gold" and r.p.glyph == "check"
     assert r.p.top_text.startswith("TIME ") and r.p.word == "FOUND"
     r.run(2100)
-    assert r.p.sub == "result" and r.p.word == "TAP=AGAIN"
+    assert r.p.sub == "result" and r.p.word.startswith("FOUND ")
+    assert r.p.top_text == "BUTTON: PLAY AGAIN"
 
 
 def test_rssi_alone_never_found_and_partner_must_be_hot():
@@ -898,7 +1143,7 @@ def test_knocks_on_the_found_screen_never_start_a_new_round():
     _found_by_press(r)
     r.state = SC_FOUND
     r.run(T.FOUND_CELEBRATE_MS + 100)
-    assert g.bump_armed() and r.p.word == "TAP=AGAIN"
+    assert g.bump_armed() and r.p.top_text == "BUTTON: PLAY AGAIN"
     for k in range(3):                          # knocks go on: spikes + touch each
         t = r.t + 10
         g.on_touch_down(t)
@@ -908,11 +1153,14 @@ def test_knocks_on_the_found_screen_never_start_a_new_round():
         r.run(T.KNOCK_WAIT_MS + 100)
         assert g.mode == M_FOUND, k
     r.run(2500)
-    t = r.t + 10                                # a finger tap spikes only its own watch
-    g.on_touch_down(t)
+    t = r.t + 10                                # a finger tap spikes only its own watch:
+    g.on_touch_down(t)                          # it runs, and does nothing on FOUND either
     assert g.on_accel_tap(t + 4)
     g.on_gesture(t + 120, 1, 120, 120, t)
     r.run(T.KNOCK_WAIT_MS + 200)
+    assert g.mode == M_FOUND
+    g.on_button(r.t)                            # only the button starts the next round
+    r.run(100)
     assert g.mode == M_PAIRING and r.p.sub == "split"
 
 
@@ -935,15 +1183,18 @@ def test_fallback_both_short_presses_within_3s():
     assert r2.g.mode == M_HUNT
 
 
-def test_new_round_from_found_tap_or_partner():
+def test_new_round_from_found_press_or_partner():
     r = hot_rig()
     g = r.g
     _found_by_press(r)
     r.state = SC_FOUND
-    g.on_gesture(r.t + 50, 1)                   # celebrate: ignored
+    g.on_button(r.t + 50)                       # celebrate: ignored
     r.run(2500)
     assert g.mode == M_FOUND
-    g.on_gesture(r.t, 1)
+    g.on_gesture(r.t, 1)                        # result: a tap does nothing
+    r.run(100)
+    assert g.mode == M_FOUND
+    g.on_button(r.t)
     r.run(100)
     assert g.mode == M_PAIRING and r.p.sub == "split" and r.p.countdown == 30
     # the partner starts a new round: followed, but not in the first 500 ms
@@ -1021,13 +1272,13 @@ def test_link_lost_banner_and_relink():
     r.run(100, packets=False)
     assert r.p.screen == "LINK_LOST" and r.p.haptic == "LOST"
     assert r.p.ramp == "grey" and r.p.zone == 1 and r.p.dist_band == "~20" and r.p.dist_stale
-    assert r.p.banner[0].startswith("LOST 0:0") and r.p.banner[2] is True
+    assert r.p.banner == ("SIGNAL LOST", "warn", True)
     assert r.p.speed_px_s < 0 and r.p.arrow_deg is None
     r.run(20000, packets=False)
-    assert r.p.banner[0].endswith("GO BACK") and r.g.mode == M_LINK_LOST
+    assert r.p.banner == ("LOST: GO BACK", "warn", True) and r.g.mode == M_LINK_LOST
     assert "LOST" not in r.haptics(t0 + 5500)
     r.run(600000, packets=False)
-    assert r.p.banner[0] == "LOST 10M+ GO BACK" and r.p.screen == "LINK_LOST"
+    assert r.p.banner == ("LOST: GO BACK", "warn", True) and r.p.screen == "LINK_LOST"
     r.est.fixed = 9.0
     t1 = r.t
     last = r.run(400)
@@ -1621,7 +1872,7 @@ def test_tap_to_scan_on_entering_near_from_far_and_warm():
     r = paired_rig(d=40.0)
     r.activity = ACT_WALK                       # no stillness hint
     r.state = SC_FAR
-    r.run(6000)
+    r.run(8000)                                 # FIND YOUR FRIEND, then FASTER IS CLOSER
     assert r.p.screen == "FAR" and r.p.top_text is None
     r.est.fixed = 20.0
     t0 = r.t
@@ -1709,7 +1960,7 @@ def test_lost_trend_keep_on_only_for_a_recent_warmer_trend():
     r = paired_rig(d=20.0)
     _lose(r, True)
     r.run(26000, packets=False)
-    assert r.p.screen == "LINK_LOST" and r.p.banner[0].endswith("KEEP ON")
+    assert r.p.screen == "LINK_LOST" and r.p.banner == ("LOST: KEEP ON", "warn", True)
     assert r.g.lost_trend == 1 and r.p.trend == 1      # the LAST chip's mark (§6)
     # a warmer trend long before the loss does not count
     r2 = paired_rig(d=20.0)
@@ -1717,7 +1968,7 @@ def test_lost_trend_keep_on_only_for_a_recent_warmer_trend():
     r2.est.trend = 0
     r2.run(40000)
     r2.run(26000, packets=False)
-    assert r2.p.banner[0].endswith("GO BACK") and r2.g.lost_trend == 0
+    assert r2.p.banner == ("LOST: GO BACK", "warn", True) and r2.g.lost_trend == 0
     # a new round forgets the trend
     r3 = paired_rig(d=20.0)
     _lose(r3, True)
@@ -1746,22 +1997,22 @@ def test_long_idle_timestamps_never_wrap():
     g._hint_set(r.t, "OLD HINT")
     t, ps = _hourly(g, r.t, 192, face_up=False)        # 8 days, link lost, wrist down
     for p in ps[1:]:
-        assert p.screen == "LINK_LOST" and p.banner[0] == "LOST 10M+ GO BACK", p.banner
+        assert p.screen == "LINK_LOST" and p.banner[0] == "LOST: GO BACK", p.banner
         assert p.backlight == 0.0
     g.on_wake(t)
     t, ps = _hourly(g, t, 192)                          # 8 more days face up, no input
     for p in ps[1:]:                                    # (first tick: face-up wake boost)
-        assert p.banner[0] == "LOST 10M+ GO BACK" and p.top_text is None
+        assert p.banner[0] == "LOST: GO BACK" and p.top_text is None
         assert p.backlight == T.IDLE_DIM_BACKLIGHT and not p.status[3]
     g.on_gesture(t + 50, 3)                             # long press still opens the menu
     assert g.menu_open
-    # FOUND result stays 'result' and a tap still starts a new round
+    # FOUND result stays 'result' and a press still starts a new round
     r2 = hot_rig()
     _found_by_press(r2)
     t, ps = _hourly(r2.g, r2.t, 192)
-    assert all(p.sub == "result" and p.word == "TAP=AGAIN" for p in ps)
-    assert r2.g._press_t is None
-    r2.g.on_gesture(t + 50, 1)
+    assert all(p.sub == "result" and p.word.startswith("FOUND ") for p in ps)
+    assert r2.g._press_t is None and r2.g._lit_until is None
+    r2.g.on_button(t + 50)
     r2.g.tick(t + 100)
     assert r2.g.mode == M_PAIRING
     # a touch 6.7 days ago never counts toward a rain burst (its age wraps past 2^29 ms)
@@ -1966,7 +2217,7 @@ def _two_in_a_new_round():
     w.run(300)
     assert w.a.mode == M_FOUND and w.b.mode == M_FOUND
     w.run(2500)
-    w.a.on_button(w.t)                          # TAP=AGAIN: a new round on both
+    w.a.on_button(w.t)                          # PLAY AGAIN: a new round on both
     w.run(1000)
     assert w.a.pair.sub == "split" and w.b.pair.sub == "split"
     return w
@@ -2111,7 +2362,7 @@ def test_a_partner_that_left_while_out_of_range_gets_no_relink_fanfare():
         assert left[0].banner == ("FRIEND LEFT", "warn", False), mode
 
 
-def test_partner_leaving_does_not_wake_a_lowered_screen():
+def test_partner_leaving_lights_a_lowered_screen_for_5s_not_at_5_percent():
     for bat in (90, 5):
         r = warm_rig(battery=bat)
         g = r.g
@@ -2120,14 +2371,306 @@ def test_partner_leaving_does_not_wake_a_lowered_screen():
         assert not g.screen_on, bat
         r.state = SC_PAIRING                    # the partner ended the round
         t0 = r.t
-        r.run(3000)
-        after = [p for p in r.params if p.t_ms > t0]
-        assert any(p.banner == ("FRIEND LEFT", "warn", False) and p.haptic == "NOPE"
-                   for p in after), bat
-        assert not g.screen_on and all(p.backlight == 0.0 for p in after), bat
+        while g.mode != M_PAIRING:
+            r.run(100)
+            assert r.t - t0 < 3000, bat
+        p = r.p
+        assert p.banner == ("FRIEND LEFT", "warn", False) and p.haptic == "NOPE", bat
+        if bat == 5:                            # 5 %: haptics carry it, the screen stays dark
+            r.run(3000)
+            assert not g.screen_on and all(q.backlight == 0.0 for q in r.params if q.t_ms > t0)
+            continue
+        _lit_for(r, r.t, T.EVENT_LIT_MS)
 
 
-def test_relink_into_hot_says_look_around():
+def _dark(r, limit=40000):
+    """Run until the screen is off (the wrist must already be down)."""
+    t0 = r.t
+    while r.g.screen_on:
+        r.run(100)
+        assert r.t - t0 < limit, "screen never went dark"
+
+
+def _lit_for(r, t0, ms):
+    """The screen stays lit from ``t0`` until ``t0 + ms``, then (wrist still
+    down, clock long run out) is dark within one tick."""
+    while r.t < t0 + ms - 100:
+        r.run(100)
+        assert r.g.screen_on and r.p.backlight > 0.0, (r.t - t0, ms)
+    r.run(200)
+    assert not r.g.screen_on and r.p.backlight == 0.0, (r.t - t0, ms)
+
+
+def test_found_lights_a_dark_screen_for_10s_whatever_the_tilt():
+    r = hot_rig()
+    g = r.g
+    r.est.fixed = 1.5
+    r.face_up = False
+    _dark(r)                                    # HOT entry and bump-ready holds ran out
+    r.state = SC_HOT | ST_TAP_HOT
+    assert g.on_accel_tap(r.t)
+    r.peer_tap(r.t + 150)
+    r.run(200)
+    assert g.mode == M_FOUND and g.screen_on
+    first = [p for p in r.params if p.screen == "FOUND"][0]
+    assert first.haptic == "FOUND" and first.backlight == T.BACKLIGHT_BOOST
+    _lit_for(r, g.found_t, T.FOUND_LIT_MS)
+    assert g.mode == M_FOUND and r.p.word.startswith("FOUND ")
+
+
+def test_found_result_word_chip_and_button_only():
+    r = hot_rig()
+    g = r.g
+    g.round_t0 = r.t - 108000                   # a 1:48 round
+    _found_by_press(r)
+    assert r.p.sub == "celebrate" and r.p.top_text == "TIME 1:48" and r.p.word == "FOUND"
+    g.on_button(r.t + 50)                       # celebrate: a press made with the bump is ignored
+    r.run(100)
+    assert g.mode == M_FOUND
+    r.run(T.FOUND_CELEBRATE_MS)
+    assert r.p.sub == "result" and r.p.top_text == "BUTTON: PLAY AGAIN"
+    assert r.p.word == "FOUND 1:48"
+    t = r.t + 10                                # a finger tap (no spike): no new round,
+    g.on_touch_down(t)                          # a toast says what does work
+    g.on_gesture(t + 100, 1, 120, 120, t)
+    r.run(T.KNOCK_WAIT_MS + 200)
+    assert g.mode == M_FOUND and r.p.word == "FOUND 1:48"
+    assert r.p.banner == ("PRESS THE BUTTON", "info", False)
+    g.on_button(r.t)
+    r.run(100)
+    assert g.mode == M_PAIRING and r.p.sub == "split"
+
+
+def test_found_word_long_rounds_have_no_minute_m():
+    assert [fmt_found(s) for s in (0, 108, 599, 600, 768, 5999, 6000, 21600)] == [
+        "FOUND 0:00", "FOUND 1:48", "FOUND 9:59", "FOUND10:00", "FOUND12:48", "FOUND99:59",
+        "FOUND 1H+", "FOUND 1H+"]
+    for s in range(0, 6100, 7):
+        w = fmt_found(s)
+        assert len(w) <= T.WORD_MAX_CHARS and not set(w) - set(T.WORD_CHARS), w
+    for back, top, word in ((768000, "TIME 12:48", "FOUND12:48"),
+                            (7200000, "TIME 99:59", "FOUND 1H+")):
+        r = hot_rig()
+        r.g.round_t0 = ticks_add(r.t, -back)
+        _found_by_press(r)
+        assert r.p.top_text == top, r.p.top_text
+        r.run(T.FOUND_CELEBRATE_MS + 100)
+        assert r.p.word == word, r.p.word
+
+
+def test_button_on_a_dark_found_screen_only_wakes():
+    r = hot_rig()
+    g = r.g
+    _found_by_press(r)
+    r.face_up = False
+    _dark(r)
+    assert g.mode == M_FOUND
+    g.on_button(r.t)                            # wake only
+    assert g.screen_on and g.mode == M_FOUND
+    r.run(100)
+    assert r.p.word.startswith("FOUND ") and r.p.backlight == T.BACKLIGHT_BOOST
+    g.on_button(r.t)
+    r.run(100)
+    assert g.mode == M_PAIRING and g.pair.sub == "split"
+
+
+def test_press_on_a_found_screen_lit_with_the_wrist_down_only_wakes():
+    r = hot_rig()
+    g = r.g
+    r.est.fixed = 1.5
+    r.face_up = False
+    _dark(r)
+    r.state = SC_HOT | ST_TAP_HOT
+    assert g.on_accel_tap(r.t)
+    r.peer_tap(r.t + 150)
+    r.run(200)
+    assert g.mode == M_FOUND and g.screen_on
+    r.run(T.FOUND_CELEBRATE_MS + 200)           # result, still lit, wrist still down
+    assert r.p.sub == "result" and g.screen_on
+    g.on_button(r.t)                            # pressed to look: only a look
+    r.run(100)
+    assert g.mode == M_FOUND
+    g.on_button(r.t)
+    r.run(100)
+    assert g.mode == M_PAIRING and g.pair.sub == "split"
+    # a raised wrist has seen it: the first press counts
+    h = hot_rig()
+    h.est.fixed = 1.5
+    h.face_up = False
+    _dark(h)
+    h.state = SC_HOT | ST_TAP_HOT
+    assert h.g.on_accel_tap(h.t)
+    h.peer_tap(h.t + 150)
+    h.run(200)
+    h.face_up = True
+    h.run(T.FOUND_CELEBRATE_MS + 200)
+    h.g.on_button(h.t)
+    h.run(100)
+    assert h.g.mode == M_PAIRING
+
+
+def test_press_on_hot_lit_with_the_wrist_down_only_wakes():
+    r = warm_rig()
+    g = r.g
+    r.face_up = False
+    _dark(r)
+    _event(r, "hot")
+    assert g.screen_on
+    g.on_button(r.t)                            # a look
+    r.run(100)
+    assert g.mode == M_HUNT and g._press_t is None
+    g.on_button(r.t)                            # the fallback press, not a scan
+    r.run(100)
+    assert g.mode == M_HUNT and g._press_t is not None
+
+
+def test_event_hold_extends_across_a_reset():
+    r = hot_rig()
+    g = r.g
+    r.est.fixed = 1.5
+    r.face_up = False
+    _dark(r)
+    r.state = SC_HOT | ST_TAP_HOT
+    assert g.on_accel_tap(r.t)
+    r.peer_tap(r.t + 150)
+    r.run(200)
+    assert g.mode == M_FOUND
+    t0 = g.found_t
+    r.state = SC_PAIRING                        # the friend left: FRIEND LEFT (5 s hold)
+    n = 0
+    while g.mode == M_FOUND:
+        r.run(100)
+        n += 1
+        assert n < 60
+    assert ticks_diff(r.t, t0) < T.FOUND_LIT_MS - T.EVENT_LIT_MS
+    _lit_for(r, t0, T.FOUND_LIT_MS)             # FOUND's 10 s, not FRIEND LEFT's 5
+
+
+def _event(r, how):
+    """Raise one §8 event wake on a rig; returns when its first frame is out."""
+    g = r.g
+    if how == "hot":
+        r.est.fixed = 4.0
+        while r.p.screen != "HOT":
+            r.run(100)
+    elif how == "bump_ready":
+        r.est.fixed = 1.5
+        while not g.bump_ready:
+            r.run(100)
+        assert r.p.word == "BUMP!" and r.p.haptic == "DOUBLE"
+    elif how == "lost":
+        while r.p.screen != "LINK_LOST":
+            r.run(100, packets=False)
+        assert r.p.haptic == "LOST"
+
+
+def test_event_wakes_light_a_dark_screen_for_5s():
+    for how in ("hot", "bump_ready", "lost"):
+        r = hot_rig(4.0) if how == "bump_ready" else warm_rig()
+        r.face_up = False
+        _dark(r)
+        _event(r, how)
+        t0 = r.t
+        assert r.g.screen_on and r.p.backlight == T.BACKLIGHT_BOOST, how
+        if how == "lost":                       # the hold ends with the link still lost
+            while r.t < t0 + T.EVENT_LIT_MS - 100:
+                r.run(100, packets=False)
+                assert r.g.screen_on, how
+            r.run(200, packets=False)
+            assert not r.g.screen_on, how
+        else:
+            _lit_for(r, t0, T.EVENT_LIT_MS)
+
+
+def test_event_wake_holds_a_lit_lowered_screen_on_the_wrist_clock():
+    r = warm_rig()
+    g = r.g
+    r.face_up = False
+    r.run(8000)                                 # lowered 8 s: 2 s left on the wrist clock
+    assert g.screen_on
+    _event(r, "hot")
+    _lit_for(r, r.t, T.EVENT_LIT_MS)            # held past the 10 s, dark when the hold ends
+    r2 = warm_rig()
+    r2.face_up = False
+    t_down = r2.t
+    r2.run(500)
+    _event(r2, "hot")                           # lowered ~2 s at the event: the clock decides
+    r2.run(T.EVENT_LIT_MS + 200)
+    assert r2.g.screen_on
+    while r2.g.screen_on:
+        r2.run(100)
+    assert T.WRIST_DOWN_MS <= r2.t - t_down <= T.WRIST_DOWN_MS + 300, r2.t - t_down
+
+
+def test_event_wakes_at_5_percent_only_found():
+    for how in ("hot", "lost"):
+        r = warm_rig(battery=5)
+        r.face_up = False
+        _dark(r)
+        t0 = r.t
+        _event(r, how)
+        assert not r.g.screen_on and all(p.backlight == 0.0 for p in r.params if p.t_ms > t0), how
+    r = paired_rig(d=2.0, battery=5)
+    r.state = SC_HOT
+    r.run(2000)
+    g = r.g
+    r.est.fixed = 1.5
+    r.face_up = False
+    _dark(r)
+    r.state = SC_HOT | ST_TAP_HOT
+    assert g.on_accel_tap(r.t)
+    r.peer_tap(r.t + 150)
+    r.run(200)
+    assert g.mode == M_FOUND and r.p.backlight == T.SAVER_BACKLIGHT
+    _lit_for(r, g.found_t, T.FOUND_LIT_MS)      # 10 s, not BATT_SCREEN_OFF_MS
+
+
+def test_event_wake_ignores_a_press_that_began_before_it():
+    r = warm_rig()
+    g = r.g
+    r.face_up = False
+    _dark(r)
+    t = r.t + 10
+    g.on_touch_down(t)                          # a sleeve on the dark screen ...
+    _event(r, "lost")                           # ... the link drops: the screen lights
+    assert g.screen_on and ticks_diff(g._wake_t, t) > 0
+    g.on_gesture(t + 900, 3, 120, 120, t)       # the press that began before it: no MENU
+    assert not g.menu_open
+    t2 = ticks_add(g._wake_t, T.WAKE_TOUCH_IGNORE_MS + 50)
+    g.on_gesture(t2 + 900, 3, 120, 120, t2)
+    assert g.menu_open
+
+
+def test_no_event_wake_while_shutting_down():
+    r = paired_rig(d=20.0)
+    g = r.g
+    r.state = SC_NEAR
+    r.face_up = False
+    _dark(r)
+    r.run(3000, packets=False)
+    g.set_battery(r.t, 3)                       # BYE ...
+    t0 = r.t
+    while not g.power_off:
+        r.run(100, packets=False)
+        assert r.t - t0 < 5000
+    after = [p for p in r.params if p.t_ms > t0]
+    assert any(p.screen == "LINK_LOST" for p in after)   # ... LINK-LOST arrives during it
+    assert not g.screen_on and all(p.backlight == 0.0 for p in after)
+    h = hot_rig()                               # FOUND (which lights even at <= 5 %) during BYE
+    h.face_up = False
+    _dark(h)
+    h.g.set_battery(h.t, 3)
+    t0 = h.t
+    h.run(1200)
+    h.state = SC_HOT | ST_TAP_HOT
+    assert h.g.on_accel_tap(h.t)
+    h.peer_tap(h.t + 150)
+    h.run(200)
+    assert h.g._bye_t is not None and h.g.mode == M_FOUND
+    assert not h.g.screen_on and all(p.backlight == 0.0 for p in h.params if p.t_ms > t0)
+
+
+def test_relink_into_hot_says_look_up():
     r = hot_rig()
     r.run(5200, packets=False)
     assert r.g.mode == M_LINK_LOST
@@ -2135,7 +2678,7 @@ def test_relink_into_hot_says_look_around():
     t1 = r.t
     r.run(400)
     hot = [p for p in r.params if p.t_ms > t1 and p.screen == "HOT"]
-    assert hot and hot[0].top_text == "LOOK AROUND"
+    assert hot and hot[0].top_text == "LOOK UP"
 
 
 def test_warm_clears_a_running_tap_to_scan_hint():
@@ -2186,3 +2729,680 @@ def test_battery_warnings_rearm_after_charging():
     t0 = r.t
     r.run(500)
     assert any(p.banner == ("FRIEND BATT 20%", "warn", False) for p in r.params if p.t_ms > t0)
+
+
+# ---- copy: every screen says the one thing to do; no running counters ----------
+
+def _to_split(r, cal_packets=True):
+    """Rig from looking through a button confirm to the first tick of the split."""
+    r.rssi = -50
+    r.run(600)
+    r.g.on_button(r.t)
+    r.state = SC_PAIRED | ST_CONFIRMED
+    r.rssi = -45
+    n = 0
+    while r.g.pair.sub != "split":
+        r.run(100, packets=cal_packets or r.g.pair.sub != "calibrate")
+        n += 1
+        assert n < 160
+    return r
+
+
+def test_pairing_copy_says_what_to_do():
+    r = Rig()
+    r.run(300, packets=False)
+    assert r.p.sub == "looking"
+    assert r.p.top_text == "START OTHER WATCH" and r.p.word == "LOOKING"
+    r.rssi = -50
+    r.run(600)
+    r.g.on_button(r.t)
+    r.run(100)
+    assert r.p.sub == "confirmed"
+    assert r.p.top_text == "WAITING FOR FRIEND" and r.p.word == "YOU'RE IN"
+
+
+def test_new_round_toast_at_every_split_start():
+    r = _to_split(Rig())
+    p = r.p
+    assert p.banner == ("NEW ROUND", "info", False)
+    assert p.top_text == "NO PEEKING" and p.word == "SPLIT UP"
+    r.run(T.TOAST_MS)
+    assert r.p.banner is None and r.p.word == "SPLIT UP"
+    # FOUND -> PLAY AGAIN (the button on the result): the new round's split says it too
+    h = hot_rig()
+    _found_by_press(h)
+    h.state = SC_FOUND
+    h.run(T.FOUND_CELEBRATE_MS + 100)
+    h.g.on_button(h.t)
+    h.run(100)
+    assert h.p.sub == "split" and h.p.banner == ("NEW ROUND", "info", False)
+    # ... and when it follows the partner's new round
+    f = hot_rig()
+    _found_by_press(f)
+    f.state = SC_PAIRED | ST_CONFIRMED
+    f.run(700)
+    assert f.p.sub == "split" and f.p.banner == ("NEW ROUND", "info", False)
+
+
+def test_own_ready_drops_the_new_round_toast():
+    r = _to_split(Rig())
+    assert r.p.banner == ("NEW ROUND", "info", False)
+    r.g.on_gesture(r.t, 1)                      # READY
+    r.run(100)
+    assert r.p.banner is None and r.p.word == "READY"
+    r.run(T.TOAST_MS)
+    assert not any(p.banner for p in r.params[-25:])
+
+
+def test_cal_skipped_keeps_the_toast_slot():
+    r = _to_split(Rig(), cal_packets=False)     # no packets: the 10 s skip
+    assert r.p.banner == ("CAL SKIPPED", "info", False)
+    r.run(3000)
+    assert not any(p.banner and p.banner[0] == "NEW ROUND" for p in r.params)
+
+
+def test_new_round_toast_never_carries_into_the_hunt():
+    r = Rig()
+    r.g.pair.split_s = 1                        # a split shorter than the toast
+    r = _to_split(r)
+    assert r.p.banner == ("NEW ROUND", "info", False)
+    r.rssi = -60
+    n = 0
+    while r.g.mode == M_PAIRING:
+        r.run(100)
+        n += 1
+        assert n < 40
+    assert r.p.banner is None and r.p.top_text == "FIND YOUR FRIEND"
+
+
+def test_round_start_says_find_your_friend_then_faster_is_closer():
+    r = paired_rig(d=40.0)                      # the hunt begins in FAR
+    r.activity = ACT_WALK                       # no stillness hint
+    r.state = SC_FAR
+    t0 = r.g.round_t0
+    r.run(9000)
+    tops = [(p.t_ms - t0, p.top_text) for p in r.params if p.t_ms >= t0]
+    find = [d for d, s in tops if s == "FIND YOUR FRIEND"]
+    teach = [d for d, s in tops if s == "FASTER IS CLOSER"]
+    assert find[0] == 0 and find[-1] < T.HINT_CHIP_MS, find
+    assert teach and teach[0] >= T.HINT_CHIP_MS and teach[-1] - teach[0] < T.HINT_CHIP_MS
+    assert not any(s == "TAP TO SCAN" for d, s in tops), tops
+    # once per round: the next FAR entry says TAP TO SCAN
+    r.est.fixed = 20.0
+    r.run(4500)
+    assert r.p.screen == "NEAR"
+    r.run(4500)
+    r.est.fixed = 45.0
+    t1 = r.t
+    r.run(4500)
+    far = [p for p in r.params if p.t_ms > t1 and p.screen == "FAR"]
+    assert far and far[0].top_text == "TAP TO SCAN"
+    # a new round teaches again
+    r.g._new_round(r.t)
+    r.run(31500)
+    assert r.g.mode == M_HUNT and r.p.top_text == "FIND YOUR FRIEND"
+    r.run(4500)
+    assert r.p.top_text == "FASTER IS CLOSER"
+
+
+def test_round_start_in_hot_says_look_up():
+    r = paired_rig(d=2.0)
+    hot = [p for p in r.params if p.t_ms >= r.g.round_t0]
+    assert hot[0].screen == "HOT" and hot[0].top_text == "LOOK UP", hot[0]
+
+
+def test_stillness_hint_waits_for_the_round_start_hints():
+    r = paired_rig(d=40.0)                      # standing still from the start
+    t0 = r.g.round_t0
+    r.run(14000)
+    tops = [p.top_text for p in r.params if p.t_ms >= t0]
+    seq = [s for i, s in enumerate(tops) if s is not None and (i == 0 or tops[i - 1] != s)]
+    assert seq == ["FIND YOUR FRIEND", "FASTER IS CLOSER", "TAP TO SCAN"], seq
+    n = sum(1 for s in tops if s == "FASTER IS CLOSER")
+    assert n >= T.HINT_CHIP_MS // 100 - 1, n    # not cut short by the stillness hint
+
+
+def test_link_lost_banner_has_no_running_clock():
+    r = paired_rig(d=20.0)
+    r.state = SC_NEAR
+    r.run(2000)
+    t0 = r.t
+    r.run(30000, packets=False)
+    lost = [p for p in r.params if p.t_ms > t0 and p.screen == "LINK_LOST"]
+    texts = []
+    for p in lost:
+        if not texts or texts[-1] != p.banner[0]:
+            texts.append(p.banner[0])
+        assert not any(c in "0123456789" for c in p.banner[0]), p.banner
+    assert texts == ["SIGNAL LOST", "LOST: GO BACK"], texts
+    hint = [p for p in lost if p.banner[0] == "LOST: GO BACK"]
+    assert hint[0].t_ms - t0 >= T.LOST_HINT_AFTER_MS                 # from the last packet
+    assert lost[0].banner is lost[1].banner                          # built once, not per tick
+    assert hint[0].banner is hint[-1].banner and len(hint) > 1
+
+
+def test_link_lost_hint_stays_after_a_stray_packet():
+    r = paired_rig(d=20.0)
+    r.state = SC_NEAR
+    r.run(2000)
+    r.run(25000, packets=False)
+    assert r.p.banner == ("LOST: GO BACK", "warn", True)
+    r.packet()                                  # one stray packet: no relink (needs 3 in 2 s)
+    ps = r.run(5000, packets=False)
+    assert r.g.mode == M_LINK_LOST
+    assert all(p.banner == ("LOST: GO BACK", "warn", True) for p in ps), [p.banner for p in ps]
+    r.est.fixed = 20.0                          # relink, then a second loss starts over
+    r.run(3000)
+    assert r.g.mode == M_HUNT
+    r.run(6000, packets=False)
+    assert r.p.screen == "LINK_LOST" and r.p.banner[0] == "SIGNAL LOST"
+
+
+def test_faster_is_closer_waits_for_a_friend_scan_to_end():
+    r = paired_rig(d=40.0)
+    r.activity = ACT_WALK
+    r.state = SC_SCANNING
+    r.flags = proto.F_SWEEP                     # the friend sweeps as FIND YOUR FRIEND ends
+    t0 = r.g.round_t0
+    r.run(8000)
+    tops = [p.top_text for p in r.params if p.t_ms >= t0]
+    assert "FASTER IS CLOSER" not in tops and r.g._teach_far, tops
+    r.state = SC_FAR
+    r.flags = 0
+    r.run(5000)
+    tops = [p.top_text for p in r.params if p.t_ms >= t0]
+    assert "FASTER IS CLOSER" in tops
+    # entering the first FAR from NEAR while the friend sweeps: kept for later
+    n = paired_rig(d=20.0)
+    n.activity = ACT_WALK
+    n.state = SC_NEAR
+    n.run(5000)
+    assert n.p.screen == "NEAR" and n.g._teach_far
+    n.state = SC_SCANNING
+    n.flags = proto.F_SWEEP
+    n.est.fixed = 45.0
+    t1 = n.t
+    n.run(4000)
+    assert n.p.screen == "FAR" and n.g._teach_far
+    assert all(p.top_text != "FASTER IS CLOSER" for p in n.params if p.t_ms > t1)
+    n.state = SC_FAR
+    n.flags = 0
+    n.run(T.HINT_CHIP_MS + 2000)                # after the entry's TAP TO SCAN
+    assert any(p.top_text == "FASTER IS CLOSER" for p in n.params if p.t_ms > t1)
+
+
+# ---- how-to cards (PAIRING looking) and ignored taps (ui-spec §6, §8) ------------
+
+
+def _looking(ms=1000):
+    """A Rig left in looking (no packets)."""
+    r = Rig()
+    r.run(ms, packets=False)
+    assert r.g.pair.sub == "looking"
+    return r
+
+
+def _swipe(r, left=True):
+    r.g.on_gesture(r.t, G_SWIPE_L if left else G_SWIPE_R)
+    r.run(100, packets=False)
+
+
+def _touch_tap(r, x=120, y=120):
+    t = r.t + 10
+    r.g.on_touch_down(t)
+    r.g.on_gesture(t + 100, G_TAP, x, y, t)
+
+
+def test_howto_cards_flip_only_in_looking():
+    r = _looking()
+    tops = []
+    for _ in range(4):
+        _swipe(r)
+        assert r.p.sub == "howto"
+        tops.append(r.p.top_text)
+    assert tops == ["HOW TO PLAY %d/4" % k for k in (1, 2, 3, 4)]
+    assert [c[1] for c in __import__("finder.howto").howto.CARDS] == ["PAIR UP", "SPLIT UP",
+                                                                      "GET CLOSER", "BUMP!"]
+    _swipe(r)
+    assert r.p.sub == "looking" and r.p.top_text == "START OTHER WATCH"
+    _swipe(r, left=False)
+    assert r.p.top_text == "HOW TO PLAY 1/4"
+    _swipe(r, left=False)
+    assert r.p.sub == "looking"
+    r.g.on_button(r.t, long=True)               # MENU: sideways swipes do nothing there
+    r.run(100, packets=False)
+    _swipe(r)
+    assert r.p.screen == "MENU" and not r.g.howto.open
+    # seen, HOT, FOUND: sideways swipes change nothing
+    s = Rig()
+    s.rssi = -50
+    s.run(600)
+    assert s.g.pair.sub == "seen"
+    s.g.on_gesture(s.t, G_SWIPE_L)
+    s.run(100)
+    assert s.p.sub == "seen" and not s.g.howto.open and s.p.banner is None
+    s.g.on_button(s.t)                          # no card was opened and shut: it confirms
+    s.run(100)
+    assert s.g.pair.sub == "confirmed"
+    h = hot_rig(4.0)
+    h.g.on_gesture(h.t, G_SWIPE_L)
+    h.run(100)
+    assert h.p.screen == "HOT" and h.p.sub is None and not h.g.howto.open
+    f = hot_rig()
+    _found_by_press(f)
+    f.g.on_gesture(f.t, G_SWIPE_L)
+    f.run(100)
+    assert f.p.screen == "FOUND" and not f.g.howto.open
+
+
+def test_howto_cards_show_no_signal():
+    r = _looking()
+    for k in range(4):
+        _swipe(r)
+        p = r.p
+        assert p.sub == "howto" and p.speed_px_s == T.FIELD_PAIRING_LOOKING[2], p
+        assert not p.ring_live and p.heartbeat is None and p.haptic is None
+        assert p.zone is None and p.dist_band is None and p.banner is None
+        assert r.g.state_byte & SC_MASK == SC_PAIRING
+    assert r.p.glyph == "bump" and r.p.bump_icons == 0 and r.p.word == "BUMP!"
+
+
+def test_howto_cards_close_when_the_partner_is_seen():
+    r = _looking()
+    for _ in range(3):
+        _swipe(r)
+    assert r.p.top_text == "HOW TO PLAY 3/4"
+    r.rssi = -50
+    n = 0
+    while r.g.pair.sub != "seen":
+        r.run(100)
+        n += 1
+        assert n < 20
+    p = r.p
+    assert p.sub == "seen" and p.runes == rune_ids(MAC_A, MAC_B) and not r.g.howto.open
+    assert any(q.haptic == "DOUBLE" for q in r.params[-n:])
+    r.run(6000, packets=False)                  # the partner goes quiet: back to looking
+    assert r.p.sub == "looking" and not r.g.howto.open
+
+
+def test_looking_after_seen_never_shows_live_rings():
+    r = Rig()
+    r.rssi = -50
+    r.run(600)
+    assert r.g.pair.sub == "seen"
+    r.state = SC_FAR                            # the friend stops showing PAIRING; packets go on
+    n = 0
+    while r.g.pair.sub != "looking":
+        r.run(100)                              # validate: no ring_live in looking
+        n += 1
+        assert n < 100
+    assert not r.p.ring_live
+
+
+def test_howto_button_closes_tap_does_nothing():
+    r = _looking()
+    _swipe(r)
+    _swipe(r)
+    _touch_tap(r)
+    r.run(1000, packets=False)
+    assert r.p.top_text == "HOW TO PLAY 2/4" and r.p.banner is None
+    r.g.on_button(r.t)
+    r.run(100, packets=False)
+    assert r.p.sub == "looking" and r.p.banner is None
+
+
+def test_a_press_racing_the_partner_never_confirms_unseen_runes():
+    r = _looking()
+    _swipe(r)
+    r.rssi = -50
+    while r.g.pair.sub != "seen":               # packets between ticks: seen, card still up
+        r.t += 50
+        r.packet()
+    r.g.on_button(r.t)                          # meant for the card
+    r.g.on_button(r.t + 30)                     # twice, before the screen changed
+    r.run(100)
+    assert r.g.pair.sub == "seen" and not r.g.pair.confirmed
+    r.g.on_button(r.t)                          # the runes on screen: now it confirms
+    r.run(100)
+    assert r.g.pair.sub == "confirmed"
+    # the cards closed by themselves at the tick: a press right after only closes
+    r2 = _looking()
+    _swipe(r2)
+    r2.rssi = -50
+    while r2.g.pair.sub != "seen":
+        r2.run(100)
+    r2.g.on_button(r2.t + 50)
+    r2.run(100)
+    assert r2.g.pair.sub == "seen" and not r2.g.pair.confirmed
+    r2.run(T.HOWTO_PRESS_GUARD_MS)
+    r2.g.on_button(r2.t)
+    r2.run(100)
+    assert r2.g.pair.sub == "confirmed"
+
+
+def test_howto_hint_toast_once_per_looking_spell():
+    r = Rig()
+    r.run(T.HOWTO_HINT_MS - 200, packets=False)
+    assert all(p.banner is None for p in r.params)
+    r.run(400, packets=False)
+    assert r.p.banner == ("SWIPE: HOW TO PLAY", "info", False)
+    r.run(T.TOAST_MS + 10000, packets=False)
+    hints = [p for p in r.params if p.banner and p.banner[0] == "SWIPE: HOW TO PLAY"]
+    assert T.TOAST_MS - 200 <= len(hints) * 100 <= T.TOAST_MS + 200
+    assert r.p.banner is None
+    r.rssi = -50                                # partner seen, then gone: a new spell
+    while r.g.pair.sub != "seen":
+        r.run(100)
+    while r.g.pair.sub != "looking":
+        r.run(100, packets=False)
+    t0 = r.t
+    ps = r.run(T.HOWTO_HINT_MS + 1000, packets=False)
+    first = [p.t_ms - t0 for p in ps if p.banner and p.banner[0] == "SWIPE: HOW TO PLAY"]
+    assert first and abs(first[0] - T.HOWTO_HINT_MS) <= 200, first[:1]
+    # opening a card first: no hint; opening one clears a hint already up
+    o = _looking(1000)
+    _swipe(o)
+    _swipe(o, left=False)                       # opened, then closed: the player knows
+    assert not o.g.howto.open
+    o.run(8000, packets=False)
+    assert all(p.banner is None for p in o.params)
+    c = Rig()
+    c.run(T.HOWTO_HINT_MS + 300, packets=False)
+    assert c.p.banner[0] == "SWIPE: HOW TO PLAY"
+    _swipe(c)
+    assert c.p.banner is None and c.p.sub == "howto"
+    # after a round has started (calibrate reached) since power-on: never again
+    d = paired_rig()
+    d.g.reset(d.t)                              # END ROUND: back to looking
+    d.run(10000, packets=False)
+    assert d.p.sub == "looking"
+    assert not any(p.banner and p.banner[0] == "SWIPE: HOW TO PLAY" for p in d.params[-100:])
+
+
+def test_howto_card_2_mirrors_the_split_screen():
+    s = _to_split(Rig()).p
+    r = _looking()
+    _swipe(r)
+    _swipe(r)
+    c = r.p
+    assert (c.glyph, c.countdown, c.word) == (s.glyph, s.countdown, s.word)
+
+
+def test_saver_on_closes_the_cards_and_blocks_them():
+    r = _looking()
+    for _ in range(3):
+        _swipe(r)
+    r.g.set_battery(r.t, T.BATT_CRITICAL_PCT)
+    r.run(100, packets=False)
+    assert r.p.word == "SAVER ON" and not r.g.howto.open
+    _swipe(r)                                   # during SAVER ON: no card
+    _touch_tap(r)
+    ps = r.run(T.KNOCK_WAIT_MS + 300, packets=False)
+    assert not r.g.howto.open
+    assert all(p.sub != "howto" and p.banner is None for p in ps), [(p.sub, p.banner) for p in ps]
+
+
+def test_ignored_tap_in_hot_says_press_2x_to_scan():
+    r = hot_rig(4.0)
+    r.run(1000)
+    assert r.p.dist_band == "~5" and r.p.word is None and r.p.banner is None
+    _touch_tap(r)
+    ps = r.run(T.KNOCK_WAIT_MS)
+    assert all(p.banner is None for p in ps)
+    r.run(200)
+    assert r.p.banner == ("PRESS 2X TO SCAN", "info", False)
+    assert r.g.mode == M_HUNT and r.g.bump_armed()
+    r.run(T.TOAST_MS + 100)
+    assert r.p.banner is None
+
+
+def test_ignored_tap_toast_rate_limited_and_never_replaces_a_toast():
+    r = hot_rig(4.0)
+    r.run(1000)
+    _touch_tap(r)
+    r.run(T.KNOCK_WAIT_MS + 200)
+    t0 = r.t
+    assert r.p.banner[0] == "PRESS 2X TO SCAN"
+    r.run(800)
+    _touch_tap(r)                                     # while it shows: not re-raised, not extended
+    r.run(T.TOAST_MS)
+    shown = [p for p in r.params if p.t_ms >= t0 and p.banner]
+    assert len(shown) * 100 <= T.TOAST_MS + 200 and r.p.banner is None
+    while r.t - t0 < T.IGNORED_TOAST_GAP_MS - T.KNOCK_WAIT_MS - 300:
+        r.run(100)
+    _touch_tap(r)                                     # toast gone, but within the 5 s: none
+    r.run(T.KNOCK_WAIT_MS + 200)
+    assert r.p.banner is None
+    r.run(T.IGNORED_TOAST_GAP_MS)
+    _touch_tap(r)
+    r.run(T.KNOCK_WAIT_MS + 200)
+    assert r.p.banner[0] == "PRESS 2X TO SCAN"
+    lk = _looking()                             # FRIEND LEFT up in looking: kept
+    lk.g._toast_set("FRIEND LEFT", "warn")
+    lk.run(100, packets=False)
+    _touch_tap(lk)
+    lk.run(T.KNOCK_WAIT_MS + 200, packets=False)
+    assert lk.p.banner == ("FRIEND LEFT", "warn", False)
+    b = hot_rig(4.0)
+    b.run(1000)
+    b.g._toast_set("BACK IN RANGE", "info")
+    b.run(100)
+    _touch_tap(b)
+    b.run(T.KNOCK_WAIT_MS + 200)
+    assert b.p.banner[0] == "BACK IN RANGE"
+    b.run(T.TOAST_MS)
+    assert not any(p.banner and p.banner[0] == "PRESS 2X TO SCAN" for p in b.params)
+
+
+def test_knock_touches_never_toast():
+    def hot():
+        r = hot_rig(4.0)
+        r.state = SC_HOT | ST_TAP_HOT
+        r.run(1000)
+        return r
+
+    def found():
+        r = hot_rig()
+        _found_by_press(r)
+        r.state = SC_FOUND
+        r.run(T.FOUND_CELEBRATE_MS + 300)
+        return r
+
+    for make in (hot, found):
+        for case in ("both", "partner"):
+            r = make()
+            t = r.t + 10
+            r.g.on_touch_down(t)
+            if case == "both":
+                assert r.g.on_accel_tap(t + 20)
+            r.peer_tap(t + 40, 3)               # its report lands a beacon later
+            r.g.on_gesture(t + 100, G_TAP, 120, 120, t)
+            ps = r.run(T.KNOCK_WAIT_MS + 1000)
+            assert not any(p.banner and p.banner[0] in ("PRESS 2X TO SCAN", "PRESS THE BUTTON")
+                           for p in ps), (make.__name__, case)
+    # only our watch spiked: in HOT the felt-it check speaks; in FOUND it was a finger
+    r = hot()
+    t = r.t + 10
+    r.g.on_touch_down(t)
+    assert r.g.on_accel_tap(t + 20)
+    r.g.on_gesture(t + 100, G_TAP, 120, 120, t)
+    ps = r.run(T.KNOCK_WAIT_MS + 1000)
+    assert not any(p.banner and p.banner[0] == "PRESS 2X TO SCAN" for p in ps)
+    f = found()
+    t = f.t + 10
+    f.g.on_touch_down(t)
+    assert f.g.on_accel_tap(t + 20)
+    f.g.on_gesture(t + 100, G_TAP, 120, 120, t)
+    f.run(T.KNOCK_WAIT_MS + 300)
+    assert f.p.banner == ("PRESS THE BUTTON", "info", False) and f.g.mode == M_FOUND
+
+
+def test_filtered_touches_never_toast():
+    r = hot_rig(4.0)
+    r.run(1000)
+    _touch_tap(r, 10, 10)                             # outside the iris: a grip
+    ps = r.run(T.KNOCK_WAIT_MS + 300)
+    assert all(p.banner is None for p in ps)
+    _touch_tap(r)                                     # a tap, then more landings: a burst
+    t = r.t + 10
+    r.g.on_touch_down(t + 150)
+    r.g.on_touch_down(t + 300)
+    ps = r.run(T.KNOCK_WAIT_MS + 300)
+    assert all(p.banner is None for p in ps)
+    o = hot_rig(4.0)                            # the screen goes dark inside the knock wait
+    o.face_up = False
+    o.run(100)
+    while ticks_diff(o.t, o.g._down_since) < T.WRIST_DOWN_MS - 300:
+        o.run(100)
+    _touch_tap(o)
+    ps = o.run(T.KNOCK_WAIT_MS + 300)
+    assert not o.g.screen_on and all(p.banner is None for p in ps)
+    d = hot_rig(4.0)
+    d.face_up = False
+    _dark(d)
+    _touch_tap(d)                                     # a dark screen
+    ps = d.run(T.KNOCK_WAIT_MS + 300)
+    assert all(p.banner is None for p in ps)
+
+
+def test_no_toast_where_the_screen_already_says_it():
+    def tap_quiet(r, packets=True):
+        _touch_tap(r)
+        ps = r.run(T.KNOCK_WAIT_MS + 400, packets=packets)
+        assert all(p.banner is None for p in ps), [(p.screen, p.banner) for p in ps]
+
+    h = hot_rig()                               # bump-ready: BUMP! holds the slot
+    assert h.p.word == "BUMP!"
+    tap_quiet(h)
+    s = _to_split(Rig())                        # SEARCHING: the split ends with no link
+    while s.g.mode != M_SEARCHING:
+        s.run(100, packets=False)
+    s.run(T.TOAST_MS, packets=False)
+    tap_quiet(s, packets=False)
+    w = warm_rig()                              # LINK-LOST: its banner owns the slot
+    w.run(6000, packets=False)
+    assert w.p.screen == "LINK_LOST"
+    _touch_tap(w)
+    ps = w.run(T.KNOCK_WAIT_MS + 400, packets=False)
+    assert all(p.banner[0] == "SIGNAL LOST" for p in ps), [p.banner for p in ps]
+    c = Rig()
+    c.rssi = -50
+    c.run(600)
+    c.g.on_button(c.t)
+    c.run(100)
+    assert c.p.sub == "confirmed"
+    tap_quiet(c)
+    f = hot_rig()
+    _found_by_press(f)
+    f.state = SC_FOUND
+    tap_quiet(f)                                # celebrate
+
+
+def test_ignored_toast_dropped_when_the_screen_changed():
+    r = hot_rig(4.0)
+    r.run(1000)
+    _touch_tap(r)
+    _found_by_press(r)                          # FOUND inside the knock wait
+    ps = r.run(T.KNOCK_WAIT_MS + 300)
+    assert not any(p.banner and p.banner[0] == "PRESS 2X TO SCAN" for p in ps)
+
+
+def test_ignored_toasts_drop_once_their_screen_moves_on():
+    def press_2x_up(r):
+        _touch_tap(r)
+        r.run(T.KNOCK_WAIT_MS + 200)
+        assert r.p.banner == ("PRESS 2X TO SCAN", "info", False)
+
+    def no_toast(ps, text):
+        assert not any(p.banner and p.banner[0] == text for p in ps), \
+            [(p.screen, p.sub, p.word, p.banner) for p in ps]
+
+    b = hot_rig(4.0)                            # BUMP! takes the slot: gone on that frame
+    b.state = SC_WARM
+    _bump_ready(b)
+    b.run(1000)
+    assert b.p.word is None and b.p.top_text == "FRIEND NOT READY"
+    press_2x_up(b)
+    b.state = SC_HOT
+    ps = b.run(400)
+    assert ps[-1].word == "BUMP!"
+    no_toast([p for p in ps if p.word is not None], "PRESS 2X TO SCAN")
+    f = hot_rig(4.0)                            # a bump or the fallback: not over FOUND
+    f.run(1000)
+    press_2x_up(f)
+    _found_by_press(f)
+    f.run(300)
+    no_toast([p for p in f.params if p.screen == "FOUND"], "PRESS 2X TO SCAN")
+    c = hot_rig(4.0)                            # following it: not over the scan's countdown
+    c.run(1000)
+    press_2x_up(c)
+    c.g.on_button(c.t)
+    c.run(100)
+    c.g.on_button(c.t)
+    c.run(300)
+    assert c.g.mode == M_SCANNING
+    no_toast([p for p in c.params if p.screen == "SCANNING"], "PRESS 2X TO SCAN")
+    m = hot_rig(4.0)                            # the MENU hides it, like any toast
+    m.run(1000)
+    press_2x_up(m)
+    m.g.on_button(m.t, long=True)
+    m.run(200)
+    assert m.p.screen == "MENU"
+    m.g.on_button(m.t, long=True)               # RESUME
+    m.run(100)
+    assert m.p.screen == "HOT" and m.p.banner[0] == "PRESS 2X TO SCAN"
+    g = hot_rig(4.0)                            # BUMP! on the very tick it is raised:
+    g.state = SC_WARM                           # never seen, so no gap is spent
+    _bump_ready(g)
+    g.run(1000)
+    _touch_tap(g)
+    g.run(T.KNOCK_WAIT_MS)
+    g.state = SC_HOT
+    ps = g.run(100)
+    assert ps[-1].word == "BUMP!" and ps[-1].banner is None and g.g._ign_t is None
+    g.state = SC_WARM
+    g.run(1500)
+    press_2x_up(g)
+    w = hot_rig(4.0)                            # HOT ends into WARM: readout, no word
+    w.run(1000)
+    press_2x_up(w)
+    w.est.fixed = 12.0
+    ps = w.run(3000)
+    assert ps[-1].screen == "WARM"
+    no_toast([p for p in ps if p.screen != "HOT"], "PRESS 2X TO SCAN")
+    s = Rig()                                   # the partner is seen under the hint
+    s.run(T.HOWTO_HINT_MS + 300, packets=False)
+    assert s.p.banner[0] == "SWIPE: HOW TO PLAY"
+    s.rssi = -50
+    ps = s.run(1500)
+    seen = [p for p in ps if p.sub == "seen"]
+    assert seen
+    no_toast(seen, "SWIPE: HOW TO PLAY")
+
+
+def test_held_celebrate_tap_stays_silent_in_result():
+    r = hot_rig()
+    _found_by_press(r)
+    r.state = SC_FOUND
+    while ticks_diff(r.t, r.g.found_t) < T.FOUND_CELEBRATE_MS - 200:
+        r.run(100)
+    t = r.t + 10                                # lands in celebrate with its own spike:
+    r.g.on_touch_down(t)                        # held past the end of celebrate
+    assert r.g.on_accel_tap(t + 20)
+    r.g.on_gesture(t + 100, G_TAP, 120, 120, t)
+    ps = r.run(T.KNOCK_WAIT_MS + 1000)
+    assert ps[-1].sub == "result"
+    assert not any(p.banner and p.banner[0] == "PRESS THE BUTTON" for p in ps)
+
+
+def test_ignored_tap_or_press_in_looking_says_swipe():
+    r = _looking(500)
+    _touch_tap(r)
+    r.run(T.KNOCK_WAIT_MS + 200, packets=False)
+    assert r.p.banner == ("SWIPE: HOW TO PLAY", "info", False)
+    ps = r.run(T.TOAST_MS + T.IGNORED_TOAST_GAP_MS, packets=False)
+    end = next(k for k, p in enumerate(ps) if p.banner is None)
+    assert not any(p.banner for p in ps[end:])  # the timed hint does not repeat it
+    r.g.on_button(r.t)
+    r.run(T.KNOCK_WAIT_MS + 200, packets=False)
+    assert r.p.banner == ("SWIPE: HOW TO PLAY", "info", False)

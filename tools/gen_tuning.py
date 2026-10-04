@@ -43,12 +43,12 @@ SPEC = (
         ("LOGIC_MS", 100, "logic rate: one RenderParams per 100 ms (10 Hz)"),
         ("SCREENS", ("PAIRING", "SEARCHING", "FAR", "NEAR", "WARM", "HOT", "FOUND",
                      "SCANNING", "LINK_LOST", "MENU"), None),
-        ("SUBS_PAIRING", ("looking", "seen", "confirmed", "calibrate", "split"), None),
+        ("SUBS_PAIRING", ("looking", "seen", "confirmed", "calibrate", "split", "howto"), None),
         ("SUBS_SCANNING", ("ready", "sweep", "result"), None),
         ("SUBS_DIRECTION", ("reveal", "turn", "walk"), "FAR..HOT sub (or None)"),
         ("SUBS_FOUND", ("celebrate", "result"), None),
         ("GLYPHS", ("glow", "seeker", "chevrons", "arrow", "countdown", "turn", "check",
-                    "runes", "battery"), None),
+                    "runes", "battery", "bump"), None),
         ("BANNER_SEVERITIES", ("info", "warn", "critical"), None),
         ("HEARTBEATS", ("TICK", "DOUBLE"), None),
         ("SPEED_MIN_PX_S", -60.0, None),
@@ -108,6 +108,8 @@ SPEC = (
         ("PAIR_READY_LEFT_S", 3, "split: both ready -> the countdown jumps to 3"),
         ("CAL_GATE_WINDOW_MS", 1000, "RSSI sd over 1 s > unstable_sd pauses the fill"),
         ("SEARCHING_WALK_ABOUT_MS", 45000, None),
+        ("HOWTO_HINT_MS", 5000, "PAIRING looking: SWIPE: HOW TO PLAY toast once after this"),
+        ("HOWTO_PRESS_GUARD_MS", 600, "a press or tap this soon after the cards closed only closes"),
         ("KNOCK_TOUCH_BEFORE_MS", 300, "a touch whose touch-down a counted spike precedes by up to this"),
         ("KNOCK_TOUCH_AFTER_MS", 100, "... or follows by up to this may be a knock's (§8) ..."),
         ("KNOCK_WAIT_MS", 500, "... so it waits this long after the spike for the partner's: "
@@ -116,8 +118,13 @@ SPEC = (
         ("BUMP_REFRACTORY_MS", 200, None),
         ("BUMP_READY_HOLD_MS", 1500, "band <3 held 1.5 s"),
         ("BUMP_READY_BAND", 0, "index of '<3'"),
+        ("BUMP_LIT_MS", 1000, "HOT bump view: a counted spike lights its watch icon this long"),
+        ("FELT_CONFIRM_GRACE_MS", 400, "PAIRING: a friend's felt-it verdict waits KNOCK_WAIT_MS + this "
+                                       "for its confirm (a confirming tap gets none)"),
         ("HOT_SCAN_PRESS_MS", 1000, "HOT: 2nd short press within this starts a scan (§8)"),
         ("FOUND_CELEBRATE_MS", 2000, None),
+        ("FOUND_TIME_MAX_S", 5999, "TIME chip m:ss caps at 99:59 (§6 FOUND)"),
+        ("FOUND_WORD_MSS_MAX_S", 599, "FOUND word: m:ss up to 9:59, then FOUNDmm:ss, FOUND 1H+ past the cap"),
         ("PARTNER_LEFT_MS", 2000, "partner in PAIRING this long: it left (§6 MENU)"),
         ("BATT_SHUTDOWN_PCT", 3, None),
         ("BATT_INTERSTITIAL_MS", 2500, None),
@@ -125,17 +132,19 @@ SPEC = (
         ("BYE_WORD_MS", 2000, None),
         ("GOODBYE_BEACONS", 3, None),
         ("GOODBYE_GRACE_MS", 1000, "power off this long after the BYE word (§6 LOW-BATTERY)"),
-        ("LOST_TIMER_MAX_S", 599, "m:ss up to 9:59, then 10M+"),
-        ("LOST_HINT_AFTER_MS", 20000, "GO BACK / KEEP ON"),
+        ("LOST_HINT_AFTER_MS", 20000, "LOST: GO BACK / KEEP ON, from the last packet"),
         ("WAKE_BOOST_MS", 3000, None),
+        ("FOUND_LIT_MS", 10000, "entering FOUND holds the screen lit this long (§8 event wake)"),
+        ("EVENT_LIT_MS", 5000, "HOT entry, bump-ready, LINK-LOST, FRIEND LEFT: lit this long (§8)"),
         ("WRIST_DOWN_MS", 10000, "on battery: screen off once lowered this long (§8)"),
         ("WRIST_DOWN_DEG", 60, "lowered: tilted more than this from face-up"),
         ("SCAN_READY_DOWN_MS", 2000, "scan ready: cancels once not flat this long"),
         ("IDLE_DIM_MS", 30000, None),
         ("IDLE_DIM_BACKLIGHT", 0.35, "ui-spec §8: face-up > 30 s with no input"),
         ("STATUS_AFTER_WAKE_MS", 3000, None),
-        ("HINT_CHIP_MS", 4000, "TAP TO SCAN / LOOK AROUND"),
+        ("HINT_CHIP_MS", 4000, "top-slot hint chips (TAP TO SCAN, LOOK UP, FIND YOUR FRIEND, ...)"),
         ("HINT_STILL_MS", 6000, "TAP TO SCAN after 6 s still with no arrow"),
+        ("IGNORED_TOAST_GAP_MS", 5000, "an ignored-tap toast at most once per this (§8)"),
         ("TAP_MIN_MS", 60, None),
         ("TAP_MAX_MS", 400, None),
         ("TAP_MOVE_PX", 12, None),
@@ -745,6 +754,9 @@ def build(tok):
     g = tok["glyphs"]
     runes = tuple((r["name"], _tup(r["prims"])) for r in g["runes"]["set"])
     bars = g["link_bars"]
+    bw = g["bump_watches"]
+    bb = bw["body"]
+    bs = bw["strap"]
     if int(bars["count"]) != len(bars["heights"]):
         raise ValueError("tokens.json glyphs.link_bars.count != len(heights)")
     sec("Glyph geometry (glyphs), relative to CENTER, pointing up", [
@@ -763,6 +775,12 @@ def build(tok):
         ("TURN_HEAD_PTS", _tup(g["turn_right"]["head"]), None),
         ("RUNE_STROKE", int(g["runes"]["stroke"]), None),
         ("RUNES", runes, "(name, prims)"),
+        ("BUMP_WATCH_DX", tuple(bw["centers_dx"]), "bump view: your watch left, the friend's right"),
+        ("BUMP_BODY", (bb["w"], bb["h"], bb["y"], bb["r"], bb["stroke"]),
+         "(w, h, y, r, stroke): the stroke's path-centre rect"),
+        ("BUMP_STRAP", (bs["w"], bs["h"], bs["y"][0], bs["y"][1]), "(w, h, y_top, y_bottom)"),
+        ("BUMP_RAYS", _tup(bw["rays"]["lines"]), "((x0, y0), (x1, y1)) per ray"),
+        ("BUMP_RAY_STROKE", int(bw["rays"]["stroke"]), "round caps"),
         ("LINK_BARS", (bars["w"], bars["gap"], tuple(bars["heights"])), "(w, gap, heights)"),
         ("LINK_Q_MAX", int(bars["count"]), "status link bars 0..count"),
     ])
