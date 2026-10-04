@@ -79,7 +79,6 @@ class Renderer {
   void draw_runes(const RP& p, FrameBuffer& fb);
 
   uint8_t map_[W * W];   // ring-index map (ui/field.py RingMap)
-  int32_t dt_;           // the field's smoothed frame interval, ms (RippleField keeps its own private)
   ticks_t t_;            // the last drawn frame's clock
   int scr_;
   Sub sub_;

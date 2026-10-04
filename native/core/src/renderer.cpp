@@ -107,7 +107,6 @@ Renderer::Renderer() {
 
 void Renderer::reset() {
   field.reset();
-  dt_ = 50;
   t_ = 0;
   scr_ = -1;
   sub_ = Sub::NONE;
@@ -153,12 +152,6 @@ haptic_patterns::Haptic Renderer::step(const RP& p, ticks_t t) {
   RippleField& f = field;
   const bool first = !f.started;
   const ticks_t prev_t = f.tick(t, p.fps_cap);
-  if (first) {
-    dt_ = 1000 / (p.fps_cap ? p.fps_cap : T::FPS_TARGET);
-  } else {
-    const int32_t d = ticks_diff(t, prev_t);
-    dt_ = (dt_ * 3 + (d < 1 ? 1 : (d > 250 ? 250 : d))) >> 2;
-  }
   const int scr = (int)p.screen;
   const Sub sub = p.sub;
   const bool changed = scr != scr_ || sub != sub_;
@@ -358,7 +351,8 @@ void Renderer::plan(const RP& p, ticks_t t) {
     }
     const int32_t d = wrap_q4(a_tgt_ - a_q_);
     if (d) {
-      int32_t step = (d * ((dt_ << 8) / (dt_ + ARROW_TAU_MS))) >> 8;
+      const int32_t dt = field.dt();
+      int32_t step = (d * ((dt << 8) / (dt + ARROW_TAU_MS))) >> 8;
       if (step == 0 || (-8 < d && d < 8)) step = d;
       a_q_ = (int32_t)floormod(a_q_ + step, 5760);
     }
