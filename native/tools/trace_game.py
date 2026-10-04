@@ -260,7 +260,7 @@ def record(keys):
 # module's when its port lands. Recording costs about 50 us a call, so a wide
 # test (test_game, test_episode: a minute or more with every class) records
 # only the classes no unit test covers.
-TESTS = (("test_proto", None), ("test_link", None),
+TESTS = (("test_proto", None), ("test_link", None), ("test_scan", None),
          ("test_game", ("finder.session.MotionSnap", "finder.session.PeerView", "finder.session.LiveMirror")))
 
 
