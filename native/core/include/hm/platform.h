@@ -1,4 +1,4 @@
-// The watch's parts as the game loop (hm::app::Runtime, a port of
+// The watch's parts as the game loop (hm::runtime::Runtime, a port of
 // app/runtime.py) uses them: the methods of hal/*.py that app/runtime.py
 // calls, with a status return where the Python raises OSError (the core is
 // built without exceptions).
@@ -8,9 +8,9 @@
 // those buses (hm::I2c, hm::LcdBus), the backlight and motor PWM, the radio
 // (hm::esp::EspNowRadio on both ESP32 builds) and the clock, then loops:
 //
-//     hm::app::Runtime rt(parts, clock);
+//     static hm::runtime::Runtime rt(parts, clock);   // hm/runtime.h
 //     rt.begin();
-//     for (;;) { feed_watchdog(); rt.idle(rt.step()); }
+//     for (;;) { feed_watchdog(); int32_t w = rt.step(); if (w > 0) rt.idle(w); }
 //
 // native/test fakes every part (as tests/test_app_runtime.py does). A part
 // that is absent is a null pointer in Parts, as Runtime(parts=...) leaves it

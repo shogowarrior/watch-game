@@ -3,7 +3,7 @@
 //
 //     static hm::runtime::Runtime rt(parts, clock);   // ~110 KB: never on a stack
 //     rt.begin();
-//     for (;;) { feed_watchdog(); rt.idle(rt.step()); }
+//     for (;;) { feed_watchdog(); int32_t w = rt.step(); if (w > 0) rt.idle(w); }
 //
 // One step() runs the Python's stages in its order (read its docstring for
 // the why of each): radio (drain -> LinkMonitor -> game.on_packet), imu
