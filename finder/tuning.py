@@ -6,7 +6,7 @@ Plain constants only; blocks marked 'ui-spec only' come from ui-spec.md.
 """
 
 TOKENS_VERSION = '0.2.0'
-TOKENS_HASH = '471ac7fada25b8bd'
+TOKENS_HASH = '87afb72d2d98ae4d'
 
 # ---- Zones (thresholds.zones_m): boundary k is between zone k and k+1
 ZONE_FAR = 0
