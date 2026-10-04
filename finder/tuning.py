@@ -6,7 +6,7 @@ Plain constants only; blocks marked 'ui-spec only' come from ui-spec.md.
 """
 
 TOKENS_VERSION = '0.2.0'
-TOKENS_HASH = '52e4ab099a33bf8f'
+TOKENS_HASH = '4ecd066c335769c8'
 
 # ---- Zones (thresholds.zones_m): boundary k is between zone k and k+1
 ZONE_FAR = 0
@@ -238,7 +238,15 @@ RAMP_LUT = {
 CENTER = (120, 120)
 TOP_SLOT = (12, 12, 216, 24)
 BOTTOM_SLOT = (24, 186, 192, 40)
-IRIS_R = {'none': 0, 'chevrons': 44, 'arrow': 64, 'scan': 64, 'runes': 92, 'seeker': 44}
+IRIS_R = {
+    'none': 0,
+    'chevrons': 44,
+    'arrow': 64,
+    'scan': 64,
+    'runes': 92,
+    'seeker': 44,
+    'bump': 64,
+}
 BEAM_R = 60
 SWEEP_R_INNER = 70
 SWEEP_R_OUTER = 110
@@ -325,6 +333,12 @@ RUNES = (
     ('cross', (('line', (0, -20), (0, 20)), ('line', (-20, 0), (20, 0)))),
     ('moon', (('disc', 0, 0, 18), ('cut_disc', 7, -4, 15))),
 )
+BUMP_WATCH_DX = (-20, 20)  # bump view: your watch left, the friend's right
+BUMP_BODY = (34, 40, -22, 7, 4)  # (w, h, y, r, stroke): the stroke's path-centre rect
+BUMP_STRAP = (20, 14, -36, 18)  # (w, h, y_top, y_bottom)
+# ((x0, y0), (x1, y1)) per ray
+BUMP_RAYS = (((-7, -44), (-12, -51)), ((0, -46), (0, -55)), ((7, -44), (12, -51)))
+BUMP_RAY_STROKE = 4  # round caps
 LINK_BARS = (4, 2, (4, 7, 10, 13))  # (w, gap, heights)
 LINK_Q_MAX = 4  # status link bars 0..count
 
@@ -403,8 +417,11 @@ BUMP_ODR_HZ = 800  # accelerometer rate while a bump can count
 BUMP_REFRACTORY_MS = 200
 BUMP_READY_HOLD_MS = 1500  # band <3 held 1.5 s
 BUMP_READY_BAND = 0  # index of '<3'
+BUMP_LIT_MS = 1000  # HOT bump view: a counted spike lights its watch icon this long
 HOT_SCAN_PRESS_MS = 1000  # HOT: 2nd short press within this starts a scan (§8)
 FOUND_CELEBRATE_MS = 2000
+FOUND_TIME_MAX_S = 5999  # TIME chip m:ss caps at 99:59 (§6 FOUND)
+FOUND_WORD_MSS_MAX_S = 599  # FOUND word: m:ss up to 9:59, then whole minutes, 99M+ past the cap
 PARTNER_LEFT_MS = 2000  # partner in PAIRING this long: it left (§6 MENU)
 BATT_SHUTDOWN_PCT = 3
 BATT_INTERSTITIAL_MS = 2500
@@ -415,6 +432,8 @@ GOODBYE_GRACE_MS = 1000  # power off this long after the BYE word (§6 LOW-BATTE
 LOST_TIMER_MAX_S = 599  # m:ss up to 9:59, then 10M+
 LOST_HINT_AFTER_MS = 20000  # GO BACK / KEEP ON
 WAKE_BOOST_MS = 3000
+FOUND_LIT_MS = 10000  # entering FOUND holds the screen lit this long (§8 event wake)
+EVENT_LIT_MS = 5000  # HOT entry, bump-ready, LINK-LOST, FRIEND LEFT: lit this long (§8)
 WRIST_DOWN_MS = 10000  # on battery: screen off once lowered this long (§8)
 WRIST_DOWN_DEG = 60  # lowered: tilted more than this from face-up
 SCAN_READY_DOWN_MS = 2000  # scan ready: cancels once not flat this long

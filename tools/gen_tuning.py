@@ -107,8 +107,11 @@ SPEC = (
         ("BUMP_REFRACTORY_MS", 200, None),
         ("BUMP_READY_HOLD_MS", 1500, "band <3 held 1.5 s"),
         ("BUMP_READY_BAND", 0, "index of '<3'"),
+        ("BUMP_LIT_MS", 1000, "HOT bump view: a counted spike lights its watch icon this long"),
         ("HOT_SCAN_PRESS_MS", 1000, "HOT: 2nd short press within this starts a scan (§8)"),
         ("FOUND_CELEBRATE_MS", 2000, None),
+        ("FOUND_TIME_MAX_S", 5999, "TIME chip m:ss caps at 99:59 (§6 FOUND)"),
+        ("FOUND_WORD_MSS_MAX_S", 599, "FOUND word: m:ss up to 9:59, then whole minutes, 99M+ past the cap"),
         ("PARTNER_LEFT_MS", 2000, "partner in PAIRING this long: it left (§6 MENU)"),
         ("BATT_SHUTDOWN_PCT", 3, None),
         ("BATT_INTERSTITIAL_MS", 2500, None),
@@ -119,6 +122,8 @@ SPEC = (
         ("LOST_TIMER_MAX_S", 599, "m:ss up to 9:59, then 10M+"),
         ("LOST_HINT_AFTER_MS", 20000, "GO BACK / KEEP ON"),
         ("WAKE_BOOST_MS", 3000, None),
+        ("FOUND_LIT_MS", 10000, "entering FOUND holds the screen lit this long (§8 event wake)"),
+        ("EVENT_LIT_MS", 5000, "HOT entry, bump-ready, LINK-LOST, FRIEND LEFT: lit this long (§8)"),
         ("WRIST_DOWN_MS", 10000, "on battery: screen off once lowered this long (§8)"),
         ("WRIST_DOWN_DEG", 60, "lowered: tilted more than this from face-up"),
         ("SCAN_READY_DOWN_MS", 2000, "scan ready: cancels once not flat this long"),
@@ -618,6 +623,9 @@ def build(tok):
     g = tok["glyphs"]
     runes = tuple((r["name"], _tup(r["prims"])) for r in g["runes"]["set"])
     bars = g["link_bars"]
+    bw = g["bump_watches"]
+    bb = bw["body"]
+    bs = bw["strap"]
     if int(bars["count"]) != len(bars["heights"]):
         raise ValueError("tokens.json glyphs.link_bars.count != len(heights)")
     sec("Glyph geometry (glyphs), relative to CENTER, pointing up", [
@@ -636,6 +644,12 @@ def build(tok):
         ("TURN_HEAD_PTS", _tup(g["turn_right"]["head"]), None),
         ("RUNE_STROKE", int(g["runes"]["stroke"]), None),
         ("RUNES", runes, "(name, prims)"),
+        ("BUMP_WATCH_DX", tuple(bw["centers_dx"]), "bump view: your watch left, the friend's right"),
+        ("BUMP_BODY", (bb["w"], bb["h"], bb["y"], bb["r"], bb["stroke"]),
+         "(w, h, y, r, stroke): the stroke's path-centre rect"),
+        ("BUMP_STRAP", (bs["w"], bs["h"], bs["y"][0], bs["y"][1]), "(w, h, y_top, y_bottom)"),
+        ("BUMP_RAYS", _tup(bw["rays"]["lines"]), "((x0, y0), (x1, y1)) per ray"),
+        ("BUMP_RAY_STROKE", int(bw["rays"]["stroke"]), "round caps"),
         ("LINK_BARS", (bars["w"], bars["gap"], tuple(bars["heights"])), "(w, gap, heights)"),
         ("LINK_Q_MAX", int(bars["count"]), "status link bars 0..count"),
     ])

@@ -65,6 +65,19 @@ def fmt_mss(ms):
     return "%d:%02d" % (s // 60, s % 60)
 
 
+def fmt_found(s):
+    """FOUND result word for a round of ``s`` seconds (ui-spec §6 FOUND):
+    ``FOUND m:ss`` up to 9:59, then whole minutes (``FOUND 12M``), and
+    ``FOUND 99M+`` past the 99:59 cap. At most 10 type.word characters."""
+    if s < 0:
+        s = 0
+    if s <= T.FOUND_WORD_MSS_MAX_S:
+        return "FOUND %d:%02d" % (s // 60, s % 60)
+    if s <= T.FOUND_TIME_MAX_S:
+        return "FOUND %dM" % (s // 60)
+    return "FOUND 99M+"
+
+
 class MotionSnap:
     """Own motion inputs for one logic tick (from finder.motion or the sim)."""
 

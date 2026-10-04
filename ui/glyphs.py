@@ -357,6 +357,63 @@ def draw_rune(fb, y0, rid, cx, c):
             fb.ellipse(cx + op[1], y + op[2], op[3], op[3], BG_IRIS, True)
 
 
+# ---- HOT bump view (tokens.glyphs.bump_watches) ----------------------------
+# Two watch icons, yours left and the friend's right, with 3 rays above.
+# Rects are (x, y, w, h, r) in px, precomputed per icon; rows are inclusive.
+_BB = T.BUMP_BODY                   # (w, h, y, r, stroke): path-centre rect
+_BS = T.BUMP_STRAP                  # (w, h, y_top, y_bottom)
+_BH = _BB[4] // 2
+BUMP_OUT = tuple((CX + dx - (_BB[0] + _BB[4]) // 2, CY + _BB[2] - _BH,
+                  _BB[0] + _BB[4], _BB[1] + _BB[4], _BB[3] + _BH)
+                 for dx in T.BUMP_WATCH_DX)
+BUMP_IN = tuple((CX + dx - (_BB[0] - _BB[4]) // 2, CY + _BB[2] + _BH,
+                 _BB[0] - _BB[4], _BB[1] - _BB[4], _BB[3] - _BH)
+                for dx in T.BUMP_WATCH_DX)
+BUMP_STRAP_X = tuple(CX + dx - _BS[0] // 2 for dx in T.BUMP_WATCH_DX)
+BUMP_STRAP_Y = (CY + _BS[2], CY + _BS[3])
+_BR = T.BUMP_RAY_STROKE // 2
+BUMP_RAYS = tuple(thick_line(a[0], a[1], b[0], b[1], T.BUMP_RAY_STROKE)
+                  for a, b in T.BUMP_RAYS)
+BUMP_CAPS = tuple(p for ray in T.BUMP_RAYS for p in ray)
+_BUMP_RAY_ROWS = (CY + min(p[1] for p in BUMP_CAPS) - _BR,
+                  CY + max(p[1] for p in BUMP_CAPS) + _BR)
+_BUMP_BODY_ROWS = (BUMP_OUT[0][1], BUMP_OUT[0][1] + BUMP_OUT[0][3] - 1)
+# per icon state: 0 ready, 1 lit (its spike counted), 2 off (cannot count)
+_BW_STROKE = (PROX[6], PROX[7], GREY[5])
+_BW_FILL = (BG_IRIS, PROX[7], BG_IRIS)   # [1] unused: lit skips the inner rect
+_BW_STRAP = (PROX[4], PROX[6], GREY[3])
+BUMP_Y0 = _BUMP_RAY_ROWS[0]
+BUMP_Y1 = BUMP_STRAP_Y[1] + _BS[1]  # exclusive
+
+
+def draw_bump(fb, y0, y1, bits):
+    """HOT bump view (ui-spec §6 HOT): ``bits`` is ``RenderParams.bump_icons``.
+
+    Bit 0 lights your watch, bit 1 the friend's, bit 2 greys the friend's
+    (its screen cannot count a bump). Each part is skipped on strips it misses.
+    """
+    sh = _BS[1]
+    for k in range(2):
+        st = 1 if bits & (1 << k) else (2 if k == 1 and bits & 4 else 0)
+        x = BUMP_STRAP_X[k]
+        for sy in BUMP_STRAP_Y:
+            if sy < y1 and sy + sh > y0:
+                fb.fill_rect(x, sy - y0, _BS[0], sh, _BW_STRAP[st])
+        if _BUMP_BODY_ROWS[0] < y1 and _BUMP_BODY_ROWS[1] >= y0:
+            o = BUMP_OUT[k]
+            rrect(fb, o[0], o[1] - y0, o[2], o[3], o[4], _BW_STROKE[st])
+            if st != 1:             # lit: stroke and fill are one colour
+                i = BUMP_IN[k]
+                rrect(fb, i[0], i[1] - y0, i[2], i[3], i[4], _BW_FILL[st])
+    if _BUMP_RAY_ROWS[0] < y1 and _BUMP_RAY_ROWS[1] >= y0:
+        c = PROX[7] if bits & 3 else (GREY[5] if bits & 4 else PROX[6])
+        y = CY - y0
+        for q in BUMP_RAYS:
+            fb.poly(CX, y, q, c, True)
+        for p in BUMP_CAPS:
+            fb.ellipse(CX + p[0], y + p[1], _BR, _BR, c, True)
+
+
 # ---- sweep wedge, bins, pacer ----------------------------------------------
 SW_R0 = T.SWEEP_R_INNER
 SW_R1 = T.SWEEP_R_OUTER
