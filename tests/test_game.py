@@ -1343,7 +1343,7 @@ def test_low_battery_ladder_and_goodbye():
     g.set_battery(r.t, 10)
     r.run(100)
     assert r.p.glyph == "battery" and r.p.word == "SAVER ON" and r.p.haptic == "BATT"
-    assert r.p.fps_cap == 15 and g.beacon_hz == 5
+    assert r.p.fps_cap == T.SAVER_FPS == 10 and g.beacon_hz == 5
     r.run(2600)
     assert r.p.glyph != "battery"
     assert r.p.backlight == T.SAVER_BACKLIGHT          # before any idle dim

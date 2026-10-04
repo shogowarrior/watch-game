@@ -3,7 +3,8 @@
 # Skip the app (REPL stays free for mpremote / the notebook) by creating
 # /noapp (tools/deploy.py --noapp) or by double-pressing, or holding, the side
 # key within the first second after boot. Ctrl-C stops the game; then
-# ``import app; app.rt.print_stats()`` shows the loop timing. With /tele
+# ``import app; app.rt.print_stats()`` shows the loop timing; every 10 s the game
+# prints an ``fps ... lock ... jit ...`` line (frame lock and jitter, app/runtime.py). With /tele
 # (tools/deploy.py --tele A) the game logs telemetry to /log. The watchdog
 # (hal/watchdog.py) is the stoppable soft one while the game has only run on
 # USB, and the ESP32 hardware WDT from the first battery reading off USB. A
@@ -35,7 +36,8 @@ else:
                 kw["telemetry"] = session(dev)  # appends to /log/<n>_<dev>.jsonl
             except OSError:
                 pass                            # no /tele (or no /log): no telemetry
-            app.run(board, watchdog_ms=8000, **kw)   # hal/watchdog.py: reboots a hung loop
+            # hal/watchdog.py reboots a hung loop; an fps line every 10 s (app/runtime.py)
+            app.run(board, watchdog_ms=8000, fps_log_ms=10000, **kw)
     except KeyboardInterrupt:
         print("stopped: import app; app.rt.print_stats()")
     except Exception as e:  # noqa: BLE001 - keep the REPL reachable

@@ -1656,3 +1656,78 @@ def test_stage_sums_stay_small_ints():
     assert rt.st_us[S_RENDER] <= ACC_LIMIT_US < 2 ** 30
     s = rt.stats(reset=False)
     assert s["render"][0] == 40.0 and s["render"][1] == 40.0
+
+
+class CostDisplay(SlowDisplay):
+    """Strips cost ``costs[k % len]`` ms in turn (a frame ~70-90 ms)."""
+
+    def __init__(self, clock, costs=(7, 8, 9)):
+        SlowDisplay.__init__(self, clock)
+        self.costs = costs
+
+    def push_strip(self, y0, h, buf):
+        self.clock.now += self.costs[self.pushes % len(self.costs)]
+        self.pushes += 1
+
+
+def _paced_watch(clock, display, **kw):
+    from app.runtime import Runtime
+    rt = Runtime(Board(display=display, imu=FakeIMU(clock), haptics=RecMotor(clock)),
+                 parts=("display", "imu", "haptics"), clock=clock, sleep_ms=clock.sleep,
+                 renderer=_renderer(), gc_collect=lambda: None, **kw)
+    drawn = []                               # (the frame's time, real time) when drawn
+    frame = rt.renderer.frame
+
+    def rec(p, disp, now):
+        if disp is not None:
+            drawn.append((now, clock.now))
+        return frame(p, disp, now)
+    rt.renderer.frame = rec
+    return rt, drawn
+
+
+def test_frame_lock_holds_what_slow_frames_fit_and_steps_evenly():
+    """ui-spec §4 rule 6: 70-90 ms frames cannot hold 20 fps, so the lock
+    drops to 10 at once; every frame then animates exactly 100 ms on from the
+    one before and starts on its slot (nothing else costs time here)."""
+    fakes.install()
+    clock = Clock(0)
+    rt, drawn = _paced_watch(clock, CostDisplay(clock))
+    rt.run(max_ms=6000)
+    pc = rt.pacer
+    assert pc.fps == 10 and pc.changes == 1, (pc.fps, pc.changes)
+    late = [x for x in drawn if x[0] >= 1000]
+    assert len(late) >= 45, len(late)
+    for k in range(len(late) - 1):
+        assert late[k + 1][0] - late[k][0] == 100, late[k:k + 2]
+        assert late[k][1] == late[k][0], late[k]       # drawn on its slot
+    assert 9.5 <= rt.fps <= 10.5, rt.fps
+
+
+def test_fps_line_reports_lock_misses_and_jitter():
+    fakes.install()
+    clock = Clock(0)
+    rt, drawn = _paced_watch(clock, CostDisplay(clock), fps_log_ms=2000)
+    lines = []
+    rt.log_line = lines.append
+    rt.run(max_ms=6500)
+    assert len(lines) == 3, lines
+    w = lines[-1].split()
+    assert w[0::2] == ["fps", "lock", "miss", "late", "jit", "max", "cost", "gc", "log"], w
+    v = dict(zip(w[0::2], w[1::2]))
+    assert 9.0 <= float(v["fps"]) <= 10.5 and v["lock"] == "10" and v["miss"] == "0", v
+    assert v["late"] == "0/0", v                    # the fake loop wakes on the slot
+    assert int(v["max"]) <= 103 and float(v["jit"]) < 3.0, v   # strips 7-9 ms
+    assert 70 <= int(v["cost"]) <= 90, v
+    w0 = lines[0].split()
+    assert w0[3] == "20" or w0[3] == "10", w0       # first window: the drop shows
+
+
+def test_fps_line_off_by_default():
+    fakes.install()
+    clock = Clock(0)
+    rt, drawn = _paced_watch(clock, CostDisplay(clock))
+    lines = []
+    rt.log_line = lines.append
+    rt.run(max_ms=12000)
+    assert lines == []

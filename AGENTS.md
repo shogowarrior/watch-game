@@ -25,6 +25,7 @@ watches.** Every threshold is a starting value to calibrate.
 | `boot.py` | Minimal: silences IDF logs. No Wi-Fi, no webrepl, no app code. |
 | `main.py` | Safe-boot check (`/noapp` or side-key double press / hold), `Board().init()`, then `app.run(board, watchdog_ms=8000)`. |
 | `app/runtime.py` | The watch main loop `Runtime.step(now)`: radio, imu, touch, button, logic (10 Hz), render, tx, haptic, gc. |
+| `app/pacer.py` | `FramePacer`: the frame lock (20, 10, 8, 7, 6, 5 fps from measured cost), slot times for even motion, the serial fps line's counters. |
 | `app/imu_feed.py` | BMA423 FIFO (100 Hz mg) -> `MotionTracker` at 25 Hz in g, plus the bump spike detector. |
 | `app/telemetry.py` | JSONL telemetry for field tests (`session()`; main.py turns it on when `/tele` exists). |
 | `hal/` | The only code that touches hardware. See `hal/README.md` (drivers, gotchas, bench tools). |
@@ -102,7 +103,7 @@ sets it as CPython would.
 | `python3 tools/drift_demo.py` | Why accelerometer double integration fails. |
 | `python3 tools/build_sim.py` | Build the web simulator into `dist/sim/` (needs `tools/mpy` npm install). |
 | `mpremote run tools/bench_display.py` | **On the watch**: real SPI clock, push/blit timings, fps. |
-| `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push) and the overlays of each strip, push variants, whether a send thread could overlap the drawing, IMU cost per rate, which kernels run as viper, and 10 s of the game loop with bump sensing off then on. |
+| `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push) and the overlays of each strip, push variants, whether a send thread could overlap the drawing, IMU cost per rate, which kernels run as viper, and 10 s of the game loop (with its serial `fps` lines: frame lock, misses, jitter) with bump sensing off then on. |
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |
