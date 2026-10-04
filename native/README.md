@@ -3,16 +3,17 @@
 Work in progress. Today this is a **display and motion-sensor benchmark** built
 for two runtimes from one portable C++ core, to find out where MicroPython's
 frame time goes and how much a native runtime gains, and the game's logic and
-renderer ported into that core, checked against the Python. The main loop and
-the watch builds that run the game are next. MicroPython (the rest of the repo)
-is untouched.
+renderer ported into that core, checked against the Python, with the main loop
+(`app/runtime.py`) on top. The ESP-IDF game build (`idf/game/`) runs it; the
+Arduino one is next. MicroPython (the rest of the repo) is untouched.
 
 | Path | What |
 |---|---|
-| `core/` | Portable C++17 with no hardware calls. The game (`finder/`, one `hm::<module>` per Python module, `hm::game::Game` on top, checked call for call below), the game loop's frame lock and IMU feed (`app/pacer.py`, `app/imu_feed.py`: `hm::pacer::FramePacer`, `hm::imu_feed::ImuFeed`, checked the same way), the renderer (`ui/`: `hm::ui::Renderer` draws any strip of a frame; every snapshot fixture's frame matches `tests/snapshot_crc.json`), the ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), the drivers the game loop drives (the PMU, panel, IMU and touch of `hm/platform.h`, checked against `hal/`'s bus traffic below), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h`, `field_tables.h` and `ui_tables.h` are generated. |
-| `esp32_shared/` | ESP32 clock, serial log, backlight PWM, the motion-sensor task on core 0, the spi_master LCD bus, the ESP-NOW radio (IDF 4.4 and 5), the motor and the interrupt lines, plus `esp32_app.h`: those as the game loop's parts (`hm/platform.h`). Plain ESP-IDF calls, so both builds share it. |
+| `core/` | Portable C++17 with no hardware calls. The game (`finder/`, one `hm::<module>` per Python module, `hm::game::Game` on top, checked call for call below), the game loop's frame lock and IMU feed (`app/pacer.py`, `app/imu_feed.py`: `hm::pacer::FramePacer`, `hm::imu_feed::ImuFeed`, checked the same way), the renderer (`ui/`: `hm::ui::Renderer` draws any strip of a frame; every snapshot fixture's frame matches `tests/snapshot_crc.json`), the ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), the drivers the game loop drives (the PMU, panel, IMU and touch of `hm/platform.h`, checked against `hal/`'s bus traffic below), and the game loop (`app/runtime.py`: `hm::runtime::Runtime`, below), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h`, `field_tables.h` and `ui_tables.h` are generated. |
+| `esp32_shared/` | ESP32 clock, serial log, backlight PWM, the motion-sensor task on core 0, the spi_master LCD bus, the ESP-NOW radio (IDF 4.4 and 5), the motor and the interrupt lines, plus `esp32_app.h`: those as the game loop's parts (`hm/platform.h`), and `esp32_game.h`: the game's bring-up and loop task over a shell's buses. Plain ESP-IDF calls, so both builds share it. |
 | `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), one env per graphics library (LovyanGFX, TFT_eSPI, Arduino_GFX, LVGL): see `arduino/README.md`. |
 | `idf/` | PlatformIO: ESP-IDF 5.5, one environment per way of driving the panel: the `esp_lcd` SPI panel IO with DMA (`bench-esplcd`, which also checks a faster BMA423 I2C clock) and SPI2's registers with DMA (`bench-regdma`). `components/hm_idf/` holds the I2C0 and SPI buses they share; its `portable/` (the I2C0 check) runs in the host tests. |
+| `idf/game/` | PlatformIO: the game on ESP-IDF 5.5 (`game`), the buses and `hm::esp::start_game`; `game-qemu` is the same build without the radio and with a panel bus that drops the pixels, for QEMU. |
 | `idf/lvgl/` | PlatformIO: LVGL 9.5 through esp_lvgl_port 2.9 on the same `esp_lcd` bus (`bench-lvgl`). The field is an LVGL image a custom decoder fills from the ring map, so its pixels are the other builds' ones; the HOT chips are LVGL labels; and a third scene has LVGL draw rings itself as arcs. |
 | `micropython/` | `hmlcd`, a C user module for a custom MicroPython 1.29 build: the screen push on core 0 from internal DMA buffers, from the shared ST7789 code and `esp32_shared`'s spi_master bus. |
 | `test/` | Host tests (g++; the code under test with address and UB sanitizers) on fake hardware, plus the golden palettes and frames. `run.py` also builds the ports' portable code and tests (`idf/test/`), and replays the Python game's traces through the game port (`trace.h`, `test_port_*.cpp`) and the `hal/` drivers' bus traffic through the core drivers (`hal_replay.h`, `test_hal_*.cpp`), below. |
@@ -107,6 +108,41 @@ keeps CS low instead), the BMA423's FIFO_DATA may be read in pieces
 does without the BMA423's I2C scan and its feature engine's INTERNAL_STATUS
 read. `hal/*.py` count in `test/traced.txt`'s hash like the game's Python.
 
+### The game loop
+
+`hm::runtime::Runtime` (`core/include/hm/runtime.h`) is `app/runtime.py`: one
+`step()` runs the radio, IMU, touch, button, logic (10 Hz), render (on the
+frame lock), tx and haptic stages in the Python's order, and `idle()` sleeps to
+the next deadline, ticking the motor every ms while a pattern plays. A frame is
+drawn in 24-row strips into two buffers in turn; between strips the motor is
+serviced and touch sampled, as the Python does between its four bands.
+`test/test_runtime.cpp` runs the scenarios of `tests/test_app_runtime.py` on
+the same fake parts, each test named after its Python twin: two watches
+pairing, hunting, bumping and changing the menu for a minute, slow frames,
+low battery, touches and gestures between strips, bus errors, the frame lock
+and the fps line. Not ported: telemetry and debug mode, the gc stage, the
+BMA423 feature engine (so no wrist-raise wake) and the stoppable watchdog
+(`hm/platform.h` says why).
+
+Both ESP32 shells start the game through `esp32_shared`'s `hm/esp32_game.h`:
+the shell starts its buses (and the task watchdog, where its framework does
+not) and calls `start_game(GameBuses{i2c0, i2c1, lcd})`, which brings the parts
+up in `hal/board.py`'s order (the panel at 40 MHz, else 26.67), leaves out any
+that does not come up, as `Board.init(strict=False)` does, and runs the loop on
+core 1, feeding the 8 s task watchdog once per pass. The log:
+
+```
+HM hello variant=idf-game framework=esp-idf_5.5.3
+HM parts pmu=1 display=1 imu=1 touch=1 haptics=1 radio=1 lcd_hz=40000000
+HM fps fps=F lock=L miss=N late_avg=MS late_max=MS jit=MS max=MS cost=MS log_us=US   (every 10 s)
+HM mem stack_free=BYTES heap_free=BYTES heap_min=BYTES                           (once, 10 s in)
+```
+
+The `HM fps` fields are the Python's `fps` line's: frames a second, the frame
+lock, slots missed, how late frames started (mean and worst, ms), the shown
+interval's jitter and worst gap (ms), the cost the lock is chosen from (ms),
+and the line's own print time (us).
+
 ## Build
 
 ```sh
@@ -114,6 +150,7 @@ python3 -m pip install platformio     # once; the first build downloads the tool
 pio run -d native/arduino             # every library env -> native/arduino/.pio/build/<env>/firmware.bin
 pio run -d native/idf                 # -> native/idf/.pio/build/{bench-esplcd,bench-regdma}/firmware.bin
 pio run -d native/idf/lvgl            # -> native/idf/lvgl/.pio/build/bench-lvgl/firmware.bin
+pio run -d native/idf/game            # -> native/idf/game/.pio/build/{game,game-qemu}/firmware.bin
 ```
 
 ## Wi-Fi details
@@ -155,6 +192,7 @@ work, but a push never finishes: QEMU's SPI model has no DMA.
 ```sh
 python3 native/tools/qemu_run.py --install        # once: Espressif's QEMU, sha256-checked (Linux: apt-get install libslirp0)
 python3 native/tools/qemu_run.py native/idf       # or native/arduino, or a build dir; --env picks one of several builds
+python3 native/tools/qemu_run.py native/idf/game --env game-qemu --until "HM mem"   # the game loop for 10 s
 ```
 
 It checks the flash layout first (bootloader below the partition table at
@@ -170,6 +208,11 @@ the chip's timing: code runs as fast as the host allows and SPI transfers take
 no time. So it checks that a build boots and runs, never how fast: fps and
 push times come from the watch. The Arduino 2.0.17 bootloader resets a few
 times under QEMU before it starts the app; that does not happen on the watch.
+The game's `game-qemu` build gets further: it leaves out the radio (any Wi-Fi
+start crashes QEMU) and gives the panel a bus that drops the pixels (QEMU's SPI
+has no DMA, so a real push never ends), and QEMU's I2C finds no PMU or motion
+sensor, so the loop runs with the panel, touch and motor parts, draws the
+pairing screens, and reaches its `HM fps` and `HM mem` lines.
 
 ## Flash and capture (one watch at a time)
 

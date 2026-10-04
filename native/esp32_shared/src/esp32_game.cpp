@@ -50,7 +50,7 @@ void bring_up() {
   for (uint32_t c : LCD_HZ)
     if (!hz && buses.lcd && buses.lcd->set_clock(c)) hz = c;
   if (hz) {
-    uint16_t black[St7789::W * BLACK_ROWS];
+    alignas(4) uint16_t black[St7789::W * BLACK_ROWS];   // SPI DMA reads it in place
     display.emplace(*buses.lcd, clock_, backlight, parts.pmu ? &*pmu : nullptr);
     if (display->init(black, BLACK_ROWS)) {
       display->brightness(St7789Display::DEFAULT_BRIGHTNESS);
@@ -75,7 +75,7 @@ void bring_up() {
 
 void game_task(void*) {
   bring_up();
-  static runtime::Runtime rt(parts, clock_, FPS_LOG_MS);   // ~110 KB: static, never on the stack
+  static runtime::Runtime rt(parts, clock_, FPS_LOG_MS);   // ~105 KB: static in internal RAM (DMA reads its strips)
   esp_task_wdt_add(nullptr);
   rt.begin();
   const ticks_t t0 = clock_.now_ms();

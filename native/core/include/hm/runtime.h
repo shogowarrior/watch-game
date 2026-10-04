@@ -1,7 +1,7 @@
 // app/runtime.py: the watch main loop, hardware (hm::app::Parts) <->
 // hm::game::Game <-> hm::ui::Renderer.
 //
-//     static hm::runtime::Runtime rt(parts, clock);   // ~110 KB: never on a stack
+//     static hm::runtime::Runtime rt(parts, clock);   // ~105 KB: static, in internal RAM (DMA reads its strips)
 //     rt.begin();
 //     for (;;) { feed_watchdog(); int32_t w = rt.step(); if (w > 0) rt.idle(w); }
 //
@@ -134,7 +134,7 @@ class Runtime {
   void fps_log(ticks_t now);
 
   uint8_t txbuf_[proto::SIZE] = {};
-  uint16_t strips_[2][ui::Renderer::W * STRIP_ROWS];
+  alignas(4) uint16_t strips_[2][ui::Renderer::W * STRIP_ROWS];   // the ESP32's SPI DMA reads them in place
   ticks_t t_tick_ = 0, t_input_ = 0, t_batt_ = 0;
   int low_n_ = 0;
   ticks_t touch_t_ = 0;                    // last touch sample
