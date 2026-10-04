@@ -1269,3 +1269,30 @@ def test_fixtures_match_snapshots():
         if crc.get(name) != binascii.crc32(cap.buf):
             stale.append(name)
     assert not stale, "re-render the snapshots (python3 tools/render_snapshots.py): %s" % stale
+
+
+def test_found_words_are_gold_and_other_words_on_found_are_not():
+    """ui-spec §6 FOUND: FOUND and the result word FOUND m:ss in accent.found;
+    the SAVER ON interstitial word over FOUND stays text.primary."""
+    _need_fb()
+    from ui import ACC_FOUND, TEXT_PRI
+    cap = FrameCapture()
+
+    def colours(kw):
+        r = Renderer()
+        _run(r, cap, kw, 600)
+        acc = pri = 0
+        for y in range(190, 222):
+            for x in range(28, 212):
+                c = _px(cap.buf, x, y)
+                acc += c == ACC_FOUND
+                pri += c == TEXT_PRI
+        return acc, pri
+
+    for w, top in (("FOUND", "TIME 1:48"), ("FOUND 1:48", "BUTTON: PLAY AGAIN"),
+                   ("FOUND 99M+", "BUTTON: PLAY AGAIN")):
+        acc, pri = colours(dict(FOUND_KW, sub="result" if top[0] == "B" else "celebrate",
+                                word=w, top_text=top))
+        assert acc > 100 and pri == 0, (w, acc, pri)
+    acc, pri = colours(dict(FOUND_KW, glyph="battery", word="SAVER ON"))
+    assert pri > 100 and acc == 0, (acc, pri)

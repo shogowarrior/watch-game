@@ -10,7 +10,8 @@ from finder import tuning as T
 from finder.game import (Game, M_HUNT, M_SCANNING, M_FOUND, M_LINK_LOST, M_SEARCHING, M_PAIRING,
                          BUZZ_OFF)
 from finder.pairing import Calibrator, Pairing, rune_ids, fnv1a32, UNSTABLE_SHOW_MS
-from finder.session import (PeerView, LiveMirror, fmt_mss, screen_code, PEER_FRESH_MS, SC_PAIRING, SC_FAR,
+from finder.session import (PeerView, LiveMirror, fmt_mss, fmt_found, screen_code, PEER_FRESH_MS,
+                            SC_PAIRING, SC_FAR,
                             SC_NEAR, SC_WARM, SC_HOT, SC_FOUND, SC_SCANNING, SC_PAIRED, SC_BYE,
                             SC_MASK, ST_PRESS, ST_GOODBYE, ST_CONFIRMED, ST_TAP_HOT)
 from finder.gestures import GestureRecognizer, TAP as G_TAP
@@ -18,6 +19,7 @@ from finder.render_params import validate
 from finder.estimators import NAMES, make
 from finder.estimators.base import RangeEstimator, MotionInfo, ACT_STILL, ACT_WALK
 from finder import arrow as A
+from finder.compat import ticks_add, ticks_diff
 
 MAC_A = b"\x24\x0a\xc4\x10\x00\x0a"
 MAC_B = b"\x24\x0a\xc4\x10\x00\x0b"
@@ -858,7 +860,8 @@ def test_found_needs_both_taps_within_400ms_in_hot():
     assert r.p.haptic == "FOUND" and r.p.ramp == "gold" and r.p.glyph == "check"
     assert r.p.top_text.startswith("TIME ") and r.p.word == "FOUND"
     r.run(2100)
-    assert r.p.sub == "result" and r.p.word == "TAP=AGAIN"
+    assert r.p.sub == "result" and r.p.word.startswith("FOUND ")
+    assert r.p.top_text == "BUTTON: PLAY AGAIN"
 
 
 def test_rssi_alone_never_found_and_partner_must_be_hot():
@@ -1081,7 +1084,7 @@ def test_knocks_on_the_found_screen_never_start_a_new_round():
     _found_by_press(r)
     r.state = SC_FOUND
     r.run(T.FOUND_CELEBRATE_MS + 100)
-    assert g.bump_armed() and r.p.word == "TAP=AGAIN"
+    assert g.bump_armed() and r.p.top_text == "BUTTON: PLAY AGAIN"
     for k in range(3):                          # knocks go on: spikes + touch each
         t = r.t + 10
         g.on_touch_down(t)
@@ -1091,11 +1094,14 @@ def test_knocks_on_the_found_screen_never_start_a_new_round():
         r.run(T.KNOCK_WAIT_MS + 100)
         assert g.mode == M_FOUND, k
     r.run(2500)
-    t = r.t + 10                                # a finger tap spikes only its own watch
-    g.on_touch_down(t)
+    t = r.t + 10                                # a finger tap spikes only its own watch:
+    g.on_touch_down(t)                          # it runs, and does nothing on FOUND either
     assert g.on_accel_tap(t + 4)
     g.on_gesture(t + 120, 1, 120, 120, t)
     r.run(T.KNOCK_WAIT_MS + 200)
+    assert g.mode == M_FOUND
+    g.on_button(r.t)                            # only the button starts the next round
+    r.run(100)
     assert g.mode == M_PAIRING and r.p.sub == "split"
 
 
@@ -1118,15 +1124,18 @@ def test_fallback_both_short_presses_within_3s():
     assert r2.g.mode == M_HUNT
 
 
-def test_new_round_from_found_tap_or_partner():
+def test_new_round_from_found_press_or_partner():
     r = hot_rig()
     g = r.g
     _found_by_press(r)
     r.state = SC_FOUND
-    g.on_gesture(r.t + 50, 1)                   # celebrate: ignored
+    g.on_button(r.t + 50)                       # celebrate: ignored
     r.run(2500)
     assert g.mode == M_FOUND
-    g.on_gesture(r.t, 1)
+    g.on_gesture(r.t, 1)                        # result: a tap does nothing
+    r.run(100)
+    assert g.mode == M_FOUND
+    g.on_button(r.t)
     r.run(100)
     assert g.mode == M_PAIRING and r.p.sub == "split" and r.p.countdown == 30
     # the partner starts a new round: followed, but not in the first 500 ms
@@ -1938,13 +1947,13 @@ def test_long_idle_timestamps_never_wrap():
         assert p.backlight == T.IDLE_DIM_BACKLIGHT and not p.status[3]
     g.on_gesture(t + 50, 3)                             # long press still opens the menu
     assert g.menu_open
-    # FOUND result stays 'result' and a tap still starts a new round
+    # FOUND result stays 'result' and a press still starts a new round
     r2 = hot_rig()
     _found_by_press(r2)
     t, ps = _hourly(r2.g, r2.t, 192)
-    assert all(p.sub == "result" and p.word == "TAP=AGAIN" for p in ps)
-    assert r2.g._press_t is None
-    r2.g.on_gesture(t + 50, 1)
+    assert all(p.sub == "result" and p.word.startswith("FOUND ") for p in ps)
+    assert r2.g._press_t is None and r2.g._lit_until is None
+    r2.g.on_button(t + 50)
     r2.g.tick(t + 100)
     assert r2.g.mode == M_PAIRING
     # a touch 6.7 days ago never counts toward a rain burst (its age wraps past 2^29 ms)
@@ -2149,7 +2158,7 @@ def _two_in_a_new_round():
     w.run(300)
     assert w.a.mode == M_FOUND and w.b.mode == M_FOUND
     w.run(2500)
-    w.a.on_button(w.t)                          # TAP=AGAIN: a new round on both
+    w.a.on_button(w.t)                          # PLAY AGAIN: a new round on both
     w.run(1000)
     assert w.a.pair.sub == "split" and w.b.pair.sub == "split"
     return w
@@ -2294,7 +2303,7 @@ def test_a_partner_that_left_while_out_of_range_gets_no_relink_fanfare():
         assert left[0].banner == ("FRIEND LEFT", "warn", False), mode
 
 
-def test_partner_leaving_does_not_wake_a_lowered_screen():
+def test_partner_leaving_lights_a_lowered_screen_for_5s_not_at_5_percent():
     for bat in (90, 5):
         r = warm_rig(battery=bat)
         g = r.g
@@ -2303,11 +2312,218 @@ def test_partner_leaving_does_not_wake_a_lowered_screen():
         assert not g.screen_on, bat
         r.state = SC_PAIRING                    # the partner ended the round
         t0 = r.t
-        r.run(3000)
-        after = [p for p in r.params if p.t_ms > t0]
-        assert any(p.banner == ("FRIEND LEFT", "warn", False) and p.haptic == "NOPE"
-                   for p in after), bat
-        assert not g.screen_on and all(p.backlight == 0.0 for p in after), bat
+        while g.mode != M_PAIRING:
+            r.run(100)
+            assert r.t - t0 < 3000, bat
+        p = r.p
+        assert p.banner == ("FRIEND LEFT", "warn", False) and p.haptic == "NOPE", bat
+        if bat == 5:                            # 5 %: haptics carry it, the screen stays dark
+            r.run(3000)
+            assert not g.screen_on and all(q.backlight == 0.0 for q in r.params if q.t_ms > t0)
+            continue
+        _lit_for(r, r.t, T.EVENT_LIT_MS)
+
+
+def _dark(r, limit=40000):
+    """Run until the screen is off (the wrist must already be down)."""
+    t0 = r.t
+    while r.g.screen_on:
+        r.run(100)
+        assert r.t - t0 < limit, "screen never went dark"
+
+
+def _lit_for(r, t0, ms):
+    """The screen stays lit from ``t0`` until ``t0 + ms``, then (wrist still
+    down, clock long run out) is dark within one tick."""
+    while r.t < t0 + ms - 100:
+        r.run(100)
+        assert r.g.screen_on and r.p.backlight > 0.0, (r.t - t0, ms)
+    r.run(200)
+    assert not r.g.screen_on and r.p.backlight == 0.0, (r.t - t0, ms)
+
+
+def test_found_lights_a_dark_screen_for_10s_whatever_the_tilt():
+    r = hot_rig()
+    g = r.g
+    r.est.fixed = 1.5
+    r.face_up = False
+    _dark(r)                                    # HOT entry and bump-ready holds ran out
+    r.state = SC_HOT | ST_TAP_HOT
+    assert g.on_accel_tap(r.t)
+    r.peer_tap(r.t + 150)
+    r.run(200)
+    assert g.mode == M_FOUND and g.screen_on
+    first = [p for p in r.params if p.screen == "FOUND"][0]
+    assert first.haptic == "FOUND" and first.backlight == T.BACKLIGHT_BOOST
+    _lit_for(r, g.found_t, T.FOUND_LIT_MS)
+    assert g.mode == M_FOUND and r.p.word.startswith("FOUND ")
+
+
+def test_found_result_word_chip_and_button_only():
+    r = hot_rig()
+    g = r.g
+    g.round_t0 = r.t - 108000                   # a 1:48 round
+    _found_by_press(r)
+    assert r.p.sub == "celebrate" and r.p.top_text == "TIME 1:48" and r.p.word == "FOUND"
+    g.on_button(r.t + 50)                       # celebrate: a press made with the bump is ignored
+    r.run(100)
+    assert g.mode == M_FOUND
+    r.run(T.FOUND_CELEBRATE_MS)
+    assert r.p.sub == "result" and r.p.top_text == "BUTTON: PLAY AGAIN"
+    assert r.p.word == "FOUND 1:48"
+    t = r.t + 10                                # a finger tap (no spike): nothing
+    g.on_touch_down(t)
+    g.on_gesture(t + 100, 1, 120, 120, t)
+    r.run(T.KNOCK_WAIT_MS + 200)
+    assert g.mode == M_FOUND and r.p.word == "FOUND 1:48" and r.p.banner is None
+    g.on_button(r.t)
+    r.run(100)
+    assert g.mode == M_PAIRING and r.p.sub == "split"
+
+
+def test_found_word_overflows_to_whole_minutes():
+    assert [fmt_found(s) for s in (0, 108, 599, 600, 768, 5999, 6000, 21600)] == [
+        "FOUND 0:00", "FOUND 1:48", "FOUND 9:59", "FOUND 10M", "FOUND 12M", "FOUND 99M",
+        "FOUND 99M+", "FOUND 99M+"]
+    for s in range(0, 6100, 7):
+        w = fmt_found(s)
+        assert len(w) <= T.WORD_MAX_CHARS and not set(w) - set(T.WORD_CHARS), w
+    for back, top, word in ((768000, "TIME 12:48", "FOUND 12M"),
+                            (7200000, "TIME 99:59", "FOUND 99M+")):
+        r = hot_rig()
+        r.g.round_t0 = ticks_add(r.t, -back)
+        _found_by_press(r)
+        assert r.p.top_text == top, r.p.top_text
+        r.run(T.FOUND_CELEBRATE_MS + 100)
+        assert r.p.word == word, r.p.word
+
+
+def test_button_on_a_dark_found_screen_only_wakes():
+    r = hot_rig()
+    g = r.g
+    _found_by_press(r)
+    r.face_up = False
+    _dark(r)
+    assert g.mode == M_FOUND
+    g.on_button(r.t)                            # wake only
+    assert g.screen_on and g.mode == M_FOUND
+    r.run(100)
+    assert r.p.word.startswith("FOUND ") and r.p.backlight == T.BACKLIGHT_BOOST
+    g.on_button(r.t)
+    r.run(100)
+    assert g.mode == M_PAIRING and g.pair.sub == "split"
+
+
+def _event(r, how):
+    """Raise one §8 event wake on a rig; returns when its first frame is out."""
+    g = r.g
+    if how == "hot":
+        r.est.fixed = 4.0
+        while r.p.screen != "HOT":
+            r.run(100)
+    elif how == "bump_ready":
+        r.est.fixed = 1.5
+        while not g.bump_ready:
+            r.run(100)
+        assert r.p.word == "BUMP!" and r.p.haptic == "DOUBLE"
+    elif how == "lost":
+        while r.p.screen != "LINK_LOST":
+            r.run(100, packets=False)
+        assert r.p.haptic == "LOST"
+
+
+def test_event_wakes_light_a_dark_screen_for_5s():
+    for how in ("hot", "bump_ready", "lost"):
+        r = hot_rig(4.0) if how == "bump_ready" else warm_rig()
+        r.face_up = False
+        _dark(r)
+        _event(r, how)
+        t0 = r.t
+        assert r.g.screen_on and r.p.backlight == T.BACKLIGHT_BOOST, how
+        if how == "lost":                       # the hold ends with the link still lost
+            while r.t < t0 + T.EVENT_LIT_MS - 100:
+                r.run(100, packets=False)
+                assert r.g.screen_on, how
+            r.run(200, packets=False)
+            assert not r.g.screen_on, how
+        else:
+            _lit_for(r, t0, T.EVENT_LIT_MS)
+
+
+def test_event_wake_holds_a_lit_lowered_screen_on_the_wrist_clock():
+    r = warm_rig()
+    g = r.g
+    r.face_up = False
+    r.run(8000)                                 # lowered 8 s: 2 s left on the wrist clock
+    assert g.screen_on
+    _event(r, "hot")
+    _lit_for(r, r.t, T.EVENT_LIT_MS)            # held past the 10 s, dark when the hold ends
+    r2 = warm_rig()
+    r2.face_up = False
+    t_down = r2.t
+    r2.run(500)
+    _event(r2, "hot")                           # lowered ~2 s at the event: the clock decides
+    r2.run(T.EVENT_LIT_MS + 200)
+    assert r2.g.screen_on
+    while r2.g.screen_on:
+        r2.run(100)
+    assert T.WRIST_DOWN_MS <= r2.t - t_down <= T.WRIST_DOWN_MS + 300, r2.t - t_down
+
+
+def test_event_wakes_at_5_percent_only_found():
+    for how in ("hot", "lost"):
+        r = warm_rig(battery=5)
+        r.face_up = False
+        _dark(r)
+        t0 = r.t
+        _event(r, how)
+        assert not r.g.screen_on and all(p.backlight == 0.0 for p in r.params if p.t_ms > t0), how
+    r = paired_rig(d=2.0, battery=5)
+    r.state = SC_HOT
+    r.run(2000)
+    g = r.g
+    r.est.fixed = 1.5
+    r.face_up = False
+    _dark(r)
+    r.state = SC_HOT | ST_TAP_HOT
+    assert g.on_accel_tap(r.t)
+    r.peer_tap(r.t + 150)
+    r.run(200)
+    assert g.mode == M_FOUND and r.p.backlight == T.SAVER_BACKLIGHT
+    _lit_for(r, g.found_t, T.FOUND_LIT_MS)      # 10 s, not BATT_SCREEN_OFF_MS
+
+
+def test_event_wake_ignores_a_press_that_began_before_it():
+    r = warm_rig()
+    g = r.g
+    r.face_up = False
+    _dark(r)
+    t = r.t + 10
+    g.on_touch_down(t)                          # a sleeve on the dark screen ...
+    _event(r, "lost")                           # ... the link drops: the screen lights
+    assert g.screen_on and ticks_diff(g._wake_t, t) > 0
+    g.on_gesture(t + 900, 3, 120, 120, t)       # the press that began before it: no MENU
+    assert not g.menu_open
+    t2 = ticks_add(g._wake_t, T.WAKE_TOUCH_IGNORE_MS + 50)
+    g.on_gesture(t2 + 900, 3, 120, 120, t2)
+    assert g.menu_open
+
+
+def test_no_event_wake_while_shutting_down():
+    r = paired_rig(d=20.0)
+    g = r.g
+    r.state = SC_NEAR
+    r.face_up = False
+    _dark(r)
+    r.run(3000, packets=False)
+    g.set_battery(r.t, 3)                       # BYE ...
+    t0 = r.t
+    while not g.power_off:
+        r.run(100, packets=False)
+        assert r.t - t0 < 5000
+    after = [p for p in r.params if p.t_ms > t0]
+    assert any(p.screen == "LINK_LOST" for p in after)   # ... LINK-LOST arrives during it
+    assert not g.screen_on and all(p.backlight == 0.0 for p in after)
 
 
 def test_relink_into_hot_says_look_around():

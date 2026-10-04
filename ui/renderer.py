@@ -96,7 +96,7 @@ B_READOUT = const(3)
 # Display copy the renderer keys on. The literals mirror finder/game.py
 # (tests/test_renderer.py checks them).
 WARN_TOP = (HINT_FLAT,)             # chips in status.warn; scan-ready rim warn
-W_FOUND = "FOUND"                    # word in accent.found
+W_FOUND = "FOUND"                    # words starting with it in accent.found
 W_BUMP = "BUMP!"                     # word in prox.7
 
 # token values (finder/tuning.py) as plain ints; Q8 = 256 per ramp step
@@ -601,7 +601,7 @@ class Renderer:
         w = p.word
         if scr == S_SEARCHING:
             return GREY[7]
-        if w == W_FOUND:
+        if w.startswith(W_FOUND):           # FOUND and FOUND 1:48 (§6 FOUND)
             return ACC_FOUND
         if w == W_BUMP:
             return PROX[7]

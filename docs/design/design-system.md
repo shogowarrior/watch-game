@@ -6,7 +6,7 @@ This document holds the visual tokens and components. Behaviour (screens, zones,
 
 All pixel values refer to the 240×240 physical display. The panel is 1.54" diagonal, so each side is about 1.09", which works out to roughly 220 ppi: 16 px ≈ 1.8 mm, 32 px ≈ 3.7 mm, 48 px ≈ 5.5 mm.
 
-The look borrows the feel of an ancient-tech proximity sensor: a green glow and ripples that pulse out from the centre, faster and brighter as you get closer. It reuses none of Nintendo's assets, symbols (no eye emblem, no Sheikah or Zonai script), fonts or exact palettes.
+The look borrows the feel of an ancient-tech proximity sensor: a green glow and ripples that pulse out from the centre, faster and brighter as you get closer. It reuses none of Nintendo's assets, symbols (no eye emblem, no script or alphabet from the games), fonts or exact palettes.
 
 ---
 
@@ -362,7 +362,7 @@ Which values each screen uses, how the screens change and what the inputs do is 
 | Use `accent.cold` blue for "colder" | Use red for "colder"; red means error or critical battery |
 | Compose each frame off-screen and push it whole | Draw directly to the panel (`display.fill` then redraw), which causes flicker |
 | Keep full-field changes under 3 per second | Flash the whole screen for HOT or FOUND |
-| Evoke the sensor feel with radial glow and rings | Copy the Sheikah eye, Hylian, Sheikah or Zonai script, Nintendo fonts or UI chrome |
+| Evoke the sensor feel with radial glow and rings | Copy the games' eye emblem, scripts or alphabets, Nintendo fonts or UI chrome |
 | Keep words to at most 2 per screen, uppercase, `type.label` or larger | Put anything the player must act on in `type.micro` (8 px) |
 
 ---

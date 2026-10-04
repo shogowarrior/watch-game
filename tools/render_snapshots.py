@@ -169,7 +169,11 @@ FIXTURES = [
     ("found_celebrate", [(0, dict(_found, sub="celebrate", word="FOUND", burst=True,
                                   haptic="FOUND")),
                          (50, dict(_found, sub="celebrate", word="FOUND"))], 450),
-    ("found_result", [(0, dict(_found, sub="result", word="TAP=AGAIN"))], 2500),
+    # result: FOUND and the round time in gold, until a button press (§6 FOUND)
+    ("found_result", [(0, dict(_found, sub="result", word="FOUND 1:48",
+                               top_text="BUTTON: PLAY AGAIN"))], 2500),
+    ("found_result_long", [(0, dict(_found, sub="result", word="FOUND 12M",
+                                    top_text="BUTTON: PLAY AGAIN"))], 2500),
     ("scan_ready_flat", [(0, dict(_scan, sub="ready", glyph="countdown", countdown=3,
                                   top_text="HOLD AT CHEST", word="TURN RIGHT"))], 1500),
     ("scan_ready_tilted", [(0, dict(_scan, sub="ready", glyph="countdown", countdown=2,

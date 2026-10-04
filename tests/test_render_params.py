@@ -166,11 +166,13 @@ def test_valid_other_screens():
 
 def test_spec_copy_fits_font_and_length():
     words = ("LOOKING", "BUMP = YES", "WAITING", "HOLD STILL", "SPLIT UP", "GO", "SEARCHING",
-             "WALK ABOUT", "BUMP!", "FOUND", "TAP=AGAIN", "TURN RIGHT", "TURN LEFT",
+             "WALK ABOUT", "BUMP!", "FOUND", "FOUND 1:48", "FOUND 9:59", "FOUND 12M",
+             "FOUND 99M+", "TURN RIGHT", "TURN LEFT",
              "4 O'CLOCK", "12 O'CLOCK", "AHEAD", "BEHIND", "WALK", "SAVER ON", "BYE")
     labels = ("PAIR", "SAME RUNES?", "STAND 1 STEP APART", "NO PEEKING", "TAP TO SCAN",
               "LOOK AROUND", "BUMP WRISTS", "FRIEND NOT READY", "ONLY YOU FELT IT",
-              "FRIEND FELT IT", "TIME 12:48", "HOLD AT CHEST", "HOLD FLAT",
+              "FRIEND FELT IT", "TIME 12:48", "TIME 99:59",
+              "BUTTON: PLAY AGAIN", "HOLD AT CHEST", "HOLD FLAT",
               "FRIEND SCANNING", "TAP TO RESCAN", "WRONG WAY? RESCAN", "LAST ~20M",
               "CAL SKIPPED", "FRIEND BATT 20%")
     for w in words:
