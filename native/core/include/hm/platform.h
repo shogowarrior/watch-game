@@ -15,6 +15,11 @@
 // native/test fakes every part (as tests/test_app_runtime.py does). A part
 // that is absent is a null pointer in Parts, as Runtime(parts=...) leaves it
 // None. Ticks are ms with MicroPython's 2^30 period (hm/ticks.h).
+//
+// Two deliberate differences from the Python: the BMA423 feature engine is
+// not used (the Runtime takes the Python's bare-FIFO path: steps and activity
+// from hm::motion, no wrist-raise wake), and the shell's watchdog is always
+// the hardware one (the Python starts with a stoppable timer watchdog on USB).
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -33,6 +38,8 @@ constexpr int EV_PRESS = 0x20;      // PEK pushed down
 constexpr int EV_RELEASE = 0x40;    // PEK let go
 
 // The AXP202 power chip (hal/axp202.py AXP202). -1 or false: a bus error.
+// The core's takes the IRQ line (hm::Line, GPIO35) as hal's irq_pin: poll()
+// reads no register while it is high.
 struct Pmu {
   virtual ~Pmu() = default;
   virtual bool set_long_press_ms(int32_t ms) = 0;
@@ -52,10 +59,15 @@ using WaitFn = void (*)(void* ctx, int32_t ms);
 // The ST7789 panel and its backlight (hal/st7789.py ST7789).
 struct Display {
   virtual ~Display() = default;
-  // rows y0..y0+h-1, 240 pixels each, byte-swapped RGB565 (what framebuf holds)
+  // Rows y0..y0+h-1, 240 pixels each, byte-swapped RGB565 (what framebuf
+  // holds). It may return while px is still being sent (DMA): px may be
+  // written again once a later push_strip() or flush() has returned.
   virtual void push_strip(int y0, int h, const uint16_t* px) = 0;
+  virtual void flush() = 0;                                     // every pixel is on the panel
   virtual void sleep() = 0;                                     // backlight 0, DISPOFF + SLPIN
-  virtual void wake(double level, WaitFn wait, void* ctx) = 0;  // SLPOUT + DISPON, then the backlight
+  // SLPOUT + DISPON, then the backlight at level (the Runtime passes 0: lit
+  // over the first fresh frame; hal's level=None is not needed).
+  virtual void wake(double level, WaitFn wait, void* ctx) = 0;
   virtual void brightness(double level) = 0;                    // backlight 0..1
   bool asleep = false;
 };
@@ -69,6 +81,7 @@ struct Imu {
   virtual bool set_odr(int32_t hz) = 0;     // and empty the FIFO; odr is the rate set
   int16_t fifo_mg[3 * FIFO_FRAMES] = {};
   int32_t odr = 100;
+  int z_sign = 1;                           // hal/pins.py BMA423_Z_SIGN
 };
 
 // One touch-panel reading (hal/ft6336.py read()): x and y keep their last
@@ -99,7 +112,9 @@ struct Pwm {
   virtual void set(double level) = 0;      // duty 0..1
 };
 
-// One received frame, valid during the poll callback.
+// One received frame, valid during the poll callback. As hal/radio.py does,
+// the Radio drops frames without an RSSI and gives a frame whose driver
+// timestamp is in the future or over 1000 ms old (RX_TS_MAX_AGE) now instead.
 struct RadioFrame {
   const uint8_t* mac;   // 6 bytes
   const uint8_t* data;

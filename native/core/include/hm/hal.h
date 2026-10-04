@@ -28,6 +28,13 @@ struct LcdBus {
   virtual void wait() = 0;                        // every pixel is on the panel
 };
 
+// An interrupt line, active low (the AXP202's IRQ on GPIO35, the touch INT on
+// GPIO38): a driver given one skips its bus reads while it is high.
+struct Line {
+  virtual ~Line() = default;
+  virtual bool low() = 0;
+};
+
 // Time and the serial log.
 struct Clock {
   virtual ~Clock() = default;
