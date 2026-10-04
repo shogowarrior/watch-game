@@ -9,11 +9,12 @@ been ported yet. MicroPython (the rest of the repo) is untouched.
 |---|---|
 | `core/` | Portable C++17 with no hardware calls. The ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h` and `field_tables.h` are generated. |
 | `esp32_shared/` | ESP32 clock, serial log, backlight PWM and the motion-sensor task on core 0. Plain ESP-IDF calls, so both builds share it. |
-| `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), LovyanGFX's SPI bus with DMA. |
+| `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), one env per graphics library (LovyanGFX, TFT_eSPI, Arduino_GFX, LVGL): see `arduino/README.md`. |
 | `idf/` | PlatformIO: ESP-IDF 5.5, one environment per way of driving the panel: the `esp_lcd` SPI panel IO with DMA (`bench-esplcd`, which also checks a faster BMA423 I2C clock) and SPI2's registers with DMA (`bench-regdma`). `components/hm_idf/` holds the I2C0 and SPI buses they share; its `portable/` (the I2C0 check) runs in the host tests. |
 | `idf/lvgl/` | PlatformIO: LVGL 9.5 through esp_lvgl_port 2.9 on the same `esp_lcd` bus (`bench-lvgl`). The field is an LVGL image a custom decoder fills from the ring map, so its pixels are the other builds' ones; the HOT chips are LVGL labels; and a third scene has LVGL draw rings itself as arcs. |
+| `micropython/` | `hmlcd`, a C user module for a custom MicroPython 1.29 build: the screen push on core 0 from internal DMA buffers, from the shared ST7789 code and `esp32_shared`'s spi_master bus. |
 | `test/` | Host tests (g++ with address and UB sanitizers) on fake hardware, plus the golden palettes. `run.py` also builds the ports' portable code and tests (`idf/test/`). |
-| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU). |
+| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU), `xcheck.py` (the core with the watch's compilers), `golden/` (game vectors from `finder/`). |
 
 Both builds use pins and settings from `hal/pins.py`: SPI on HSPI with SCK 18,
 MOSI 19, CS 5, DC 27 and no MISO (GPIO12 is the backlight), MADCTL 0xC0 with
@@ -28,6 +29,8 @@ versions in `idf/lvgl/dependencies.lock`.
 ```sh
 python3 native/test/run.py                      # host tests (tests/test_native.py runs them too)
 python3 native/tools/gen_tuning_h.py --check    # headers match finder/tuning.py and ui/field.py
+python3 native/tools/xcheck.py                  # core/ with both xtensa g++, double promotion an error
+python3 native/tools/golden/run.py [--check]    # native/test/golden/*.txt from the Python game
 node tools/mpy/run.mjs native/tools/golden_field.py > native/test/golden_field.txt   # after a ui/field.py change
 ```
 
@@ -35,10 +38,36 @@ node tools/mpy/run.mjs native/tools/golden_field.py > native/test/golden_field.t
 
 ```sh
 python3 -m pip install platformio     # once; the first build downloads the toolchains
-pio run -d native/arduino             # -> native/arduino/.pio/build/bench-lovyangfx/firmware.bin
+pio run -d native/arduino             # every library env -> native/arduino/.pio/build/<env>/firmware.bin
 pio run -d native/idf                 # -> native/idf/.pio/build/{bench-esplcd,bench-regdma}/firmware.bin
 pio run -d native/idf/lvgl            # -> native/idf/lvgl/.pio/build/bench-lvgl/firmware.bin
 ```
+
+## MicroPython with a C module (`micropython/`)
+
+Stock MicroPython keeps every buffer in PSRAM, which the SPI DMA cannot read,
+and sends the frame while the drawing waits: the push is about 40 ms of a
+~90 ms frame. `hmlcd` sends a finished frame from a task on core 0 instead,
+copying 20 rows at a time into two internal DMA buffers (`hm::push_bounced`),
+while MicroPython on core 1 draws the next frame into a second buffer. Its
+bus is half duplex, which ESP-IDF lets run past 26.67 MHz on these pins (the
+bench tries 40 and 80; whether the panel keeps up is for the watch to show). The panel setup stays in `hal/st7789.py`.
+
+```sh
+# once: MicroPython v1.29.0 with its esp32 submodules, mpy-cross, and ESP-IDF 5.5 in the shell
+git clone --depth 1 -b v1.29.0 https://github.com/micropython/micropython && cd micropython
+make -C mpy-cross && make -C ports/esp32 BOARD=ESP32_GENERIC submodules
+make -C ports/esp32 BOARD=ESP32_GENERIC BOARD_VARIANT=SPIRAM BUILD=build-hm \
+    USER_C_MODULES=$REPO/native/micropython/micropython.cmake    # -> build-hm/firmware.bin (at 0x1000)
+```
+
+Flashing it is the user's call, like any firmware. It replaces only the
+firmware, so the files on the watch stay. Then `mpremote run
+tools/bench_hmlcd.py` prints `HM mpy` lines: the game's renderer timed with the
+stock push, then with `hmlcd` at 26.67, 40 and 80 MHz, plus a test card at each
+clock (`tests/test_bench_hmlcd.py` checks it never draws into a frame that is
+still being sent). In QEMU the firmware boots and `hmlcd.init` and `hmlcd.cmd`
+work, but a push never finishes: QEMU's SPI model has no DMA.
 
 ## Boot in QEMU before flashing
 
@@ -67,7 +96,7 @@ Flashing replaces MicroPython on that watch. Only do it when the user has asked.
 
 ```sh
 PORT=/dev/cu.usbserial-022152D1       # watch A (watch B: /dev/cu.usbserial-02215408)
-pio run -d native/arduino -t upload --upload-port $PORT
+pio run -d native/arduino -e bench-lovyangfx -t upload --upload-port $PORT   # other envs: arduino/README.md
 python3 native/tools/capture.py $PORT logs/bench-arduino-A.log --seconds 150
 pio run -d native/idf -e bench-esplcd -t upload --upload-port $PORT
 python3 native/tools/capture.py $PORT logs/bench-idf-esplcd-A.log --seconds 180
