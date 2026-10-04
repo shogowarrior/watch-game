@@ -82,8 +82,9 @@ laptop, never in a chat.
      with a hint to move it.
    - The values are read only on the watch and by `deploy.py`'s copy, and are
      never printed, logged or sent.
-   - `tests/test_secrets_guard.py` checks that no file git would commit
-     contains them.
+   - `tests/test_secrets_guard.py` checks that no file git would commit, and
+     no commit on any branch git knows, contains them (on the laptop that
+     holds the Wi-Fi file; it skips elsewhere).
 
 ## Contract between the parts
 

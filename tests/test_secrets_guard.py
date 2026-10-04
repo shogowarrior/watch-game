@@ -4,8 +4,11 @@ The Wi-Fi name and password are read from every Wi-Fi file there is (the one
 tools/wifi_setup.py saved, and an older secrets.py in the repo) with its
 shared reader (never run, never printed), and no file git would commit
 (tracked, or new and not ignored) may contain one; a failure names the
-variable and the files only. Without a Wi-Fi file the check skips, so it
-also runs on a made-up one (test_guard_checks_every_wifi_file).
+variable and the files only. Nor may any commit git knows (every branch,
+fetched ones too): a pushed commit stays readable after a later one removes
+the value, so that failure says to change the password on the router. Without
+a Wi-Fi file both checks skip, so they also run on made-up ones
+(test_guard_checks_every_wifi_file, test_history_guard_finds_a_removed_value).
 secrets.py, webrepl_cfg.py and logs/ must be ignored. Needs git and
 subprocess: skipped under MicroPython and outside a git checkout."""
 
@@ -23,14 +26,15 @@ def _wifi_setup():
     return w
 
 
-def _git(*args):
-    """``git args`` in the repo root -> CompletedProcess; Skip without git."""
+def _git(*args, cwd=None):
+    """``git args`` in the repo root (or ``cwd``) -> CompletedProcess; Skip
+    without git."""
     try:
         import subprocess
     except ImportError:
         raise Skip("needs subprocess (CPython)")
     try:
-        r = subprocess.run(("git",) + args, capture_output=True)
+        r = subprocess.run(("git",) + args, capture_output=True, cwd=cwd)
     except OSError:
         raise Skip("git is not installed")
     if r.returncode == 128:              # fatal: not a git checkout
@@ -68,20 +72,55 @@ def _committable():
     return sorted(set(p for p in r.stdout.decode("utf-8").split("\0") if p))
 
 
-def test_no_secret_in_committable_files():
+def _history_leaks(secrets, cwd=None):
+    """[(name, commit, path)] for each commit reachable from any ref (local
+    and fetched branches, tags) whose files hold one of ``secrets``."""
+    r = _git("rev-list", "--all", cwd=cwd)
+    assert r.returncode == 0, r.stderr
+    revs = r.stdout.decode().split()
+    found = []
+    for name, v in secrets:
+        if not revs:
+            break
+        r = _git("grep", "-l", "-F", "-e", v, *revs, cwd=cwd)
+        assert r.returncode in (0, 1), r.stderr          # 1: no match
+        for line in r.stdout.decode("utf-8", "replace").splitlines():
+            commit, path = line.split(":", 1)
+            found.append((name, commit[:9], path))
+    return found
+
+
+def _wifi_secrets():
+    """[(Wi-Fi file, its guarded values)]; Skip without a Wi-Fi file."""
     w = _wifi_setup()
     wifi = w.wifi_files(w.ROOT)
     if not wifi:
         raise Skip("no Wi-Fi file (tools/wifi_setup.py saves one)")
-    files = _committable()
+    out = []
     for path in wifi:
         try:
-            secrets = _secret_values(w, path, TEMPLATE)
+            out.append((path, _secret_values(w, path, TEMPLATE)))
         except ValueError as e:
             raise AssertionError("cannot check %s: %s" % (path, e))
+    return out
+
+
+def test_no_secret_in_committable_files():
+    files = _committable()
+    for path, secrets in _wifi_secrets():
         leaks = _leaks(secrets, files)
         assert not leaks, "a value from %s is in a file git would commit: %s" % (
             path, "; ".join("%s in %s" % x for x in leaks))
+
+
+def test_no_secret_in_git_history():
+    for path, secrets in _wifi_secrets():
+        leaks = _history_leaks(secrets)
+        assert not leaks, (
+            "a value from %s is in git history: %s. Anyone who can read the repo can "
+            "read a pushed commit, so change it on the router, then run "
+            "python3 tools/wifi_setup.py again" % (
+                path, "; ".join("%s in %s %s" % x for x in leaks)))
 
 
 def test_secret_files_and_logs_are_ignored():
@@ -150,3 +189,28 @@ def test_guard_checks_every_wifi_file():
                 os.environ.pop(w.ENV, None)
             else:
                 os.environ[w.ENV] = old_env
+
+
+def test_history_guard_finds_a_removed_value():
+    """A value committed once and removed by the next commit is still found,
+    in the commit that held it."""
+    _git("--version")                    # Skip first without subprocess or git
+    import os
+    import tempfile
+    pw = "made-up-" + str(os.getpid()) + "-hist"     # built at run time: in no committed file
+    with tempfile.TemporaryDirectory() as tmp:
+        def commit(text, msg):
+            with open(os.path.join(tmp, "boot.py"), "w") as f:
+                f.write(text)
+            assert _git("add", "boot.py", cwd=tmp).returncode == 0
+            r = _git("-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                     "-c", "commit.gpgsign=false", "commit", "-q", "-m", msg, cwd=tmp)
+            assert r.returncode == 0, r.stderr
+            return _git("rev-parse", "HEAD", cwd=tmp).stdout.decode().strip()
+        assert _git("init", "-q", cwd=tmp).returncode == 0
+        secrets = [("WIFI_PASSWORD", pw)]
+        assert _history_leaks(secrets, cwd=tmp) == []                # no commits yet
+        first = commit("wlan.connect('net', %r)\n" % pw, "first")
+        commit("import secrets\n", "stop tracking it")
+        assert _history_leaks(secrets, cwd=tmp) == [("WIFI_PASSWORD", first[:9], "boot.py")]
+        assert _history_leaks([("WIFI_PASSWORD", pw + "x")], cwd=tmp) == []

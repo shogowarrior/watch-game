@@ -16,7 +16,11 @@ in one message with the current default marked. Don't build on an assumption.
 2. **Commit trailer.** The history ends commits with `Co-Authored-By: Claude
    ...`. Keep it, or drop it as word-finder does? Default: keep.
 3. **Leaked passwords.** The first commit (`c79530c`) contains the old Wi-Fi
-   and WebREPL passwords, and the repo is public. Have they been changed? The
+   name and password and the WebREPL password, and the repo is public
+   (`boot.py` kept them until `44880ab`, so `0db0f98` has them too; checked
+   2026-10-04: no later commit on any branch does). Have they been changed?
+   On the laptop with the saved Wi-Fi file, `python3 tests/runner.py
+   test_secrets_guard` fails if the saved values are anywhere in history. The
    other option is scrubbing them from history, which needs a force-push.
    Default: no scrub. Changing the passwords is the fix that matters.
 4. **Trend target not met.** ui-spec §5.5 wants fewer than 5 % false

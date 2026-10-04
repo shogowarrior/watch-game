@@ -56,7 +56,7 @@ over their USB cables or over Wi-Fi.
 | `native/` | Arduino and ESP-IDF ports (PlatformIO), work in progress: a shared C++ core (the ripple field, checked frame by frame against `ui/field.py`; display, PMU and IMU sequences from `hal/`) and the display benchmark both builds run. See `native/README.md`; `tests/test_native.py` runs its host tests. |
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). Its **Simulator \| Real watches** toggle shows the real watches in debug mode. |
 | `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`; `socket.py`, a fake UDP `socket` installed by `fakes.install_socket()`; `serial_port.py`, a fake USB serial port that checks `SerialLink`'s pacing against the 115200-baud line), `est_helpers.py` (shared estimator fixtures), `test_deploy.py` (`tools/deploy.py`, CPython only). |
-| `tests/test_debuglink.py` `test_debug_server.py` `test_fake_watches.py` `test_wifi_setup.py` `test_secrets_guard.py` | Debug mode: the watch side (USB and Wi-Fi links) and `main.py` wiring on fakes; the bridge's UDP-to-SSE relay, serial reader (on pseudo-terminals) and log over real localhost sockets (CPython only); the fake watches; `tools/wifi_setup.py` (the saved file, its permissions, nothing printed); no tracked file holds a value from a saved Wi-Fi file. |
+| `tests/test_debuglink.py` `test_debug_server.py` `test_fake_watches.py` `test_wifi_setup.py` `test_secrets_guard.py` | Debug mode: the watch side (USB and Wi-Fi links) and `main.py` wiring on fakes; the bridge's UDP-to-SSE relay, serial reader (on pseudo-terminals) and log over real localhost sockets (CPython only); the fake watches; `tools/wifi_setup.py` (the saved file, its permissions, nothing printed); no file git would commit, and no commit in its history, holds a value from a saved Wi-Fi file. |
 | `tools/` | Host and on-watch scripts (see Commands). `tools/mpy/run.mjs` runs Python under MicroPython WebAssembly; `tools/cli.py` is the shared `--key value` parser. |
 | `tools/debug_server.py` | Debug bridge (CPython, stdlib only): serves `dist/sim/` on 127.0.0.1, reads the watches' USB serial ports (`--serial`) and UDP datagrams, relays the records to the page as Server-Sent Events (`/events`), answers `/debug/status`, logs to `logs/`. |
 | `tools/fake_watches.py` | Two simulated watches that send real debug-mode records (same `app/telemetry.py` and `hal/debuglink.py` code), over UDP or through `SerialLink`; `debug_server.py --demo [--serial]` runs it. |
@@ -291,10 +291,13 @@ of what each watch sent).
   `--secrets`), and `--no-debug` removes it. The values are read only on the
   watch (`hal/debuglink.py`) and by `deploy.py`'s check and copy, and are never
   printed, logged or sent. Agents never open, print or search these files.
-  `tests/test_secrets_guard.py` checks that no file git would commit contains
-  them. Never commit credentials, tokens or `webrepl_cfg.py`, and never paste
+  `tests/test_secrets_guard.py` checks that no file git would commit, and no
+  commit on any branch git knows, contains them (it runs where the Wi-Fi file
+  is, the owner's laptop, and skips elsewhere). Never commit credentials, tokens or `webrepl_cfg.py`, and never paste
   them into notebook outputs, docs or tests.
-- The first commit (`c79530c`) leaked the Wi-Fi password and the WebREPL
-  password (in `boot.py` and `webrepl_cfg.py`). They must be **rotated**.
+- The first commit (`c79530c`) leaked the Wi-Fi name and password and the
+  WebREPL password (in `boot.py` and `webrepl_cfg.py`); `boot.py` kept them
+  until `44880ab`, so `0db0f98` holds them too. The repo is public, so they
+  must be **rotated**.
   Rewriting history needs the user's explicit OK; agents must not do it.
 - Do not run git commands that modify the index or history unless the user asks.
