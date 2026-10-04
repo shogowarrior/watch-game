@@ -53,7 +53,7 @@ def python_hash():
     """sha256 over the Python the default traces come from."""
     sys.path.insert(0, os.path.join(ROOT, "native", "tools"))
     from trace_game import TESTS
-    files = set(os.path.join("native", "tools", "golden", t[7:] + ".py") if t.startswith("golden:")
+    files = set(os.path.join("native", "tools", "scenarios", t[9:] + ".py") if t.startswith("scenario:")
                 else os.path.join("tests", t + ".py") for t, _ in TESTS)
     for pat in PYTHON:
         files.update(os.path.relpath(f, ROOT) for f in glob.glob(os.path.join(ROOT, pat), recursive=True))

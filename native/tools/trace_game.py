@@ -3,8 +3,8 @@
     python3 native/tools/trace_game.py OUTDIR [--tests test_link,test_game,...]
                                               [--classes finder.link.LinkMonitor,...]
 
-Runs Python tests and golden scenarios (TESTS, or --tests; "golden:<name>" runs
-native/tools/golden/<name>.py's scenarios) with the classes in TRACED wrapped
+Runs Python tests and scenarios (TESTS, or --tests; "scenario:<name>" runs
+native/tools/scenarios/<name>.py's lines()) with the classes in TRACED wrapped
 (or only those named in --classes), and writes one JSON-lines file per class,
 OUTDIR/<module>.<Class>.jsonl:
 
@@ -261,17 +261,18 @@ def record(keys):
 # module's when its port lands. Recording costs about 50 us a call, so a wide
 # test (test_game, test_episode: a minute or more with every class) records
 # only the classes no unit test covers.
-# "golden:<name>" runs native/tools/golden/<name>.py's scenarios instead of a
-# test module (golden:haptic_patterns stays a golden test: 227k calls, 10 MB).
+# "scenario:<name>" runs native/tools/scenarios/<name>.py's lines() instead of a
+# test module: fixed inputs that reach further than the unit tests. The golden
+# files (native/tools/golden/) stay out: haptic_patterns' is 227k calls, 10 MB.
 _EST = ("finder.estimators.base.PathLoss", "finder.estimators.base.MotionInfo",
         "finder.estimators.kalman2.Estimator")
 TESTS = (
     ("test_proto", None), ("test_link", None),
-    ("test_est_default", _EST), ("test_est_kalman2", _EST), ("golden:estimator", _EST), ("golden:kalman2", _EST),
-    ("test_motion", ("finder.motion.MotionTracker",)), ("golden:motion", ("finder.motion.MotionTracker",)),
+    ("test_est_default", _EST), ("test_est_kalman2", _EST), ("scenario:kalman2", _EST),
+    ("test_motion", ("finder.motion.MotionTracker",)), ("scenario:motion", ("finder.motion.MotionTracker",)),
     ("test_gestures", ("finder.gestures.GestureRecognizer",)),
-    ("golden:gestures", ("finder.gestures.GestureRecognizer",)),
-    ("test_menu", ("finder.menu.Menu",)), ("golden:menu", ("finder.menu.Menu",)),
+    ("scenario:gestures", ("finder.gestures.GestureRecognizer",)),
+    ("test_menu", ("finder.menu.Menu",)), ("scenario:menu", ("finder.menu.Menu",)),
     ("test_haptics", ("finder.haptic_patterns.BlankWindow", "finder.haptic_patterns.HapticPlayer")),
 )
 
@@ -291,9 +292,9 @@ def main(argv):
     failed = 0
     for test, keys in plan:
         record(only if keys is None else set(keys) & only if only else set(keys))
-        if test.startswith("golden:"):    # a generator drives its module through its scenarios
-            ns = {"__name__": "golden_" + test[7:]}
-            with open(os.path.join(ROOT, "native", "tools", "golden", test[7:] + ".py")) as f:
+        if test.startswith("scenario:"):
+            ns = {"__name__": "scenario_" + test[9:]}
+            with open(os.path.join(ROOT, "native", "tools", "scenarios", test[9:] + ".py")) as f:
                 exec(f.read(), ns)
             for _ in ns["lines"]():
                 pass

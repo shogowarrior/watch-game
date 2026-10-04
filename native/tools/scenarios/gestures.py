@@ -8,7 +8,7 @@ from finder import gestures as G
 
 
 class _Run:
-    """One recognizer; ``s`` feeds a sample and returns its golden line."""
+    """One recognizer; ``s`` feeds a sample and returns its line."""
 
     def __init__(self, args=None):
         self.g = G.GestureRecognizer(*args) if args else G.GestureRecognizer()
