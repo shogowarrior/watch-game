@@ -26,6 +26,7 @@
 
 #include "hm/compat.h"
 #include "hm/haptic_patterns.h"
+#include "hm/motion.h"
 #include "hm/py.h"
 #include "hm/session.h"
 #include "hm/tuning.h"
@@ -56,7 +57,7 @@ constexpr double TICK_EVERY_DEG = T::SCAN_TICK_DEG;
 constexpr int32_t BLINK_MS = 4 * T::SCAN_BLINK_MS;   // best bin blinks twice (SCAN_BLINK_MS on/off)
 constexpr int32_t MORPH_MS = T::SCAN_MORPH_MS;
 // spec-silent internals
-constexpr double FLAT_OFF_DEG = 30.0;   // hysteresis (as motion face_up)
+constexpr double FLAT_OFF_DEG = motion::FACE_OFF_DEG;   // hysteresis: the one motion face_up uses
 constexpr int32_t MAX_DT_MS = 1000;     // a stalled loop never jumps the wedge further
 constexpr int32_t MIN_FIT_N = 12;
 constexpr int CAP = DURATION_MS * T::BEACON_HZ_SCAN / 500 + 160;   // 2 sources at the scan rate + margin (640)
