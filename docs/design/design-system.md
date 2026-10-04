@@ -253,8 +253,9 @@ A slot at (120,120) that holds exactly one glyph.
 | `check` | 0 | `accent.found` disc r = 40 with a `bg.base` check mark | gold / black | FOUND |
 | `runes` | 92 | PairingRunes (3 placeholder dots in `looking`) | `text.primary` | PAIRING |
 | `battery` | 64 | 64×32 battery outline in `status.warn`, fill proportional | `status.warn` | LOW-BATTERY 10 % interstitial |
+| `bump` | 64 | two watch outlines (yours left, friend's right) + 3 rays, 4 px strokes | `prox.6` / `prox.7` lit / `grey.5` friend not ready | HOT bump-ready |
 
-Priority when several apply: `check` > `arrow` > `chevrons` > `glow`. Changing variant animates the iris radius over 300 ms `out_cubic`; the new glyph is drawn at once (ui-spec §2).
+Priority when several apply: `check` > `arrow` in `reveal`/`turn` > `bump` > `arrow` > `chevrons` > `glow`. Changing variant animates the iris radius over 300 ms `out_cubic`; the new glyph is drawn at once (ui-spec §2).
 
 ### 4.3 DirectionArrow
 
@@ -321,10 +322,10 @@ Both use the bottom slot at x 24..215, y 186..225: `surface.toast` fill, `radius
 
 | Kind | Severity border | Lifetime | Examples |
 |---|---|---|---|
-| Toast info | `prox.5` | 2.5 s | `BACK IN RANGE`, `SCAN AGAIN` |
+| Toast info | `prox.5` | 2.5 s | `BACK IN RANGE`, `SCAN AGAIN`, `NEW ROUND`, `ONLY YOU FELT IT` |
 | Toast warn | `status.warn` | 2.5 s | `BATTERY 20%`, `FRIEND BATT 20%`, `FRIEND LEFT` |
 | Toast critical | `status.critical` | 2.5 s | `BATTERY 5%` |
-| Banner warn | `status.warn` | Until resolved | `LOST 0:12` (counts up), `FRIEND LOW BATTERY` |
+| Banner warn | `status.warn` | Until resolved | `SIGNAL LOST`, then `LOST: GO BACK` / `LOST: KEEP ON` (no clock), `FRIEND LOW BATTERY` |
 | Banner critical | `status.critical` | Until resolved | `FRIEND IS OFF` |
 
 Motion: in over 200 ms `out_cubic` with a 12 px rise, out with a 12 px fall over 150 ms `in_cubic`. There is one toast at a time; a banner outranks a toast, and a newer toast replaces an older one.
