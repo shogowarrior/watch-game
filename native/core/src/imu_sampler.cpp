@@ -1,8 +1,8 @@
-#include "sf/imu_sampler.h"
+#include "hm/imu_sampler.h"
 
 #include <math.h>
 
-namespace sf {
+namespace hm {
 
 void ImuSampler::poll() {
   const uint32_t t0 = clock_.now_us();
@@ -26,4 +26,4 @@ void ImuSampler::poll() {
   s.read_us += clock_.now_us() - t0;
 }
 
-}  // namespace sf
+}  // namespace hm

@@ -5,7 +5,7 @@
 #pragma once
 #include <stdint.h>
 
-namespace sf {
+namespace hm {
 namespace F {
 
 constexpr int32_t AA_K = 384;
@@ -81,4 +81,4 @@ constexpr int32_t ZONE_LEAD[4] = {3, 3, 3, 3};
 constexpr int32_t ZONE_TRAIL[4] = {22, 20, 18, 14};
 
 }  // namespace F
-}  // namespace sf
+}  // namespace hm

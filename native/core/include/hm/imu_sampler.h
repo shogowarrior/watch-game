@@ -3,9 +3,9 @@
 #pragma once
 #include <stdint.h>
 
-#include "sf/bma423.h"
+#include "hm/bma423.h"
 
-namespace sf {
+namespace hm {
 
 struct ImuStats {
   uint32_t polls, samples, errors;
@@ -36,4 +36,4 @@ struct ImuTask {
   virtual void stop() = 0;      // returns once no poll is running
 };
 
-}  // namespace sf
+}  // namespace hm

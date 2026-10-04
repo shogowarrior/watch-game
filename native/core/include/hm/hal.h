@@ -4,9 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "sf/ticks.h"
+#include "hm/ticks.h"
 
-namespace sf {
+namespace hm {
 
 // One I2C bus. Register reads and writes on a 7-bit address; false on a NACK or timeout.
 struct I2c {
@@ -39,4 +39,4 @@ struct Clock {
 
 void logf(const char* fmt, ...);                  // one line to the serial console, newline added
 
-}  // namespace sf
+}  // namespace hm

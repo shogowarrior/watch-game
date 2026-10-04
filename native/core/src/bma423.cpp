@@ -1,6 +1,6 @@
-#include "sf/bma423.h"
+#include "hm/bma423.h"
 
-namespace sf {
+namespace hm {
 
 namespace {
 
@@ -76,4 +76,4 @@ int Bma423::decode(const uint8_t* bp, int n, int16_t* op, int rng) {
   return k;
 }
 
-}  // namespace sf
+}  // namespace hm

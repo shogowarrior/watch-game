@@ -1,8 +1,8 @@
-#include "sf/bench_scene.h"
+#include "hm/bench_scene.h"
 
-#include "sf/tuning.h"
+#include "hm/tuning.h"
 
-namespace sf {
+namespace hm {
 
 namespace {
 
@@ -79,4 +79,4 @@ int FieldScene::step(const FieldParams& p, ticks_t t) {
   return hb;
 }
 
-}  // namespace sf
+}  // namespace hm

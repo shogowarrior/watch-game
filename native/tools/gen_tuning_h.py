@@ -3,9 +3,9 @@
     python3 native/tools/gen_tuning_h.py            # (re)write the headers
     python3 native/tools/gen_tuning_h.py --check    # exit 1 if one is stale
 
-native/core/include/sf/tuning.h: docs/design/tokens.json -> tools/gen_tuning.py
+native/core/include/hm/tuning.h: docs/design/tokens.json -> tools/gen_tuning.py
 -> finder/tuning.py -> this header, so the C++ ports read the same values as
-the MicroPython game. native/core/include/sf/field_tables.h: the tables and Q8
+the MicroPython game. native/core/include/hm/field_tables.h: the tables and Q8
 constants ui/field.py derives at import, copied so the C++ field matches
 CPython bit for bit instead of re-deriving them with another libm.
 Emission is generic: scalars become constexpr values, flat tuples arrays,
@@ -20,7 +20,7 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-INC = os.path.join(ROOT, "native", "core", "include", "sf")
+INC = os.path.join(ROOT, "native", "core", "include", "hm")
 sys.path.insert(0, ROOT)
 
 from finder import tuning as T  # noqa: E402
@@ -127,11 +127,11 @@ def render(mod, src, ns, title, keep=lambda v: True):
         "#pragma once",
         "#include <stdint.h>",
         "",
-        "namespace sf {",
+        "namespace hm {",
         "namespace %s {" % ns,
         "",
     ]
-    return "\n".join(head + out + ["", "}  // namespace %s" % ns, "}  // namespace sf", ""])
+    return "\n".join(head + out + ["", "}  // namespace %s" % ns, "}  // namespace hm", ""])
 
 
 def _field_value(v):
