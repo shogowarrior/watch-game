@@ -26,12 +26,14 @@ It never declares FOUND from RSSI: only a matched bump (both accelerometer
 taps within 400 ms, each made in HOT - the beacon's ``ST_TAP_HOT`` bit says so
 for the partner's - while both watches are in HOT) or the fallback (both short
 presses within 3 s in HOT with band <= ~5). Players knock screen to screen,
-so a knock touches both panels: a touch never stops a spike, and a touch
-that lands with a counted spike (from KNOCK_TOUCH_BEFORE_MS before its
-touch-down to KNOCK_TOUCH_AFTER_MS after) is the knock's, so its gesture
-does nothing (ui-spec §6, §8). A touch in HOT never starts a scan (a knock
-whose spike was missed or blanked would disarm the bump; the button scans
-there). The accelerometer samples fast in FOUND too, so knocks that go on
+so a knock touches both panels: a touch never stops a spike. A gesture whose
+touch-down lands with its own counted spike (the spike from
+KNOCK_TOUCH_BEFORE_MS before the touch-down to KNOCK_TOUCH_AFTER_MS after)
+waits up to KNOCK_WAIT_MS after the spike: if the partner reports a spike
+within BUMP_WINDOW_MS of it, it was a knock and the gesture does nothing; if
+not, a finger made the spike and the gesture runs (ui-spec §6, §8). A touch
+in HOT never starts a scan (a knock whose spike was missed or blanked would
+disarm the bump; the button scans there). The accelerometer samples fast in FOUND too, so knocks that go on
 after FOUND never start a new round.
 
 Choices where the spec is silent (all starting values):
@@ -216,6 +218,7 @@ class Game:
         self._used_peer = None
         self._press_t = None
         self._spike_t = None      # last counted accelerometer spike (knock touches)
+        self._held_g = None       # (code, x, y, t_down, spike): a gesture waiting on the partner
         self._touches.clear()
         self._touch_block = None
         self._hap = None
@@ -352,8 +355,36 @@ class Game:
         if not self.screen_on or self.power_off or self._bye_t is not None:
             return
         td = t_ms if t_down is None else t_down
-        if _knock(self._spike_t, td):
-            return          # a knock touched the screen (§8): no tap, swipe or press
+        self._resolve_held(t_ms, True)
+        s = self._spike_t
+        if _knock(s, td):           # a knock or a finger's own spike (§8)
+            if not self._peer_spiked(s):
+                self._held_g = (code, x, y, td, s)  # waits for the partner's word
+            return
+        self._gesture(t_ms, code, x, y, td)
+
+    def _peer_spiked(self, s):
+        """The partner reported a spike within BUMP_WINDOW_MS of our spike ``s``."""
+        q = self.peer.tap_t
+        return q is not None and -T.BUMP_WINDOW_MS <= ticks_diff(s, q) <= T.BUMP_WINDOW_MS
+
+    def _resolve_held(self, t_ms, now=False):
+        """A held gesture: dropped once the partner's spike shows it was a knock;
+        run once KNOCK_WAIT_MS passed without one (or ``now``, before a newer
+        gesture), judged by its landing as usual."""
+        h = self._held_g
+        if h is None:
+            return
+        if self._peer_spiked(h[4]):
+            self._held_g = None
+            return
+        if not now and ticks_diff(t_ms, h[4]) < T.KNOCK_WAIT_MS:
+            return
+        self._held_g = None
+        if self.screen_on and not self.power_off and self._bye_t is None:
+            self._gesture(t_ms, h[0], h[1], h[2], h[3])
+
+    def _gesture(self, t_ms, code, x, y, td):
         if ticks_diff(td, self._wake_t) < T.WAKE_TOUCH_IGNORE_MS:
             return
         if self._touch_block is not None and ticks_diff(td, self._touch_block) < 0:
@@ -485,6 +516,7 @@ class Game:
         self._hap = None
         self._burst = False
         if not self.power_off:
+            self._resolve_held(t_ms)
             self._expire(t_ms)
             self._power(t_ms)
             self._battery(t_ms)

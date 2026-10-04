@@ -263,7 +263,7 @@ def test_two_watches_one_minute():
     ra = SimRadio(MAC_A, seed=11).begin()
     rb = SimRadio(MAC_B, seed=22).begin()
     ra.connect(rb, rssi=-50)
-    a = _watch(clock, ra, imu_spikes=((1000, 2, 3000), (1500, 6, 3000), (20000, 2, 3000)),
+    a = _watch(clock, ra, imu_spikes=((1000, 2, 3000), (1500, 12, 3000), (20000, 2, 3000)),
                buttons=((2000, EV_SHORT),))
     y_buzz = T.MENU_ROWS_Y[2] + T.MENU_ROW_H // 2       # row 2: BUZZ
     y_resume = T.MENU_ROWS_Y[0] + T.MENU_ROW_H // 2     # row 0: RESUME
@@ -319,7 +319,7 @@ def test_two_watches_one_minute():
     assert a.game.pair.runes == b.game.pair.runes
 
     # bump spikes, sampled fast only in PAIRING seen / confirmed: 2.5 ms
-    # accepted, 7.5 ms (a shake) rejected; the split's 100 Hz sees none
+    # accepted, 15 ms (a shake) rejected; the split's 100 Hz sees none
     assert a.board.imu.odrs[:2] == [T.BUMP_ODR_HZ, 100], a.board.imu.odrs
     assert a.feed.fast == a.game.bump_armed()
     assert a.feed.n_taps == 1, (a.feed.n_taps, a.feed.n_rejected)
@@ -429,8 +429,10 @@ def test_no_renderer_uses_metronome():
 def test_imu_feed_spikes_blanking_and_rate():
     from app.imu_feed import ImuFeed, FAST_HZ
     clock = Clock(0)
-    imu = FakeIMU(clock, spikes=((1000, 1, 3000), (1500, 4, 3000), (2000, 8, 3000),
-                                 (2600, 2, 3000), (2700, 2, 3000), (4500, 2, 3000)))
+    imu = FakeIMU(clock, spikes=((1000, 1, 3000), (1500, 4, 3000), (2000, 10, 3000),
+                                 (2600, 2, 3000), (2700, 2, 3000), (4500, 2, 3000),
+                                 (3500, 3, 800),                    # peaks under 1 g
+                                 (3700, 40, 700), (3720, 2, 600)))  # slow, tops 1.3 g
     taps = []
     f = ImuFeed(imu, on_tap=taps.append)
     f.set_fast(True)                       # 800 Hz: 1.25 ms a sample
@@ -442,8 +444,8 @@ def test_imu_feed_spikes_blanking_and_rate():
         clock.sleep(30)
         f.poll(clock.now)
     assert taps == [1000, 1500, 2600, 3300], taps
-    assert f.n_blanked == 1
-    assert f.n_rejected == 3               # 10 ms wide, refractory, blanked
+    assert f.n_blanked == 1 and f.n_low == 1
+    assert f.n_rejected == 4               # 12.5 ms wide, refractory, blanked, slow
     assert f.tracker.face_up
     assert abs(f.tracker.gz - 1.0) < 0.1
     assert f.dec == FAST_HZ // 50 and f.n_samples == clock.now * FAST_HZ // 1000
@@ -453,7 +455,7 @@ def test_imu_feed_spikes_blanking_and_rate():
     while clock.now < 5000:
         clock.sleep(30)
         f.poll(clock.now)
-    assert len(taps) == 4 and f.n_rejected == 3
+    assert len(taps) == 4 and f.n_rejected == 4
     assert imu.odrs == [FAST_HZ, 100] and f.dec == 2 and f.tracker.face_up
 
 
@@ -503,11 +505,11 @@ def _poll_until(clock, f, t_end, steps=(30,)):
 
 
 def test_imu_feed_irregular_polls_and_spike_width_edges():
-    """At 800 Hz: 1 and 4 samples (1.25, 5 ms) count, 5 (6.25 ms) is too wide;
+    """At 800 Hz: 1 and 8 samples (1.25, 10 ms) count, 9 (11.25 ms) is too wide;
     polls at odd intervals keep the times (fractional sample clock)."""
     from app.imu_feed import ImuFeed
     clock = Clock(0)
-    imu = FakeIMU(clock, spikes=((1000, 1, 3000), (1500, 4, 3000), (2000, 5, 3000),
+    imu = FakeIMU(clock, spikes=((1000, 1, 3000), (1500, 8, 3000), (2000, 9, 3000),
                                  (2600, 2, 3000)))
     taps = []
     f = ImuFeed(imu, on_tap=taps.append)
@@ -1113,10 +1115,13 @@ def _inputs(rt):
     return out
 
 
-def test_a_knock_counts_and_its_touch_does_nothing():
+def test_a_spike_with_a_touch_counts_and_the_gesture_waits():
     """ui-spec §6/§8: players knock screen to screen, so a knock touches the
     panel. Its spike counts whether it reaches the game before or after the
-    touch-down, and the touch is no gesture; a touch apart from any spike is."""
+    touch-down; the touch's gesture waits KNOCK_WAIT_MS for the partner's
+    spike. With no partner (a finger's own spike) it then runs; a touch apart
+    from any spike runs at once."""
+    from finder.tuning import KNOCK_WAIT_MS
     fakes.install()
     from hal.radio import SimRadio
     from app.telemetry import Telemetry
@@ -1135,7 +1140,10 @@ def test_a_knock_counts_and_its_touch_does_nothing():
     assert taps == [(4990, True), (7000, True)], taps
     assert rt.game.bump_t == 7000
     assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"] * 3
-    assert len(took) == 1 and took[0] >= 9100, took
+    assert len(took) == 3, took
+    assert 4990 + KNOCK_WAIT_MS <= took[0] <= 4990 + KNOCK_WAIT_MS + 110, took
+    assert 7000 + KNOCK_WAIT_MS <= took[1] <= 7000 + KNOCK_WAIT_MS + 110, took
+    assert 9100 <= took[2] < 9300, took
     rt.board.touch.contacts = 2                      # two fingers: ignored (§8)
     n = rt.tele.n
     _run(rt, clock, 1000)
@@ -1188,7 +1196,8 @@ def test_short_taps_count_while_frames_render():
 def test_knock_spike_after_a_mid_frame_touch_down():
     """A touch-down sampled between strips, then the knock's spike: the spike
     counts, and the imu stage runs before the touch stage, so the gesture
-    finds it and is dropped (§8)."""
+    finds it and waits for the partner (§8); with none it runs late."""
+    from finder.tuning import KNOCK_WAIT_MS
     fakes.install()
     from hal.radio import SimRadio
     from app.telemetry import Telemetry
@@ -1204,7 +1213,7 @@ def test_knock_spike_after_a_mid_frame_touch_down():
     ev = [json.loads(s) for s in rt.tele.lines()]
     assert [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"] == [(5030, True)], ev
     assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"], ev
-    assert rt.game.bump_t == 5030 and not took, took
+    assert rt.game.bump_t == 5030 and len(took) == 1 and took[0] >= 5030 + KNOCK_WAIT_MS, took
 
 
 def _bump_in_hot(t0, finger, knocks=()):

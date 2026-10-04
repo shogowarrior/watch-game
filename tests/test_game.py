@@ -681,27 +681,58 @@ def test_a_touch_never_stops_a_spike_but_blanking_does():
     assert not g2.on_accel_tap(5000)
 
 
-def test_a_knock_drops_its_touch_and_keeps_its_spike():
-    """Screen-to-screen knocks (§8): the spike counts at once, and a gesture whose
-    touch-down lands from KNOCK_TOUCH_BEFORE_MS after a counted spike to
-    KNOCK_TOUCH_AFTER_MS before it does nothing."""
-    # the finger lands, the spike, then the TAP after the lift (WARM: a tap scans)
+def test_a_knock_drops_its_touch_and_a_finger_keeps_it():
+    """Screen-to-screen knocks (§8): the spike counts at once. A gesture whose
+    touch-down lands from KNOCK_TOUCH_AFTER_MS before to KNOCK_TOUCH_BEFORE_MS
+    after its own counted spike waits for the partner: a knock (the partner
+    spiked within BUMP_WINDOW_MS) does nothing; a finger's own spike (no
+    partner spike by KNOCK_WAIT_MS) lets the gesture run then."""
+    # knock: the finger lands, the spike, the partner's spike, the TAP (WARM: a tap scans)
     r = warm_rig()
     g = r.g
     t = r.t + 10
     g.on_touch_down(t)
     assert g.on_accel_tap(t + T.KNOCK_TOUCH_AFTER_MS)
     assert g._tap(t + 120) == t + T.KNOCK_TOUCH_AFTER_MS   # no wait for a touch
-    g.on_gesture(t + 150, 1, 120, 120)
-    assert g.mode == M_HUNT
-    # the spike drained before the touch-down it belongs to
+    r.peer_tap(t + 90)
+    g.on_gesture(t + 150, 1, 120, 120, t)
+    r.run(T.KNOCK_WAIT_MS + 300)
+    assert g.mode == M_HUNT and g._held_g is None
+    # the spike drained before its touch-down; the partner's reported after the gesture
     r = warm_rig()
     g = r.g
     t = r.t + 10
     assert g.on_accel_tap(t)
     g.on_touch_down(t + T.KNOCK_TOUCH_BEFORE_MS)
     g.on_gesture(t + T.KNOCK_TOUCH_BEFORE_MS + 150, 1, 120, 120, t + T.KNOCK_TOUCH_BEFORE_MS)
-    assert g.mode == M_HUNT
+    r.run(100)
+    assert g._held_g is not None and g.mode == M_HUNT
+    r.peer_tap(t - 50)
+    r.run(T.KNOCK_WAIT_MS)
+    assert g.mode == M_HUNT and g._held_g is None
+    # a finger's own spike: no partner spike near it, so the tap runs after the wait
+    r = warm_rig()
+    g = r.g
+    r.peer_tap(r.t - 700)                       # an old partner spike: not this one
+    r.run(100)
+    t = r.t + 10
+    g.on_touch_down(t)
+    assert g.on_accel_tap(t + 5)
+    g.on_gesture(t + 150, 1, 120, 120, t)
+    r.run(T.KNOCK_WAIT_MS - 100)
+    assert g.mode == M_HUNT and g._held_g is not None
+    r.run(200)
+    assert g.mode == M_SCANNING and g._held_g is None
+    # a newer gesture runs the held one first, in order
+    r = warm_rig()
+    g = r.g
+    t = r.t + 10
+    assert g.on_accel_tap(t)
+    g.on_gesture(t + 150, 1, 120, 120, t)       # held (a scan once run)
+    g.on_gesture(t + 450, 1, 120, 120, t + 420) # outside the window: runs at once
+    assert g._held_g is None and g.mode == M_SCANNING
+    r.run(100)
+    assert g.mode == M_HUNT                     # the scan started, then the tap cancelled it
     # just outside the window on either side: a tap
     for d in (-T.KNOCK_TOUCH_AFTER_MS - 1, T.KNOCK_TOUCH_BEFORE_MS + 1):
         r = warm_rig()
@@ -761,16 +792,20 @@ def test_knocks_on_the_found_screen_never_start_a_new_round():
     r.state = SC_FOUND
     r.run(T.FOUND_CELEBRATE_MS + 100)
     assert g.bump_armed() and r.p.word == "TAP=AGAIN"
-    for k in range(3):                          # knocks go on: spike + touch each
+    for k in range(3):                          # knocks go on: spikes + touch each
         t = r.t + 10
         g.on_touch_down(t)
         assert g.on_accel_tap(t + 4)
+        r.peer_tap(t + 20, k + 1)
         g.on_gesture(t + 120, 1, 120, 120, t)
-        r.run(400)
+        r.run(T.KNOCK_WAIT_MS + 100)
         assert g.mode == M_FOUND, k
     r.run(2500)
-    g.on_gesture(r.t, 1, 120, 120)              # a real tap: a new round
-    r.run(100)
+    t = r.t + 10                                # a finger tap spikes only its own watch
+    g.on_touch_down(t)
+    assert g.on_accel_tap(t + 4)
+    g.on_gesture(t + 120, 1, 120, 120, t)
+    r.run(T.KNOCK_WAIT_MS + 200)
     assert g.mode == M_PAIRING and r.p.sub == "split"
 
 

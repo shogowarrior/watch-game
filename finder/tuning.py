@@ -6,7 +6,7 @@ Plain constants only; blocks marked 'ui-spec only' come from ui-spec.md.
 """
 
 TOKENS_VERSION = '0.2.0'
-TOKENS_HASH = '2a34e787156c2fa2'
+TOKENS_HASH = 'ace817cad010339f'
 
 # ---- Zones (thresholds.zones_m): boundary k is between zone k and k+1
 ZONE_FAR = 0
@@ -118,6 +118,11 @@ BATT_BANNER_PCT = 5
 BUMP_WINDOW_MS = 400  # both bump spikes within this
 FALLBACK_PRESS_WINDOW_MS = 3000
 FALLBACK_MAX_BAND = 1  # band <= '~5'
+
+# ---- Bump spike (thresholds.bump_spike, provisional)
+BUMP_SPIKE_G = 1.0  # a spike peaks at gravity-removed |a| >= this (§6 HOT)
+BUMP_RUN_G = 0.5  # its run: samples above this ...
+BUMP_SPIKE_MS = (0, 10)  # ... one sample up to this wide
 
 # ---- Saver and backlight (states.LOW_BATTERY, power.backlight)
 SAVER_FPS = 15
@@ -389,9 +394,9 @@ PAIR_GO_MS = 1000  # split: GO shown 1 s at 0
 CAL_GATE_WINDOW_MS = 1000  # RSSI sd over 1 s > unstable_sd pauses the fill
 SEARCHING_WALK_ABOUT_MS = 45000
 KNOCK_TOUCH_BEFORE_MS = 300  # a touch whose touch-down a counted spike precedes by up to this
-KNOCK_TOUCH_AFTER_MS = 100  # ... or follows by up to this is a knock's: no gesture (§8)
-BUMP_SPIKE_G = 1.5  # gravity-removed |a| above this (§6 HOT)
-BUMP_SPIKE_MS = (0, 6)  # spike run length min..max: one sample up to 6 ms
+KNOCK_TOUCH_AFTER_MS = 100  # ... or follows by up to this may be a knock's (§8) ...
+# ... so it waits this long after the spike for the partner's: a knock spikes both watches, a finger only its own
+KNOCK_WAIT_MS = 500
 BUMP_ODR_HZ = 800  # accelerometer rate while a bump can count
 BUMP_REFRACTORY_MS = 200
 BUMP_READY_HOLD_MS = 1500  # band <3 held 1.5 s

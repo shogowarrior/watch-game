@@ -98,9 +98,9 @@ SPEC = (
         ("CAL_GATE_WINDOW_MS", 1000, "RSSI sd over 1 s > unstable_sd pauses the fill"),
         ("SEARCHING_WALK_ABOUT_MS", 45000, None),
         ("KNOCK_TOUCH_BEFORE_MS", 300, "a touch whose touch-down a counted spike precedes by up to this"),
-        ("KNOCK_TOUCH_AFTER_MS", 100, "... or follows by up to this is a knock's: no gesture (§8)"),
-        ("BUMP_SPIKE_G", 1.5, "gravity-removed |a| above this (§6 HOT)"),
-        ("BUMP_SPIKE_MS", (0, 6), "spike run length min..max: one sample up to 6 ms"),
+        ("KNOCK_TOUCH_AFTER_MS", 100, "... or follows by up to this may be a knock's (§8) ..."),
+        ("KNOCK_WAIT_MS", 500, "... so it waits this long after the spike for the partner's: "
+                               "a knock spikes both watches, a finger only its own"),
         ("BUMP_ODR_HZ", 800, "accelerometer rate while a bump can count"),
         ("BUMP_REFRACTORY_MS", 200, None),
         ("BUMP_READY_HOLD_MS", 1500, "band <3 held 1.5 s"),
@@ -410,6 +410,14 @@ def build(tok):
         ("BUMP_WINDOW_MS", int(fg.group(1)), "both bump spikes within this"),
         ("FALLBACK_PRESS_WINDOW_MS", int(fg.group(2)) * 1000, None),
         ("FALLBACK_MAX_BAND", list(b["labels"]).index(fg.group(3)), "band <= '%s'" % fg.group(3)),
+    ])
+    bs = th["bump_spike"]
+    if not 0.0 < float(bs["run_g"]) < float(bs["peak_g"]):
+        raise ValueError("tokens.json thresholds.bump_spike: need 0 < run_g < peak_g")
+    sec("Bump spike (thresholds.bump_spike, provisional)", [
+        ("BUMP_SPIKE_G", float(bs["peak_g"]), "a spike peaks at gravity-removed |a| >= this (§6 HOT)"),
+        ("BUMP_RUN_G", float(bs["run_g"]), "its run: samples above this ..."),
+        ("BUMP_SPIKE_MS", (0, int(bs["max_ms"])), "... one sample up to this wide"),
     ])
 
     # saver / power

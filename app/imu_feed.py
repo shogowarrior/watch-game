@@ -15,10 +15,14 @@ from ``now`` (continuing the previous batch's clock, to a 1/256 ms, while it
 stays within ``_resync`` ms: 40 at 100 Hz, 10 at 800 Hz), block-averaged to
 ``out_hz`` (the runtime uses 25) and handed to the tracker in g.
 
-Bump spike (ui-spec §6 HOT/FOUND, §7), fast rate only: the gravity-removed
-magnitude ``|a - g_lp|`` above ``SPIKE_G`` for a run ``SPIKE_MIN_MS``..
-``SPIKE_MAX_MS`` wide. Longer runs (shakes, falls, slaps) are rejected, as
-are runs within ``REFRACTORY_MS`` of the last accepted one. The gravity
+Bump spike (ui-spec §6 HOT/FOUND, §7), fast rate only: a run of the
+gravity-removed magnitude ``|a - g_lp|`` above ``RUN_G``, ``SPIKE_MIN_MS``..
+``SPIKE_MAX_MS`` wide, that peaks at ``SPIKE_G`` or more. The width is taken
+at the lower level so that a slow excursion (turning the watch in the hand,
+a swing) whose top just crosses ``SPIKE_G`` is still one long run, and is
+rejected; soft bumps peak at 1-1.5 g in 1-8 samples (2026-10-04). Longer
+runs (shakes, falls, slaps) are rejected, as are runs within
+``REFRACTORY_MS`` of the last accepted one. The gravity
 low-pass (160 ms at any rate, kept across rate switches) holds still during a
 run, and follows again once the run is longer than ``spike_max_ms``, so a
 wrong gravity estimate cannot hold a run open for good. Blanking (§7): a run
@@ -26,7 +30,8 @@ that overlaps a motor pulse, from its start until ``BLANKING_MS`` after it
 ends, is ignored. The feed keeps its own short history of pulses (``motor``)
 because samples reach it up to a batch late, after the motor has already
 moved on; it is also the game's ``blank_fn``. The thresholds are attributes
-(``thr2`` = threshold in mg squared, ``spike_min_ms``, ``spike_max_ms``,
+(``thr2`` = run level in mg squared, ``peak2`` = spike peak in mg squared,
+``spike_min_ms``, ``spike_max_ms``,
 ``refractory_ms``, ``blank_ms``), so a notebook can tune them on a running
 feed.
 
@@ -48,7 +53,8 @@ from finder.haptic_patterns import BLANKING_MS
 
 SLOW_HZ = 100             # tracker only (hal.bma423 default odr)
 FAST_HZ = T.BUMP_ODR_HZ   # while a bump can count
-SPIKE_G = T.BUMP_SPIKE_G                      # ui-spec §6 HOT (generated SPEC rows)
+SPIKE_G = T.BUMP_SPIKE_G                      # ui-spec §6 HOT (tokens thresholds.bump_spike)
+RUN_G = T.BUMP_RUN_G
 SPIKE_MIN_MS, SPIKE_MAX_MS = T.BUMP_SPIKE_MS
 REFRACTORY_MS = T.BUMP_REFRACTORY_MS          # ringing after a knock is not a second bump
 RESYNC_MIN_MS = 10        # batch clock this far from ``now`` (or 4 samples): re-anchor
@@ -245,8 +251,10 @@ class ImuFeed:
             z_sign = getattr(imu, "z_sign", 1)
         self.tracker = MotionTracker(rate_hz=out_hz, z_sign=z_sign)
         self.on_tap = on_tap
-        thr = int(SPIKE_G * 1000)
+        thr = int(RUN_G * 1000)
         self.thr2 = thr * thr
+        pk = int(SPIKE_G * 1000)
+        self.peak2 = pk * pk
         self.spike_min_ms = SPIKE_MIN_MS
         self.spike_max_ms = SPIKE_MAX_MS
         self.refractory_ms = REFRACTORY_MS
@@ -259,6 +267,7 @@ class ImuFeed:
         self.n_samples = 0
         self.n_taps = 0
         self.n_rejected = 0       # runs too wide/narrow, blanked or refractory
+        self.n_low = 0            # runs that never reached the spike peak
         self.n_blanked = 0
         self.last_tap = None
         self.peak_mg = 0          # largest |a - g| seen (debug / tuning)
@@ -411,6 +420,9 @@ class ImuFeed:
         t0 = self._run_t
         if pk > self.peak_mg * self.peak_mg:
             self.peak_mg = int(pk ** 0.5)
+        if pk < self.peak2:
+            self.n_low += 1                     # a wobble, never a spike
+            return
         if w < self.spike_min_ms * 1000 or w > self.spike_max_ms * 1000:
             self.n_rejected += 1
             return

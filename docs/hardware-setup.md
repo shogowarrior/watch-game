@@ -167,8 +167,8 @@ kernel per watch).
    and `hal/pins.py` `BMA423_Z_SIGN = -1` tells the game. A watch that shows
    +1000 needs it set to 1. The notebook's IMU section shows face-up, steps and
    bump spikes live, sampling at 800 Hz as the game does while a bump can count.
-   Knock two watches together: each knock should show a TAP with a peak above
-   2 g.
+   Bump two watches together, gently: each bump should show a TAP with a peak
+   of 1 g or more (soft bumps peak at 1-1.5 g at 800 Hz, 4 Oct 2026).
 7. **Radio ping-pong** (two watches, same channel):
    ```sh
    mpremote connect /dev/cu.usbserial-A cp tools/radio_pingpong.py :
@@ -199,7 +199,7 @@ watch yet.
 | FT6336 INT stays low for the whole touch (INT gating, reading touch only while the INT line is low, is off until verified) | `hal/ft6336.py` `gate_int` | log INT against `read()` |
 | PEK double press / hold within 1 s gives a reliable safe boot | `hal/board.py` `safe_boot` | reboot tests |
 | BMA423 at `0x19`, face-up z negative (checked on two watches), ±4 g, 100 Hz FIFO, 800 Hz while a bump can count | `hal/bma423.py`, `hal/pins.py` `BMA423_Z_SIGN` | step 6 |
-| A bump is a spike > 2 g lasting at most 6 ms at 800 Hz; haptic pulses don't trigger it | `app/imu_feed.py` | knock tests while the motor runs |
+| A bump is a run above 0.5 g at most 10 ms wide that peaks at 1 g or more, at 800 Hz (provisional, `tokens.json` `thresholds.bump_spike`); turning the watch in the hand and haptic pulses don't trigger it | `app/imu_feed.py` | soft-bump tests, handling, knocks while the motor runs |
 | The feature engine (steps, activity, wrist-wear) works with the Bosch blob | `hal/bma423.py` `load_config`, `poll_features` | `b.imu.load_config()` (True), then `b.imu.poll_features()` (2 = FEAT_OK); walk 20 steps: `b.imu.steps()` reads about 20 and `b.imu.activity()` reads 1 (walk) while walking |
 | The chip wrist-wear gesture fires on a wrist raise only (the feature engine runs with Bosch's default axes remap; the T-Watch mounting is unmeasured) | `hal/bma423.py` `poll_features`, `app/runtime.py` `_stage_imu` | After `b.imu.poll_features()` returns 2, call `b.imu.poll_events()` to clear it. Then raise the wrist, lower it, twist it and swing the arm while walking, calling `b.imu.poll_events() & 0x08` after each move: it must be set only after a raise. If it misfires, drop `enable_feature(FEAT_WRIST_WEAR)` and the INT1 map from `poll_features` (face_up still wakes the screen, ui-spec §8), or write the FEATURES_IN axes-remap word before enabling it. |
 | Motor spins up at 35 % duty; 60 ms pulses are felt | `hal/haptics.py` `min_duty` | step 3, haptic patterns |
