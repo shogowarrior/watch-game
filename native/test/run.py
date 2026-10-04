@@ -3,9 +3,10 @@
     python3 native/test/run.py [name-filter] [--tests test_game,...] [--classes ...] [--mark]
 
 Compiles native/core/src/*.cpp with native/test/*.cpp, plus the portable
-code and tests a port keeps beside its drivers (PORTS), for this machine, with
-the address and undefined-behaviour sanitizers (C++ overflow is UB where the
-Python it ports has none). Meanwhile native/tools/trace_game.py records the
+code and tests a port keeps beside its drivers (PORTS), for this machine: the
+ported code with the address and undefined-behaviour sanitizers (C++ overflow
+is UB where the Python it ports has none), the tests at -O2 without them (the
+trace replays parse hundreds of MB of JSON: three times faster). Meanwhile native/tools/trace_game.py records the
 Python game's calls into a temporary folder (HM_TRACES), which the game port's
 trace tests replay (--tests and --classes as trace_game.py takes them: other
 Python tests to record than its default, only these classes).
@@ -18,6 +19,7 @@ it after such a run. While the Python differs from it, a trace test that
 differs skips instead of failing (the port lags, nobody else is blocked).
 """
 
+import concurrent.futures
 import glob
 import hashlib
 import os
@@ -27,8 +29,10 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-FLAGS = ["-std=c++17", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
-         "-fsanitize=address,undefined", "-fno-sanitize-recover=all"]
+WARN = ["-std=c++17", "-g", "-Wall", "-Wextra", "-Werror"]
+SANITIZE = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all"]
+FLAGS = WARN + ["-O1"] + SANITIZE   # the code under test
+TEST_FLAGS = WARN + ["-O2"]         # the tests and the trace replay
 TRACED = os.path.join(ROOT, "native", "test", "traced.txt")
 # What the default traces depend on, besides the tests trace_game.py runs.
 PYTHON = ("finder/**/*.py", "sim/*.py", "app/*.py", "tests/__init__.py", "tests/est_helpers.py",
@@ -38,15 +42,31 @@ PORTS = [("native/idf/components/hm_idf/portable", "native/idf/components/hm_idf
 
 
 def build(out):
-    """Compile the host test binary to ``out``; returns (ok, compiler output)."""
-    dirs = [os.path.join(ROOT, "native", "core", "src"), os.path.join(ROOT, "native", "test")]
+    """Compile the host test binary to ``out``, one file per job; returns (ok,
+    compiler output). The code under test links first, so an inline function
+    the tests also compile keeps its sanitized copy."""
+    code = [os.path.join(ROOT, "native", "core", "src")] + [os.path.join(ROOT, src) for src, _, _ in PORTS]
+    tests = [os.path.join(ROOT, "native", "test")] + [os.path.join(ROOT, t) for _, _, t in PORTS]
     inc = ["-I" + os.path.join(ROOT, "native", "core", "include"), "-I" + os.path.join(ROOT, "native", "test")]
-    for src, hdr, tests in PORTS:
-        dirs += [os.path.join(ROOT, src), os.path.join(ROOT, tests)]
-        inc.append("-I" + os.path.join(ROOT, hdr))
-    srcs = sorted(f for d in dirs for f in glob.glob(os.path.join(d, "**", "*.cpp"), recursive=True))
-    p = subprocess.run(["g++"] + FLAGS + inc + srcs + ["-o", out], capture_output=True, text=True)
-    return p.returncode == 0, p.stdout + p.stderr
+    inc += ["-I" + os.path.join(ROOT, hdr) for _, hdr, _ in PORTS]
+
+    def sources(dirs, flags):
+        return [(f, flags) for d in dirs for f in sorted(glob.glob(os.path.join(d, "**", "*.cpp"), recursive=True))]
+
+    jobs = sources(code, FLAGS) + sources(tests, TEST_FLAGS)
+    objs = [os.path.join(os.path.dirname(out), "%d.o" % k) for k in range(len(jobs))]
+
+    def compile_one(k):
+        src, flags = jobs[k]
+        return subprocess.run(["g++"] + flags + inc + ["-c", src, "-o", objs[k]], capture_output=True, text=True)
+
+    with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 2) as pool:
+        done = list(pool.map(compile_one, range(len(jobs))))
+    log = "".join(p.stdout + p.stderr for p in done)
+    if any(p.returncode for p in done):
+        return False, log
+    p = subprocess.run(["g++"] + SANITIZE + objs + ["-o", out], capture_output=True, text=True)
+    return p.returncode == 0, log + p.stdout + p.stderr
 
 
 def python_hash():

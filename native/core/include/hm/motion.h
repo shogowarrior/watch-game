@@ -12,6 +12,7 @@
 
 #include "hm/estimator.h"
 #include "hm/ticks.h"
+#include "hm/tuning.h"
 
 namespace hm {
 namespace motion {
@@ -21,8 +22,11 @@ constexpr int32_t CHIP_ACT[4] = {ACT_STILL, ACT_WALK, ACT_RUN, ACT_UNKNOWN};
 
 constexpr double STILL_ON_G = 0.012;    // sd of |a| over the window to enter "still"
 constexpr double STILL_OFF_G = 0.025;   // ... and to leave it
-constexpr double FACE_ON_COS = 0.9396926207859084;    // math.cos(20.0 * math.pi / 180.0)
-constexpr double FACE_OFF_COS = 0.8660254037844387;   // math.cos(30.0 * math.pi / 180.0)
+// face-up within T::SCAN_FLAT_DEG (20, ui-spec §6 SCANNING ready), left above
+// FACE_OFF_DEG (spec-silent hysteresis, imu-drift.md); the motion trace checks the cosines
+constexpr double FACE_OFF_DEG = 30.0;
+constexpr double FACE_ON_COS = 0.9396926207859084;    // math.cos(FACE_ON_DEG * math.pi / 180.0)
+constexpr double FACE_OFF_COS = 0.8660254037844387;   // math.cos(FACE_OFF_DEG * math.pi / 180.0)
 constexpr double TAU_G_S = 0.5;         // gravity low-pass
 constexpr double TAU_BP_FAST_S = 0.053; // step band-pass: ~3 Hz low-pass ...
 constexpr double TAU_BP_SLOW_S = 0.25;  // ... minus ~0.6 Hz low-pass

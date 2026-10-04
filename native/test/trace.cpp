@@ -353,7 +353,7 @@ Json J(double v) {
   return j;
 }
 
-Json J(const char* v) { return J(std::string(v)); }
+Json J(const char* v) { return v ? J(std::string(v)) : J(); }
 
 Json J(const std::string& v) {
   Json j;

@@ -55,6 +55,18 @@ def test_golden_game_vectors_up_to_date():
                    "until python3 native/test/run.py passes" % ", ".join(bad))
 
 
+def test_golden_frames_up_to_date():
+    # native/core/include/hm/ui_tables.h and native/test/golden/frames.txt come
+    # from ui/glyphs.py, ui/font.py and the snapshot fixtures: a stale one means
+    # the renderer changed in a way the C++ port has not caught up with yet (a
+    # skip, not a failure, as for the game vectors).
+    _cpython("the generator imports the ui/ geometry and the fixtures (CPython)")
+    bad = _load("native/tools/golden_frames.py", "golden_frames")["stale"]()
+    if bad:
+        raise Skip("the C++ renderer lags ui/ in %s: python3 native/tools/golden_frames.py, then port "
+                   "until python3 native/test/run.py passes" % ", ".join(bad))
+
+
 def test_game_port_checked_against_this_python():
     # native/test/traced.txt hashes the Python the C++ game port last matched
     # call for call; while the Python differs, native/test/run.py skips trace
