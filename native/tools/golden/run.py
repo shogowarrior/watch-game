@@ -7,7 +7,9 @@ Each native/tools/golden/<name>.py drives the real finder/ module through
 fixed inputs and yields text lines from ``lines()``; native/test/test_<name>.cpp
 replays the same inputs through the C++ port and must match. When a finder/
 module changes behaviour its file goes stale: regenerate, then port the change
-until ``python3 native/test/run.py`` passes again.
+until ``python3 native/test/run.py`` passes again. A module with a trace port
+(native/test/test_port_*.cpp) has no golden file: its fixed inputs move to
+native/tools/scenarios/ and are replayed as traces.
 """
 
 import os

@@ -53,18 +53,14 @@ def test_motion_hint_speed():
 
 
 def test_walk_start_kicks_rate_spread():
-    p = []
-    k0 = kalman2.START_K
-    try:
-        for k in (k0, 0.0):
-            kalman2.START_K = k
-            e = Estimator()
-            feed(e, 0, 50, lambda i: -70.0, walking=False)
-            e.update(5000, -70.0, None, walk(5000), STILL)   # first walking packet
-            p.append(e.p11)
-    finally:
-        kalman2.START_K = k0
-    assert p[0] > 1.5 * p[1], p
+    # Checked against START_K itself rather than by patching it: the C++ port
+    # replays this test's trace, and a patched module constant can't follow.
+    e = Estimator()
+    feed(e, 0, 50, lambda i: -70.0, walking=False)
+    assert e.p11 < 0.01, e.p11                         # both still: the rate is pinned
+    e.update(5000, -70.0, None, walk(5000), STILL)   # first walking packet
+    kick = (kalman2.START_K * e.vmax) ** 2
+    assert kick > 0.1 and e.p11 > 0.5 * kick, (e.p11, kick)
 
 
 def test_stop_clears_trend_without_packets():
