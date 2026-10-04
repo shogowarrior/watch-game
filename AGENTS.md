@@ -102,6 +102,7 @@ sets it as CPython would.
 | `python3 tools/drift_demo.py` | Why accelerometer double integration fails. |
 | `python3 tools/build_sim.py` | Build the web simulator into `dist/sim/` (needs `tools/mpy` npm install). |
 | `mpremote run tools/bench_display.py` | **On the watch**: real SPI clock, push/blit timings, fps. |
+| `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push), push variants, IMU cost per rate, which kernels run as viper, and 10 s of the game loop with bump sensing off then on. |
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |
@@ -123,9 +124,15 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
 2. **Allocation-light hot paths; the render loop allocates nothing.** Per-packet,
    per-sample and per-frame code reuses preallocated buffers; floats are heap
    objects on MicroPython, so the renderer and ripple field work in Q8
-   integers. Why: GC pauses on the ESP32 cost tens of ms and would stutter the
-   20 fps frame and the haptic timing. `tools/bench_est.py` and the renderer
-   tests measure it.
+   integers. Why: a collect on the watch's 4 MB SPIRAM heap takes about 70 ms
+   and would stutter the frame and the haptic timing. `tools/bench_est.py` and
+   the renderer tests measure it. The hottest integer loops (palette, field
+   blit, FIFO decode, IMU feed) are one source string each, run as plain
+   Python (identity `ptr` shims) on CPython and wasm, and compiled with
+   `@micropython.viper` on the watch only after a self-check against the plain
+   version or the framebuf path; `tools/bench_frame.py` prints which ran.
+   Viper needs 32-bit words: on a 64-bit unix port the self-checks fail
+   (`ptr32` loads are not sign-extended) and the plain versions run.
 3. **Byte-swapped RGB565.** `framebuf` stores RGB565 little-endian, the ST7789
    wants MSB-first. Every colour given to a framebuf, palette or `fill` goes
    through `rgb565()`/`swap16()`; `ui/__init__.py` takes the pre-swapped values

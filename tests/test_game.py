@@ -162,8 +162,29 @@ def test_bump_armed_only_where_a_spike_can_count():
     r.g.on_button(r.t)
     r.run(100)
     assert r.g.pair.sub == "confirmed" and r.g.bump_armed()
+    r.state = SC_PAIRED | ST_CONFIRMED          # the partner confirms second: calibrate
+    r.rssi = -45
+    r.run(200)
+    assert r.g.pair.sub == "calibrate" and not r.g.bump_armed()
+    r.run(4300)
+    assert r.g.pair.sub == "split" and not r.g.bump_armed()
     assert not warm_rig().g.bump_armed()
-    assert hot_rig().g.bump_armed()
+    h = hot_rig()
+    assert h.g.bump_armed()
+    h.g.on_gesture(h.t, 1, 120, 120)            # TAP in HOT: a scan, nothing to bump
+    assert h.g.mode == M_SCANNING and not h.g.bump_armed()
+    h = hot_rig()
+    _found_by_press(h)
+    assert not h.g.bump_armed()
+    s = Rig()                                   # split with no link: SEARCHING
+    s.rssi = -50
+    s.run(600)
+    s.g.on_button(s.t)
+    s.state = SC_PAIRED | ST_CONFIRMED
+    s.rssi = -45
+    s.run(4500)
+    s.run(31500, packets=False)
+    assert s.g.mode == M_SEARCHING and not s.g.bump_armed()
 
 
 def _found_by_press(r):

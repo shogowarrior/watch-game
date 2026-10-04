@@ -257,6 +257,7 @@ def test_two_watches_one_minute():
     from finder import pairing as P
     from hal.axp202 import EV_SHORT
     from finder import tuning as T
+    from app.runtime import GC_PERIOD_MS
     clock = Clock(0)
     ra = SimRadio(MAC_A, seed=11).begin()
     rb = SimRadio(MAC_B, seed=22).begin()
@@ -299,7 +300,7 @@ def test_two_watches_one_minute():
         assert rt.display.pushes == 10 * n
         assert rt.ticks >= 0.98 * RUN_MS / 100, rt.ticks
         assert rt.display.level is not None and rt.display.level > 0
-        assert rt.gc_count[0] >= 30, rt.gc_count
+        assert RUN_MS // GC_PERIOD_MS - 1 <= rt.gc_count[0] <= RUN_MS // GC_PERIOD_MS, rt.gc_count
         assert not any(rt.io_errors), rt.io_errors
         assert rt.fps > 18.0, rt.fps
 
@@ -442,6 +443,179 @@ def test_imu_feed_spikes_blanking_and_rate():
         f.poll(clock.now)
     assert len(taps) == 4 and f.n_rejected == 3
     assert imu.odrs == [FAST_HZ, 100] and f.dec == 2 and f.tracker.face_up
+
+
+class FlakyIMU(FakeIMU):
+    """FakeIMU whose ``set_odr`` fails before the write or after it (in the
+    FIFO flush, with the new rate already set)."""
+
+    def __init__(self, clock):
+        FakeIMU.__init__(self, clock)
+        self.fail = None
+
+    def set_odr(self, hz):
+        if self.fail == "write":
+            raise OSError(5)
+        FakeIMU.set_odr(self, hz)
+        if self.fail == "flush":
+            raise OSError(5)
+
+
+class SlowChipIMU(FakeIMU):
+    """FakeIMU whose sample clock runs 1 % slow against ticks_ms."""
+
+    def fifo_read_mg(self):
+        hz = self.odr
+        k1 = (self.clock.now - self.t0) * hz * 99 // 100000
+        n = min(k1 - self.k, 170)
+        a = self.fifo_mg
+        for i in range(n):
+            t = self.t0 + (self.k + i + 1) * 100000 // (hz * 99)    # ms
+            z = 1000
+            for t0, w, mg in self.spikes:
+                if t0 <= t < t0 + w:
+                    z += mg
+            a[3 * i] = 5
+            a[3 * i + 1] = -4
+            a[3 * i + 2] = z if z < 4000 else 3999
+        self.k = k1
+        return n
+
+
+def _poll_until(clock, f, t_end, steps=(30,)):
+    i = 0
+    while clock.now < t_end:
+        clock.sleep(steps[i % len(steps)])
+        i += 1
+        f.poll(clock.now)
+
+
+def test_imu_feed_irregular_polls_and_spike_width_edges():
+    """At 800 Hz: 1 and 4 samples (1.25, 5 ms) count, 5 (6.25 ms) is too wide;
+    polls at odd intervals keep the times (fractional sample clock)."""
+    from app.imu_feed import ImuFeed
+    clock = Clock(0)
+    imu = FakeIMU(clock, spikes=((1000, 1, 3000), (1500, 4, 3000), (2000, 5, 3000),
+                                 (2600, 2, 3000)))
+    taps = []
+    f = ImuFeed(imu, on_tap=taps.append)
+    f.set_fast(True)
+    _poll_until(clock, f, 3000, (7, 13, 29, 41, 3))
+    assert len(taps) == 3 and f.n_rejected == 1, (taps, f.n_rejected)
+    for t, want in zip(taps, (1000, 1500, 2600)):
+        assert abs(t - want) <= 2, taps
+    assert f.n_samples == imu.k
+
+
+def test_imu_feed_recovers_from_a_knock_as_its_first_sample():
+    """A feed that starts on a fast chip seeds gravity from its first sample;
+    if that is a knock, the run outlasts spike_max_ms, gravity follows again,
+    and later knocks still count."""
+    from app.imu_feed import ImuFeed, FAST_HZ
+    clock = Clock(0)
+    imu = FakeIMU(clock, spikes=((0, 3, 3000), (1000, 2, 3000), (1600, 2, 3000)))
+    imu.odr = FAST_HZ                       # left fast by an earlier run
+    taps = []
+    f = ImuFeed(imu, on_tap=taps.append)
+    assert f.fast and f.hz == FAST_HZ
+    _poll_until(clock, f, 2000)
+    assert taps == [1000, 1600], (taps, f.n_rejected)
+    assert f.n_rejected >= 1                # the run the bad seed held open
+    f.set_fast(False)
+    assert imu.odrs == [100] and not f.fast
+
+
+def test_imu_feed_long_slap_never_holds_the_detector():
+    """A 0.4 s slap is one wide run (rejected), gravity follows it once it is
+    longer than spike_max_ms, and a knock after it still counts."""
+    from app.imu_feed import ImuFeed, FAST_HZ
+    clock = Clock(0)
+    imu = FakeIMU(clock)
+    taps = []
+    f = ImuFeed(imu, on_tap=taps.append)
+    _poll_until(clock, f, 500)              # 100 Hz: gravity settles
+    f.set_fast(True)
+    assert abs((f._st[2] >> f.g_shift) - 1000) <= 4     # carried over at the new scale
+    imu.spikes += [(800, 320, 2500), (1800, 2, 3000)]   # 400 ms slap (320 samples), a knock
+    _poll_until(clock, f, 2500)
+    assert taps == [1800], (taps, f.n_rejected)
+    assert f.n_rejected >= 1 and f._st[6] == 0
+
+
+def test_imu_feed_set_fast_follows_the_chip_on_bus_errors():
+    from app.imu_feed import ImuFeed, FAST_HZ
+    clock = Clock(0)
+    imu = FlakyIMU(clock)
+    f = ImuFeed(imu)
+    imu.fail = "write"                      # nothing reached the chip
+    try:
+        f.set_fast(True)
+        assert False, "no OSError"
+    except OSError:
+        pass
+    assert not f.fast and f.hz == 100 and imu.odr == 100
+    imu.fail = "flush"                      # rate written, flush failed
+    try:
+        f.set_fast(True)
+        assert False, "no OSError"
+    except OSError:
+        pass
+    assert f.fast and f.hz == FAST_HZ and f.dec == FAST_HZ // 50
+    imu.fail = None
+    f.set_fast(True)                        # already there: no second write
+    assert imu.odrs == [FAST_HZ]
+
+
+def test_imu_feed_resyncs_a_slow_chip_clock_within_10_ms():
+    """The chip's 800 Hz runs 1 % slow: the continued batch clock drifts, and
+    is re-anchored before it is 10 ms off (40 ms at 100 Hz would let a spike
+    land before a motor pulse that caused it)."""
+    from app.imu_feed import ImuFeed
+    clock = Clock(0)
+    imu = SlowChipIMU(clock, spikes=((3000, 2, 3000), (5000, 2, 3000)))
+    taps = []
+    f = ImuFeed(imu, on_tap=taps.append)
+    f.set_fast(True)
+    _poll_until(clock, f, 6000, (23, 31))
+    assert len(taps) == 2, taps
+    for t, want in zip(taps, (3000, 5000)):
+        assert abs(t - want) <= 11, taps
+
+
+def test_runtime_exit_slows_the_imu():
+    fakes.install()
+    from hal.radio import SimRadio
+    from finder import tuning as T
+    clock = Clock(0)
+    ra = SimRadio(MAC_A, seed=1).begin()
+    rt = _watch(clock, ra)
+    rt.begin(0)
+    _arm(rt)
+    rt.run(max_ms=500)
+    assert rt.imu.odrs == [T.BUMP_ODR_HZ, 100] and not rt.feed.fast
+
+
+def test_feed_kernel_self_check_catches_a_wrong_kernel():
+    from app import imu_feed as F
+    assert F.KERNEL in ("python", "viper")
+    k = F.feed_kernel
+    assert F.kernel_agrees(k, k)
+
+    def gravity_off(mg, n, st, ev):
+        r = k(mg, n, st, ev)
+        st[F.S_GX + 2] += 1
+        return r
+
+    def no_follow(mg, n, st, ev):           # never frees gravity on a long run
+        st[F.S_RMAX] = 1 << 30
+        return k(mg, n, st, ev)
+
+    def slow_only(mg, n, st, ev):
+        st[F.S_FAST] = 0
+        return k(mg, n, st, ev)
+
+    for bad in (gravity_off, no_follow, slow_only):
+        assert not F.kernel_agrees(k, bad), bad
 
 
 def test_telemetry_ring_and_state_record():

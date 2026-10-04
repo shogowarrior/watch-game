@@ -274,6 +274,59 @@ def test_mirrored_strips_match_the_full_map():
     full = framebuf.FrameBuffer(fld.build_map(240), 240, 240, framebuf.GS8)
     framebuf.FrameBuffer(ref, 240, 240, framebuf.RGB565).blit(full, 0, 0, -1, r.field.pal)
     assert cap.buf == ref
+    # The overlays are not in this frame: the snapshot CRCs
+    # (test_fixtures_match_snapshots) catch overlays drawn into the wrong
+    # strip of a pair, or before the mirror copy.
+
+
+class _P16:
+    """ptr16 stand-in over a bytearray (little-endian, as on the ESP32)."""
+
+    def __init__(self, b):
+        self.b = b
+
+    def __getitem__(self, i):
+        return self.b[2 * i] | self.b[2 * i + 1] << 8
+
+    def __setitem__(self, i, v):
+        self.b[2 * i] = v & 255
+        self.b[2 * i + 1] = (v >> 8) & 255
+
+
+def _py_blit_kernel():
+    """ui.field's blit kernel source as plain Python (viper is device-only)."""
+    ns = {"ptr8": lambda b: b,
+          "ptr16": lambda b: b if isinstance(b, array.array) else _P16(b)}
+    exec(fld._BSRC, ns)
+    return ns["blit_kernel"]
+
+
+def test_blit_kernel_matches_the_framebuf_path():
+    """The viper strip blit, run as Python, passes RingMap's self-check, draws
+    the same frame, and a kernel that mixes up the pair is refused."""
+    _need_fb()
+    k = _py_blit_kernel()
+    r = Renderer()
+    assert r.map.kind in ("framebuf", "viper"), r.map.kind
+    r.map = fld.RingMap(r.buf, r.buf2, 24, kernel=k)
+    assert r.map.kind == "kernel" and r.map.kern is k
+    cap = FrameCapture()
+    _run(r, cap, rs.hunt(2, status=None), 300)
+    ref = bytearray(240 * 240 * 2)
+    full = framebuf.FrameBuffer(fld.build_map(240), 240, 240, framebuf.GS8)
+    framebuf.FrameBuffer(ref, 240, 240, framebuf.RGB565).blit(full, 0, 0, -1, r.field.pal)
+    assert cap.buf == ref
+
+    def swapped(top, bot, idx, pal, off, h):
+        k(bot, top, idx, pal, off, h)
+
+    def unmirrored(top, bot, idx, pal, off, h):
+        k(top, bot, idx, pal, off, h)
+        bot[:] = top
+
+    for bad in (swapped, unmirrored):
+        m = fld.RingMap(r.buf, r.buf2, 24, kernel=bad)
+        assert m.kern is None and "failed" in m.kind, m.kind
 
 
 def _crest(r):

@@ -206,6 +206,31 @@ def test_fifo_decode_known_bytes():
     assert b.decode_frames(buf, 3, array("h", [0] * 3), 4000) == 1
 
 
+def test_decode_kernel_self_check_catches_a_wrong_kernel():
+    b = _mod()
+    assert b.DECODE_KERNEL in ("python", "viper")
+    k = b._decode
+    assert b._decode_agrees(k, k)
+
+    def no_sign(buf, n, out, rng, off):     # forgets the sign of y
+        r = k(buf, n, out, rng, off)
+        for j in range(off + 1, off + 3 * r, 3):
+            out[j] = abs(out[j])
+        return r
+
+    def no_marker(buf, n, out, rng, off):   # reads past the over-read marker
+        r = k(buf, n, out, rng, off)
+        return n if r < n else r
+
+    def unrounded(buf, n, out, rng, off):
+        r = k(buf, n, out, rng, off)
+        out[off] -= 1
+        return r
+
+    for bad in (no_sign, no_marker, unrounded):
+        assert not b._decode_agrees(k, bad), bad
+
+
 def test_fifo_read_drains_whole_frames():
     m, dev, b, imu = _imu()
     data = _frame(512, 0, -512) + _frame(0, 256, 0) + _frame(1, 2, 3)

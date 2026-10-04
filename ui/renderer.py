@@ -776,10 +776,11 @@ class Renderer:
         self._plan(p, t)
         self._palette(p, t)
         pal = self.field.pal
+        arr = self.field.pal_arr
         for s in range(NS // 2):
             y0 = s * SH
             y1 = W - SH - y0                # its mirror strip
-            self.map.blit(y0, pal)          # field into buf, mirrored into buf2
+            self.map.blit(y0, pal, arr)     # field into buf, mirrored into buf2
             self._strip(p, t, y0, self.fb)
             display.push_strip(y0, SH, self.buf)
             self._strip(p, t, y1, self.fb2)

@@ -98,6 +98,9 @@ and then call `begin()` and poll `ready()`.
 - Reading: `fifo_read_mg()` drains the FIFO with one `readfrom_mem_into` into a
   preallocated buffer, decodes it into `self.fifo_mg` (x, y, z milli-g
   interleaved, `array('h')`) and returns the sample count. Call it every frame.
+  The decode is compiled with `@micropython.viper` on the watch
+  (`DECODE_KERNEL`, after a self-check against the plain version): about
+  45 us a sample in Python, which at 800 Hz is 36 ms of every second.
   The FIFO holds 170 frames, which is 1.7 s at 100 Hz (212 ms at 800 Hz).
   `set_odr(hz)` changes the rate while running and empties the FIFO.
   `read_xyz_mg()` reads one sample from DATA_8..13.

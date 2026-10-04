@@ -4,21 +4,32 @@ game's app/, finder/, hal/ and ui/ deployed, e.g. ``tools/deploy.py --noapp``).
     mpremote connect <port> run tools/bench_frame.py
 
 Prints where the time goes:
-  * render: per screen fixture, ms per frame split into compose (palette,
-    field and overlays) and push (SPI), plus the state-only frame (screen off)
+  * kernels: which hot loops run as viper on this build (palette, field
+    blit, IMU decode, IMU feed) and the CPU clock
+  * render: per screen fixture, ms per frame split into step (state),
+    plan, palette, field (ring-map blit), overlays and push (SPI)
+  * push: one frame sent as 10 windowed strips, as one window of 10 writes,
+    and as one window of one write
   * imu: per BMA423 rate, the I2C read, decode and ImuFeed cost per sample
     and the share of each second they take at that rate
-  * loop: 10 s of the real game loop (app/runtime.py), ``print_stats()``
+  * loop: 10 s of the real game loop (app/runtime.py), ``print_stats()``,
+    then 10 s more with bump sensing forced on (the IMU at 800 Hz). The
+    screen is held on (the game would turn it off face-down).
 """
 
 import gc
 import time
 
+import machine
+
+from app import imu_feed
 from app.imu_feed import ImuFeed
 from finder.render_params import make_params
+from hal import bma423
 from hal.bma423 import BMA423, decode_frames
 from hal.board import Board
-from ui.renderer import Renderer
+from ui import field
+from ui.renderer import NS, SH, W, Renderer
 
 N = 40                    # frames per fixture
 LOOP_MS = 10000
@@ -39,22 +50,49 @@ FIXTURES = (
 )
 
 
-class TimedDisplay:
-    """Display proxy that sums the time spent pushing strips."""
+def bench_kernels(r):
+    print("cpu %d MHz  kernels: palette %s, field blit %s, imu decode %s, imu feed %s" % (
+        machine.freq() // 1000000, field.KERNEL, r.map.kind, bma423.DECODE_KERNEL,
+        imu_feed.KERNEL))
 
-    def __init__(self, d):
-        self.d = d
-        self.us = 0
 
-    def push_strip(self, y0, h, buf):
-        t0 = _us()
-        self.d.push_strip(y0, h, buf)
-        self.us += _d(_us(), t0)
+def _frame_parts(r, p, display, t, acc):
+    """Renderer.frame(p, display, t), timed part by part into ``acc``
+    (step, plan, palette, field, overlays, push; us)."""
+    a = _us()
+    r._step(p, t)
+    b = _us()
+    acc[0] += _d(b, a)
+    if r._dark:
+        r._dark = False
+        r._snap(p, t)
+    r._plan(p, t)
+    a = _us()
+    acc[1] += _d(a, b)
+    r._palette(p, t)
+    b = _us()
+    acc[2] += _d(b, a)
+    pal = r.field.pal
+    arr = r.field.pal_arr
+    for s in range(NS // 2):
+        y0 = s * SH
+        y1 = W - SH - y0
+        a = _us()
+        r.map.blit(y0, pal, arr)
+        b = _us()
+        acc[3] += _d(b, a)
+        r._strip(p, t, y0, r.fb)
+        r._strip(p, t, y1, r.fb2)
+        a = _us()
+        acc[4] += _d(a, b)
+        display.push_strip(y0, SH, r.buf)
+        display.push_strip(y1, SH, r.buf2)
+        acc[5] += _d(_us(), a)
 
 
 def bench_render(display):
-    print("render       total ms  compose  push    fps   state-only ms")
-    td = TimedDisplay(display)
+    print("render       total ms  step  plan  pal  field  overlays  push    fps")
+    r = None
     for name, kw in FIXTURES:
         d = dict(_FIELD)
         d.update(kw)
@@ -62,47 +100,68 @@ def bench_render(display):
         r = Renderer()
         t = 100000
         for _ in range(10):                 # rings in flight, crossfades settled
-            r.frame(p, td, t)
+            r.frame(p, display, t)
             t += 50
-        td.us = 0
         gc.collect()
+        acc = [0] * 6
         t0 = _us()
         for _ in range(N):
-            r.frame(p, td, t)
+            _frame_parts(r, p, display, t, acc)
             t += 50
         tot = _d(_us(), t0) / N / 1000
-        push = td.us / N / 1000
-        t0 = _us()
-        for _ in range(N):
-            r.frame(p, None, t)
-            t += 50
-        st = _d(_us(), t0) / N / 1000
-        print("%-14s %6.1f  %6.1f  %6.1f  %5.1f   %5.2f" % (name, tot, tot - push, push,
-                                                          1000 / tot, st))
+        ms = [x / N / 1000 for x in acc]
+        print("%-14s %6.1f  %5.1f %5.1f %5.1f %5.1f    %5.1f  %5.1f  %5.1f" % (
+            name, tot, ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], 1000 / tot))
+    return r
+
+
+def bench_push(display, r):
+    """One frame (the last fixture's strips) three ways."""
+    frame = bytearray(W * W * 2)
+    for s in range(NS):
+        frame[s * W * SH * 2:(s + 1) * W * SH * 2] = r.buf
+    mv = memoryview(frame)
+    n = W * SH * 2
+    spi = display.spi
+    t0 = _us()
+    for _ in range(10):
+        for s in range(NS):
+            display.push_strip(s * SH, SH, mv[s * n:(s + 1) * n])
+    a = _d(_us(), t0) / 10000
+    t0 = _us()
+    for _ in range(10):
+        display.push_frame(frame)
+    b = _d(_us(), t0) / 10000
+    t0 = _us()
+    for _ in range(10):
+        display._begin(0, 0, W - 1, W - 1)
+        spi.write(frame)
+        display._cs(1)
+    c = _d(_us(), t0) / 10000
+    print("push ms: 10 strips %.1f, 1 window x 10 writes %.1f, 1 window 1 write %.1f" % (a, b, c))
 
 
 class _Batch:
     """FIFO stand-in that hands ImuFeed an already-read batch."""
 
-    def __init__(self, mg):
+    def __init__(self, mg, hz):
         self.fifo_mg = mg
+        self.odr = hz                       # the feed starts at this rate
         self.n = 0
 
     def fifo_read_mg(self):
         return self.n
 
     def set_odr(self, hz):
-        pass
+        self.odr = hz
 
 
 def bench_imu(i2c):
     print("imu  Hz   us/sample: i2c  decode  feed   ms per s")
     for hz in RATES:
         imu = BMA423(i2c, odr=hz)
-        batch = _Batch(imu.fifo_mg)
-        feed = ImuFeed(batch, out_hz=25)
-        if hz > 100 and hasattr(feed, "set_fast"):
-            feed.set_fast(True)             # spike detection runs at the fast rates
+        batch = _Batch(imu.fifo_mg, hz)
+        feed = ImuFeed(batch, out_hz=25)    # spikes looked for above 100 Hz
         n_all = t_i2c = t_dec = t_feed = 0
         for _ in range(5):
             imu.fifo_flush()
@@ -131,8 +190,14 @@ def bench_imu(i2c):
 def bench_loop(board):
     from app.runtime import Runtime
     rt = Runtime(board)
+    rt.begin()
+    rt.game._keep_on = lambda: True         # screen stays on whatever the wrist does
     rt.run(max_ms=LOOP_MS)
-    print("loop: %d s of the game" % (LOOP_MS // 1000))
+    print("loop: %d s of the game (%s)" % (LOOP_MS // 1000, rt.game.mode))
+    rt.print_stats()
+    rt.game.bump_armed = lambda: True       # the IMU at 800 Hz, as in HOT
+    rt.run(max_ms=LOOP_MS)
+    print("loop: %d s more with bump sensing on (IMU %d Hz)" % (LOOP_MS // 1000, imu_feed.FAST_HZ))
     rt.print_stats()
 
 
@@ -141,7 +206,9 @@ def main():
     board.init(strict=False)
     if board.errors:
         print("parts missing:", board.errors)
-    bench_render(board.display)
+    r = bench_render(board.display)
+    bench_kernels(r)
+    bench_push(board.display, r)
     bench_imu(board.i2c0)
     bench_loop(board)
 

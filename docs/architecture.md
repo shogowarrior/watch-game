@@ -111,7 +111,11 @@ stages in order:
    activity, stillness, tilt, face-up) and, while `game.bump_armed()` (HOT,
    PAIRING seen / confirmed; the logic stage sets it each tick), samples at
    800 Hz and runs the bump spike detector on every sample
-   (-> `game.on_accel_tap`), ignoring samples inside haptic
+   (-> `game.on_accel_tap`). The FIFO decode and the per-sample loop
+   (gravity, spike runs, block sums) are integer kernels compiled with
+   `@micropython.viper` on the watch, after a self-check against their plain
+   Python versions, which are what CPython, the wasm port and the browser
+   run. Spikes inside haptic
    blanking (the motor shakes the accelerometer, so samples from the start of a
    buzz until 150 ms after it are ignored). There are two blanking windows:
    ImuFeed's own, from the actual motor edges (`ImuFeed.blanked`, which the
@@ -136,8 +140,10 @@ stages in order:
    coloured through a 256-entry palette of byte-swapped RGB565, then glyph and
    text overlays) and
    pushes it with `display.push_strip`. Strips go in mirrored pairs (0 and 9,
-   1 and 8, ...): the bottom strip copies the top one's field rows in reverse
-   instead of a second palette blit. With the screen off it runs with
+   1 and 8, ...): one pass colours the top strip and the bottom strip's rows
+   in reverse (a viper kernel on the watch, checked against the framebuf
+   path when the renderer starts; elsewhere a framebuf palette blit and a row
+   copy). With the screen off it runs with
    `display=None`, so ring and heartbeat timing continue. It returns only the
    heartbeat names, locked to ring spawns.
 7. **tx**: when due, `game.fill_beacon` fills the 16-byte beacon (seq, own and
@@ -151,8 +157,10 @@ stages in order:
    `HapticPlayer`; `tick(now)` gives the motor level, applied by `Motor.set`
    only on change. The motor is also serviced after every strip, and in
    `idle` while a pattern plays.
-9. **gc**: `gc.collect()` once a second when the next frame is at least 10 ms
-   away (forced after 4 s).
+9. **gc**: `gc.collect()` every 10 s when the next frame is at least 10 ms
+   away (forced after 20 s). A collect sweeps the whole 4 MB SPIRAM heap
+   (about 70 ms on the watch, bring-up), so it runs rarely; the loop's
+   allocations take far longer than that to fill the heap.
 
 `step` returns the ms to the next deadline; `run` sleeps that long (at most
 50 ms). OSErrors that reach the loop from a part are counted in `io_errors` and

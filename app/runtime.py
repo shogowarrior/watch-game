@@ -44,8 +44,13 @@ One ``step(now)`` does, in order:
   radio   beacon (``game.fill_beacon``) at ``game.beacon_hz`` via ``maybe_send``
   haptic  ``params.haptic`` (``play_named``; telemetry logs only accepted ones)
           + renderer heartbeats (``heartbeat``) -> HapticPlayer (buzz mode) -> Motor
-  gc      ``gc.collect()`` once per ``GC_PERIOD_MS`` when the next frame is at
-          least ``GC_BUDGET_MS`` away (forced after 4 periods)
+  gc      ``gc.collect()`` once per ``GC_PERIOD_MS`` (10 s) when the next frame
+          is at least ``GC_BUDGET_MS`` away (forced after ``GC_FORCE_MS``). On
+          the SPIRAM build a collect sweeps the whole 4 MB heap: about 70 ms
+          however little is garbage (bring-up, 3 Oct 2026), so it runs rarely.
+          The two-watch simulator allocates under 1.5 MB in 10 s per watch
+          (fakes included) against 3.7 MB free, and MicroPython collects by
+          itself if the heap ever runs out first
 
 ``step`` returns the ms until the next deadline; ``run`` sleeps exactly that
 (never longer than ``MAX_SLEEP_MS``) with ``idle``, which ticks the motor
@@ -89,7 +94,8 @@ BATT_RECHECK_MS = 1000     # ... taken this far apart
 IMU_OUT_HZ = 25            # MotionTracker rate (25-50 Hz; 25 halves its float work)
 CHIP_MS = 1000             # BMA423 feature engine (steps/activity/wrist) poll
 MAX_SLEEP_MS = 50
-GC_PERIOD_MS = 1000
+GC_PERIOD_MS = 10000       # one ~70 ms collect per period (4 MB SPIRAM heap)
+GC_FORCE_MS = 20000        # ... even with no slack before the next frame
 GC_BUDGET_MS = 10
 STAGES = ("radio", "imu", "touch", "button", "logic", "render", "tx", "haptic", "gc", "tele")
 S_RADIO = 0
@@ -245,7 +251,8 @@ class Runtime:
     def run(self, max_ms=None):
         """Loop until ``stop()``/power-off (or ``max_ms``); Ctrl-C stops it too.
         An exception is logged (telemetry ``crash``) and re-raised; telemetry
-        is flushed on every exit."""
+        is flushed on every exit, and ``quiet()`` stops the motor and slows
+        the IMU."""
         self.begin()
         t0 = self.clock()
         if self.watchdog_ms and self.wd is None:
@@ -320,11 +327,18 @@ class Runtime:
             self.sleep_ms(HAPTIC_SLICE_MS if r > HAPTIC_SLICE_MS else r)
 
     def quiet(self):
-        """Motor off (after Ctrl-C or an exception)."""
+        """Motor off and the IMU back at its slow rate (after Ctrl-C or an
+        exception), so a notebook's next feed finds the chip as it expects."""
         m = self.motor
         if m is not None:
             try:
                 m.set(0)
+            except OSError:
+                pass
+        f = self.feed
+        if f is not None:
+            try:
+                f.set_fast(False)
             except OSError:
                 pass
 
@@ -377,7 +391,7 @@ class Runtime:
             # slack to the next frame/tick (inputs and beacons can slip a few ms)
             nx = self._t_frame if ticks_diff(self._t_frame, self._t_tick) < 0 else self._t_tick
             if (ticks_diff(nx, self.clock()) >= GC_BUDGET_MS
-                    or ticks_diff(now, self._t_gc) >= 4 * GC_PERIOD_MS):
+                    or ticks_diff(now, self._t_gc) >= GC_FORCE_MS):
                 self._gc(now)
         return self._wait(self.clock())
 
