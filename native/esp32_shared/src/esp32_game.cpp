@@ -22,7 +22,6 @@ namespace {
 
 constexpr uint32_t LCD_HZ[] = {40000000, 26666667};   // the benches' display clock, else MicroPython's
 constexpr int BLACK_ROWS = 8;                         // the strip that clears the panel at init (on the stack)
-constexpr double BRIGHTNESS = 0.6;                    // hal/board.py default_brightness
 constexpr uint8_t CHANNEL = 6;                        // hal/radio.py DEFAULT_CHANNEL
 constexpr int TX_DBM = 20;                            // ... and txpower
 constexpr int32_t FPS_LOG_MS = 10000;                 // main.py's fps_log_ms
@@ -54,7 +53,7 @@ void bring_up() {
     uint16_t black[St7789::W * BLACK_ROWS];
     display.emplace(*buses.lcd, clock_, backlight, parts.pmu ? &*pmu : nullptr);
     if (display->init(black, BLACK_ROWS)) {
-      display->brightness(BRIGHTNESS);
+      display->brightness(St7789Display::DEFAULT_BRIGHTNESS);
       parts.display = &*display;
     }
   }
