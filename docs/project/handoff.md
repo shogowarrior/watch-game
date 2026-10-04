@@ -75,9 +75,9 @@ in one message with the current default marked. Don't build on an assumption.
   seconds on the watch, under the 8 s watchdog). The choice is saved in
   `/theme` (app/settings.py) when the MENU closes, and `Runtime.begin` loads
   the saved theme whole before `run` arms the watchdog. `ui/renderer.py`
-  keeps only the hook (`Renderer._field`). Still to do: a theme picker on the
-  simulator page (`TwoWatchSim.set_theme`, `theme_names()` are there for it)
-  and the C++ port of the sixth row. One step, the theme module's own
+  keeps only the hook (`Renderer._field`). The simulator page has a Field theme
+  box per watch (kept in the browser). Still to do: the C++ port of the sixth
+  row and `RenderParams.theme`. One step, the theme module's own
   compile, cannot be split (5-9 ms on desktop, roughly 1-2 s on the watch):
   precompiling the theme modules to .mpy with mpy-cross at deploy would remove
   it, but the watch runs pure .py today, so that is the owner's call.

@@ -426,7 +426,8 @@ def test_found_slows_to_a_stop_and_twinkles_gold():
     r = _renderer()
     cap = FrameCapture()
     _, phases, _ = rt.fixture("found_celebrate")
-    phases = phases + [(1500, dict(rs._found, sub="result", word="TAP=AGAIN"))]
+    phases = phases + [(1500, dict(rs._found, sub="result", word="FOUND 1:48",
+                                   top_text="BUTTON: PLAY AGAIN"))]
     rec = []
     _run(r, cap, phases, 3000, lambda t, r, ev: rec.append((t, r.theme.prm[W.P_G])))
     gs = [g for t, g in rec if 0 < t < 1600]

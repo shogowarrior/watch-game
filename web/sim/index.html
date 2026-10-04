@@ -89,8 +89,8 @@ dl.tele dd { margin: 0; font-family: var(--mono); font-size: 12.5px; font-varian
 .line-key { width: 18px; height: 0; border-top: 2px solid; }
 #chart { display: block; width: 100%; height: 170px; max-width: 100%; }
 .why { margin: 0; padding: 9px 11px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); font-size: 13px; line-height: 1.45; color: var(--text); min-height: 3.2em; }
-.posture { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 13px; }
-.posture select { height: 30px; }
+.posture, .theme-pick { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 13px; }
+.posture select, .theme-pick select { height: 30px; }
 .note { color: var(--faint); font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { .bezel { transition: none; } }
 /* Simulator | Real watches (docs/design/debug-mode.md) */
@@ -270,7 +270,7 @@ dl.rtele dd { white-space: normal; overflow-wrap: anywhere; }
     <section class="watches" aria-label="Watch screens">
       <article class="card watch" data-i="0">
         <div class="watch-head"><h2><span class="swatch" style="background: var(--a)"></span>Watch A</h2><span class="screen-name" id="name-0">–</span></div>
-        <div class="bezel" id="bezel-0"><canvas class="screen" id="screen-0" width="240" height="240" aria-label="Watch A screen. Click to tap, drag up or down (or scroll) to swipe."></canvas><div class="screen-wait real-only" id="wait-0">Waiting for watch A</div></div>
+        <div class="bezel" id="bezel-0"><canvas class="screen" id="screen-0" width="240" height="240" aria-label="Watch A screen. Click to tap, drag up or down (or scroll) to swipe, drag sideways to flip the how-to cards."></canvas><div class="screen-wait real-only" id="wait-0">Waiting for watch A</div></div>
         <div class="btns sim-only">
           <button type="button" data-act="tap" data-i="0">Tap screen</button>
           <button type="button" data-act="hold" data-i="0">Hold (menu)</button>
@@ -284,12 +284,15 @@ dl.rtele dd { white-space: normal; overflow-wrap: anywhere; }
             <option value="down">wrist down</option>
           </select>
         </label>
+        <label class="theme-pick sim-only" for="theme-0">Field theme (also in its menu)
+          <select id="theme-0" data-i="0" disabled></select>
+        </label>
         <dl class="tele sim-only" id="tele-0"></dl>
         <dl class="tele rtele real-only" id="rtele-0"></dl>
       </article>
       <article class="card watch" data-i="1">
         <div class="watch-head"><h2><span class="swatch" style="background: var(--b)"></span>Watch B</h2><span class="screen-name" id="name-1">–</span></div>
-        <div class="bezel" id="bezel-1"><canvas class="screen" id="screen-1" width="240" height="240" aria-label="Watch B screen. Click to tap, drag up or down (or scroll) to swipe."></canvas><div class="screen-wait real-only" id="wait-1">Waiting for watch B</div></div>
+        <div class="bezel" id="bezel-1"><canvas class="screen" id="screen-1" width="240" height="240" aria-label="Watch B screen. Click to tap, drag up or down (or scroll) to swipe, drag sideways to flip the how-to cards."></canvas><div class="screen-wait real-only" id="wait-1">Waiting for watch B</div></div>
         <div class="btns sim-only">
           <button type="button" data-act="tap" data-i="1">Tap screen</button>
           <button type="button" data-act="hold" data-i="1">Hold (menu)</button>
@@ -302,6 +305,9 @@ dl.rtele dd { white-space: normal; overflow-wrap: anywhere; }
             <option value="tilted">tilted 50°</option>
             <option value="down">wrist down</option>
           </select>
+        </label>
+        <label class="theme-pick sim-only" for="theme-1">Field theme (also in its menu)
+          <select id="theme-1" data-i="1" disabled></select>
         </label>
         <dl class="tele sim-only" id="tele-1"></dl>
         <dl class="tele rtele real-only" id="rtele-1"></dl>
@@ -381,6 +387,7 @@ async function start() {
     document.querySelectorAll('.posture select').forEach((sel) => SIM.set_posture(+sel.dataset.i, sel.value));
     M = mp._module;
     useConstants(JSON.parse(SIM.constants_json()));
+    initThemes();
     pairGuide();
     if (mode === 'real') engineMode();                 // Real watches was picked while it loaded
   } catch (e) { return fail('The watch code failed to start.', e && e.message); }
@@ -482,14 +489,15 @@ function useConstants(k) {
 function why(t) {
   const est = t.est_dist_m == null ? null : t.est_dist_m.toFixed(0), tru = t.true_dist_m.toFixed(0);
   switch (t.screen) {
-    case 'PAIRING': return $('auto-pair').checked
+    case 'PAIRING': if (t.sub === 'howto') return 'How-to card. Drag sideways on the screen for the next or previous card; the Side button closes them. They also close when the other watch is found.';
+      return $('auto-pair').checked
       ? 'Pairing. The simulator confirms the matching symbols and does the 1 m calibration for you, then a short split-up countdown runs.'
-      : `Pairing. Bring the watches within about 5 m and confirm the matching symbols with Tap or the Side button on both. Hold them still about 1 m apart for the calibration, then a ${K.split_s} s split-up countdown runs.`;
+      : `Pairing. Bring the watches within about 5 m and confirm the matching symbols with Tap or the Side button on both. Hold them still about 1 m apart for the calibration, then a ${K.split_s} s split-up countdown runs. While it looks for the other watch, drag sideways on its screen for four how-to cards.`;
     case 'SEARCHING': return 'No signal heard yet, so it shows grey inward rings and no distance.';
     case 'SCANNING': return t.sub === 'ready' ? 'Scan starting: hold the watch flat for the countdown.' : t.sub === 'sweep' ? 'Scanning: the wearer turns a full circle (auto-turn). The signal is strongest when facing the other watch.' : 'Scan finished: picking the strongest direction.';
     case 'FOUND': return 'Found: both watches felt the bump at the same moment.';
     case 'LINK_LOST': return `Signal lost for ${K.lost_ms / 1000} s. It keeps the last distance band until packets return.`;
-    case 'MENU': return `Menu open. Select RESUME (tap it, or Hold while it is selected) or wait ${K.menu_close_ms / 1000} s to close it.`;
+    case 'MENU': return `Menu open. Select RESUME (tap it, or Hold while it is selected) or wait ${K.menu_close_ms / 1000} s to close it. Its THEME row changes the look of the rings, like the Field theme box below.`;
   }
   const z = ZINFO[t.screen];
   if (!z) return t.screen || '';
@@ -615,6 +623,7 @@ function renderTele() {
   $('sim-clock').textContent = fmtClock(tele.t_ms || 0);
   tele.watches.forEach((t, i) => {
     $('name-' + i).textContent = (t.screen || '–') + (t.sub ? ' · ' + t.sub : '');
+    showTheme(i, t.theme);
     const w = why(t);
     if ($('why-' + i).textContent !== w) $('why-' + i).textContent = w;
     const trend = t.trend > 0 ? '<span class="good">warmer</span>' : t.trend < 0 ? '<span class="warnc">colder</span>' : 'none';
@@ -631,6 +640,29 @@ function renderTele() {
   });
   $('true-dist').textContent = fmt(tele.watches[0].true_dist_m, 1, ' m');
 }
+// ---------- field themes (ui-spec §4A): one per watch, as its menu's THEME row sets it ----------
+// A theme picked here or in a watch's menu is kept in this browser and loads whole at the next
+// start, as a watch loads its saved theme at boot.
+const THEME_KEY = 'fieldSim.themes', themeSels = [$('theme-0'), $('theme-1')], themesNow = [null, null];
+function savedThemes() { try { const v = JSON.parse(localStorage.getItem(THEME_KEY)); return Array.isArray(v) ? v : []; } catch (_) { return []; } }
+function initThemes() {
+  const saved = savedThemes();
+  themeSels.forEach((sel, i) => {
+    sel.replaceChildren(...K.themes.map((n) => new Option(n[0].toUpperCase() + n.slice(1), n)));
+    const n = K.themes.includes(saved[i]) ? saved[i] : K.themes[0];
+    SIM.set_theme(i, n, true);
+    sel.value = themesNow[i] = n;
+    sel.disabled = false;
+  });
+}
+function showTheme(i, n) {
+  if (!n || n === themesNow[i]) return;
+  themesNow[i] = n;
+  if (themeSels[i].value !== n) themeSels[i].value = n;
+  try { localStorage.setItem(THEME_KEY, JSON.stringify(themesNow)); } catch (_) {}
+}
+themeSels.forEach((sel, i) => sel.addEventListener('change', () => SIM && call('set_theme', i, sel.value)));
+
 function fmtClock(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
 
 // ---------- Real watches (docs/design/debug-mode.md) ----------
@@ -705,7 +737,7 @@ function setMode(m) {
     s.buzzUntil = 0;
     s.cv.classList.remove('stale');
     s.cv.setAttribute('aria-label', m === 'real' ? `Watch ${'AB'[i]} screen, as the real watch shows it.`
-      : `Watch ${'AB'[i]} screen. Click to tap, drag up or down (or scroll) to swipe.`);
+      : `Watch ${'AB'[i]} screen. Click to tap, drag up or down (or scroll) to swipe, drag sideways to flip the how-to cards.`);
   });
   if (SIM) engineMode();
   if (m === 'real') { openStream(); layoutRealChart(); realTick(); }
@@ -1131,15 +1163,17 @@ field.addEventListener('keydown', (e) => {
   if (!SIM || !world || (e.key !== 'q' && e.key !== 'e' && e.key !== 'Q' && e.key !== 'E')) return;
   const w = world.walkers[selected]; call('set_pose', selected, w.x, w.y, (w.heading_deg + (e.key.toLowerCase() === 'e' ? 15 : -15) + 360) % 360);
 });
-// Screen: click = tap; vertical drag or wheel = swipe (MENU scrolls). A drag swallows its click.
+// Screen: click = tap; vertical drag or wheel = swipe (MENU scrolls); sideways drag = swipe_h (how-to cards).
+// A drag swallows its click.
 const SWIPE_PX = 30, WHEEL_GAP_MS = 600;   // > 500 ms: 3 swipes in 1 s trip the watch touch-burst filter
 screens.forEach((s, i) => {
-  let y0 = null, swiped = false, lastWheel = 0;
-  s.cv.addEventListener('pointerdown', (e) => { y0 = e.clientY; swiped = false; });
+  let x0 = null, y0 = null, swiped = false, lastWheel = 0;
+  s.cv.addEventListener('pointerdown', (e) => { x0 = e.clientX; y0 = e.clientY; swiped = false; });
   s.cv.addEventListener('pointerup', (e) => {
-    if (y0 == null || !SIM || mode === 'real') { y0 = null; return; }
-    const dy = e.clientY - y0; y0 = null;
-    if (Math.abs(dy) >= SWIPE_PX) { swiped = true; call('swipe', i, dy < 0); }
+    if (y0 == null || !SIM || mode === 'real') { x0 = y0 = null; return; }
+    const dx = e.clientX - x0, dy = e.clientY - y0; x0 = y0 = null;
+    if (Math.abs(dx) >= SWIPE_PX && Math.abs(dx) > Math.abs(dy)) { swiped = true; call('swipe_h', i, dx < 0); }
+    else if (Math.abs(dy) >= SWIPE_PX) { swiped = true; call('swipe', i, dy < 0); }
   });
   s.cv.addEventListener('click', (e) => {
     if (swiped) { swiped = false; return; }

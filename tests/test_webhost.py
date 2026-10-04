@@ -179,6 +179,7 @@ def test_constants_json_follows_tuning():
     assert k["dwell_ms"] == list(T.ZONE_DWELL_MS) and k["lost_ms"] == T.LINK_LOST_AFTER_MS
     assert k["menu_close_ms"] == T.MENU_AUTOCLOSE_MS and k["band_edges_m"] == list(T.BAND_EDGES_M)
     assert k["split_s"] == T.PAIR_SPLIT_S and k["haptic_ms"] == TOTAL_MS, k
+    assert k["themes"] == list(T.THEME_NAMES), k
 
 
 def test_swipe_scrolls_the_menu_and_place_shows_in_telemetry():
@@ -228,6 +229,18 @@ def test_theme_set_from_the_page_or_menu_survives_reset():
             s.step(100)
         assert s.renderers[0].theme.name == "fireflies"
         assert s.renderers[1].theme.name == "ripple"
+
+
+def test_saved_theme_loads_whole():
+    # the page's saved choice at start, as a watch loads its saved theme at boot
+    s = TwoWatchSim()
+    s.set_theme(1, "tide", True)
+    assert s.games[1].theme == "tide" and s.games[0].theme == "ripple"
+    if s.renderers is not None:               # MicroPython: drawn from the next frame
+        assert s.renderers[1].theme.name == "tide" and s.renderers[1].loading is None
+        s.step(100)
+        assert s.renderers[1].theme.name == "tide" and s.renderers[1].loading is None
+        assert s.renderers[0].theme.name == "ripple"
 
 
 def test_page_touches_feed_the_burst_filter():
@@ -594,6 +607,25 @@ def test_show_params_takes_valid_params_only():
     assert s._shown == [None, None]        # back in the sim: its own screens again
 
 
+def test_real_screens_draw_the_theme_the_watch_sends():
+    # Real mode: an rp record's theme picks the field (ui-spec §4A Choosing); a
+    # record from a watch without the field draws Ripple
+    s = TwoWatchSim()
+    assert _run_until(s, _hunting, 30000)
+    d = json.loads(_rp_json(s, 0))
+    s.real_mode(True)
+    d["theme"] = "warp"
+    s.show_params(0, json.dumps(d))
+    assert s._shown[0].theme == "warp"
+    del d["theme"]
+    s.show_params(1, json.dumps(d))
+    assert s._shown[1].theme == "ripple"
+    if s.renderers is not None:               # MicroPython: loads in steps, then draws it
+        for _ in range(80):
+            s.step(100)
+        assert s.renderers[0].theme.name == "warp" and s.renderers[1].theme.name == "ripple"
+
+
 def test_show_params_draws_what_the_renderer_draws():
     if not MPY:
         raise Skip("framebuf: frames only under MicroPython")
@@ -703,6 +735,17 @@ console.log(JSON.stringify(out));
     assert "USB cable plugged in" in out["why"][0] and "Wi-Fi" not in out["why"][0], out["why"]
     assert "same Wi-Fi" in out["why"][1] and "USB" not in out["why"][1], out["why"]
     assert out["kept"] == [50, "ttyUSB0  printed: n10", "ttyUSB0  printed: n59"], out["kept"]
+
+
+def test_page_offers_the_themes():
+    """Each watch card has a Field theme box, filled from constants_json and set with set_theme."""
+    if MPY:
+        raise Skip("reads web/sim/index.html (CPython)")
+    page = _page()
+    for i in (0, 1):
+        assert 'id="theme-%d"' % i in page, i
+    assert "K.themes" in page and "SIM.set_theme(i, n, true)" in page
+    assert "call('set_theme', i, sel.value)" in page and "showTheme(i, t.theme)" in page
 
 
 def _page_js(page, names):

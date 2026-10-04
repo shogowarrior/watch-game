@@ -728,7 +728,8 @@ def test_switched_in_the_menu_over_found():
     # nothing jumps when the MENU closes
     _need_fb()
     cap = FrameCapture()
-    found = dict(rt.rs._found, sub="result", word="TAP=AGAIN")
+    found = dict(rt.rs._found, sub="result", word="FOUND 1:48",
+                 top_text="BUTTON: PLAY AGAIN")
     menu = dict(rt.rs._menu, sub="1v", menu_rows=rt.rs.MENU_ROWS, ramp="gold", intensity=0.3)
     phases = [(0, found), (600, menu), (1600, found)]
     gold = list(theme_luts("fireflies")["gold"].c)

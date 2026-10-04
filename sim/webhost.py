@@ -30,8 +30,8 @@ up, so screen y = -world y). Page headings are degrees clockwise from north
 Start: A at (0, 0) facing east (+x), B at (35, 10) facing A.
 
 Themes (ui-spec §4A): each watch's MENU THEME row picks its theme, and
-``set_theme(i, name)`` does it from the page; like the theme saved on a
-watch, the choice survives ``reset``.
+``set_theme(i, name)`` does it from the page (its Field theme boxes); like
+the theme saved on a watch, the choice survives ``reset``.
 
 Demo helpers (page settable attributes):
   * ``auto_pair`` (default True): the pairing handshake is played as if the
@@ -234,12 +234,16 @@ class TwoWatchSim:
         self.sim.set_profile(name, Rng(self.seed).fork(100 + self._prof_n))
         self._walls_json = None
 
-    def set_theme(self, i, name):
+    def set_theme(self, i, name, whole=False):
         """Watch i's field theme (a name in ``theme_names()``), as its MENU THEME
-        row would set it; the screen changes once the theme has loaded."""
+        row would set it; the screen changes once the theme has loaded, a step a
+        frame. ``whole`` loads it at once, as a watch loads its saved theme
+        before the game loop (the page's saved choice at start)."""
         if name not in T.THEME_NAMES:
             raise ValueError("theme: one of %s" % ",".join(T.THEME_NAMES))
         self.games[i].set_theme(name)
+        if whole and self.renderers is not None:
+            self.renderers[i].set_theme(name)
 
     @staticmethod
     def theme_names():
@@ -552,14 +556,14 @@ class TwoWatchSim:
 
     def constants_json(self):
         """Tuning values the page explains (zone edges and dwell, band edges, link loss,
-        menu close, pairing split, haptic pattern lengths), so its text follows
-        finder/tuning.py."""
+        menu close, pairing split, haptic pattern lengths) and the themes it offers,
+        so its text follows finder/tuning.py."""
         return json.dumps({
             "enter_m": list(T.ZONE_ENTER_M), "exit_m": list(T.ZONE_EXIT_M),
             "band_edges_m": list(T.BAND_EDGES_M),
             "dwell_ms": list(T.ZONE_DWELL_MS), "lost_ms": T.LINK_LOST_AFTER_MS,
             "menu_close_ms": T.MENU_AUTOCLOSE_MS, "split_s": T.PAIR_SPLIT_S,
-            "haptic_ms": TOTAL_MS,
+            "haptic_ms": TOTAL_MS, "themes": list(T.THEME_NAMES),
         })
 
     def _walls(self):

@@ -572,7 +572,8 @@ def test_theme_made_in_the_menu():
     # when the MENU closes
     _need_fb()
     cap = FrameCapture()
-    found = dict(rs._found, sub="result", word="TAP=AGAIN")
+    found = dict(rs._found, sub="result", word="FOUND 1:48",
+                 top_text="BUTTON: PLAY AGAIN")
     for under, want_y, want_m in ((found, _y(0.92), M_FOUND),
                                   (rs.hunt(3, dist_band="<3"), _y(0.86), M_LIVE),
                                   (rs.hunt(0, dist_band="~40"), _y(0.38), M_LIVE)):
@@ -595,7 +596,8 @@ def test_wake_shows_found_settled_unless_burst():
     assert sw[0] == TD.FOUND_SWELL and 0 < sw[-1] < sw[0], sw
     # a wake half-way through the swell (a 700 ms gap): shown settled, no catch-up
     _run(r, cap, [(0, rs.hunt(3, dist_band="<3"))], 500)
-    found = dict(rs._found, sub="result", word="TAP=AGAIN")
+    found = dict(rs._found, sub="result", word="FOUND 1:48",
+                 top_text="BUTTON: PLAY AGAIN")
     _run(r, cap, [(0, found)], 300, t0=600, reset=False)
     assert r.theme.sw > 0, r.theme.sw                 # the swell is under way
     r.frame(rs.make_params(t_ms=rt.T0 + 1600, **found), cap, rt.T0 + 1600)
@@ -659,7 +661,8 @@ def test_frozen_menu_reports_nothing():
     _need_fb()
     cap = FrameCapture()
     menu = dict(rs._menu, sub="1v", menu_rows=rs.MENU_ROWS)
-    found = dict(rs._found, sub="result", word="TAP=AGAIN")
+    found = dict(rs._found, sub="result", word="FOUND 1:48",
+                 top_text="BUTTON: PLAY AGAIN")
     for under in (rs.hunt(3, dist_band="~5"), found, rt._kw("searching"),
                   rt._kw("pairing_looking")):
         r = ThemedRenderer("tide", overlays=False)

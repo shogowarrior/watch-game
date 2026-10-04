@@ -423,9 +423,10 @@ without the page.
 
 The page in Real mode:
 
-- **Controls:** the drag, pace, speed and posture controls and the guide are
-  hidden.
-- **Screens:** both screens are drawn from the latest `rp` per watch.
+- **Controls:** the drag, pace, speed, posture and Field theme controls and
+  the guide are hidden.
+- **Screens:** both screens are drawn from the latest `rp` per watch, in the
+  theme it names (`RenderParams.theme`; Ripple when a record has none).
 - **Under each screen:** the connection state ("last heard N s ago"), band,
   zone, trend, rssi/rssi_f, steps, activity, battery and loss, all with
   plain-language labels.

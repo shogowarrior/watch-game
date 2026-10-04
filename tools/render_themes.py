@@ -49,6 +49,7 @@ STEP_MS = 100              # 10 fps
 # name -> (phases [(offset_ms, kw)], run_ms); kw over render_snapshots.FIXTURE_BASE
 if rs is not None:
     _hunt = rs.hunt
+    _result = dict(rs._found, sub="result", word="FOUND 1:48", top_text="BUTTON: PLAY AGAIN")
     FIXTURES = [
         ("far", [(0, _hunt(0, dist_band="~40"))], 2400),
         ("near", [(0, _hunt(1, dist_band="~20"))], 1600),
@@ -61,10 +62,10 @@ if rs is not None:
                                 speed_px_s=-36, pulse_period_ms=3200, wavelength_px=115,
                                 glow_r_px=18, ring_live=False, glyph="seeker", word="SEARCHING",
                                 status=rs.STATUS_OFF))], 3200),
-        ("pairing_looking", [(0, dict(rs._pair, sub="looking", top_text="PAIR", word="LOOKING",
-                                      ring_live=False))], 3000),
+        ("pairing_looking", [(0, dict(rs._pair, sub="looking", top_text="START OTHER WATCH",
+                                      word="LOOKING", ring_live=False))], 3000),
         ("pairing_seen", [(0, dict(rs._pair, sub="seen", speed_px_s=0, wavelength_px=0,
-                                   runes=rs.RUNES, top_text="SAME RUNES?", word="TAP = YES"))],
+                                   runes=rs.RUNES, top_text="SAME RUNES?", word="BUMP = YES"))],
          1500),
         ("pairing_calibrate", [(0, dict(rs._cal, countdown=3)),
                                (1000, dict(rs._cal, countdown=2))], 1500),
@@ -77,7 +78,7 @@ if rs is not None:
         ("found_celebrate", [(0, dict(rs._found, sub="celebrate", word="FOUND", burst=True,
                                       haptic="FOUND")),
                              (100, dict(rs._found, sub="celebrate", word="FOUND"))], 600),
-        ("found_result", [(0, dict(rs._found, sub="result", word="TAP=AGAIN"))], 2500),
+        ("found_result", [(0, _result)], 2500),
         ("link_lost", [(0, dict(rs._lost, banner=("LOST 0:12", "warn", True)))], 3000),
         ("menu", [(0, _hunt(2, dist_band="~10")),
                   (1000, dict(rs._menu, sub="1v", menu_rows=rs.MENU_ROWS))], 2000),
@@ -105,8 +106,8 @@ if rs is not None:
         ("hot_to_found", [(0, _hunt(3, dist_band="<3")),
                           (800, dict(rs._found, sub="celebrate", word="FOUND", burst=True)),
                           (900, dict(rs._found, sub="celebrate", word="FOUND")),
-                          (1400, dict(rs._found, sub="result", word="TAP=AGAIN"))], _times(2600)),
-        ("found_to_far", [(0, dict(rs._found, sub="result", word="TAP=AGAIN")),
+                          (1400, _result)], _times(2600)),
+        ("found_to_far", [(0, _result),
                           (800, _hunt(0, dist_band="~40"))], _times(2800)),
         ("far_to_searching", [(0, _hunt(0, dist_band="~40")),
                               (800, _kw("searching"))], _times(2800)),
@@ -129,9 +130,9 @@ if rs is not None:
         ("menu_over_hunt", [(0, _hunt(2, dist_band="~10")),
                             (600, dict(rs._menu, sub="1v", menu_rows=rs.MENU_ROWS)),
                             (1600, _hunt(2, dist_band="~10"))], _times(2400)),
-        ("menu_over_found", [(0, dict(rs._found, sub="result", word="TAP=AGAIN")),
+        ("menu_over_found", [(0, _result),
                              (600, _menu_found),
-                             (1600, dict(rs._found, sub="result", word="TAP=AGAIN"))],
+                             (1600, _result)],
          _times(2400)),
         ("menu_over_scan", [(0, _kw("scan_sweep")),
                             (600, dict(_menu_scan, screen="MENU")),
