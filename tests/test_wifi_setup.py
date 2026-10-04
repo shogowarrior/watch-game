@@ -327,3 +327,18 @@ def test_read_wifi_never_runs_the_file_or_quotes_it():
             assert False, "a missing file was read"
         except ValueError as e:
             assert "cannot be opened" in str(e)
+
+
+def test_read_wifi_shows_no_warning_from_the_file():
+    w = _setup()
+    import os
+    import tempfile
+    import warnings
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "wifi.py")
+        # a hand-written password with a bad escape: its warning would quote it
+        _write(path, 'WIFI_SSID = "made-up-net"\nWIFI_PASSWORD = "x\\dy-made-up"\n')
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            assert w.read_wifi(path) == ("made-up-net", "x\\dy-made-up")
+        assert not seen, "%d warnings" % len(seen)     # the count only, never the text

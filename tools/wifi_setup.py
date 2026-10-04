@@ -29,6 +29,7 @@ import os
 import string
 import sys
 import tempfile
+import warnings
 from getpass import getpass
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -71,7 +72,10 @@ def read_wifi(path):
     never quotes it."""
     try:
         with open(path, encoding="utf-8") as f:
-            tree = ast.parse(f.read())
+            src = f.read()
+        with warnings.catch_warnings():      # a bad escape's warning quotes the password
+            warnings.simplefilter("ignore")
+            tree = ast.parse(src)
     except OSError as e:
         raise ValueError("it cannot be opened (%s)" % e.strerror)
     except (SyntaxError, ValueError):        # ValueError: not UTF-8, or a NUL byte

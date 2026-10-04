@@ -4,9 +4,10 @@ The Wi-Fi name and password are read from every Wi-Fi file there is (the one
 tools/wifi_setup.py saved, and an older secrets.py in the repo) with its
 shared reader (never run, never printed), and no file git would commit
 (tracked, or new and not ignored) may contain one; a failure names the
-variable and the files only. secrets.py, webrepl_cfg.py and logs/ must be
-ignored. Needs git and subprocess: skipped under MicroPython and outside a
-git checkout."""
+variable and the files only. Without a Wi-Fi file the check skips, so it
+also runs on a made-up one (test_guard_checks_every_wifi_file).
+secrets.py, webrepl_cfg.py and logs/ must be ignored. Needs git and
+subprocess: skipped under MicroPython and outside a git checkout."""
 
 from tests import Skip
 
@@ -109,3 +110,43 @@ def test_guard_finds_a_planted_value():
         leaky = put("notes.ipynb", '{"out": "connected, pw=not-a-real-pass-7"}')
         gone = os.path.join(tmp, "gone.py")
         assert _leaks(found, [clean, leaky, gone]) == [("WIFI_PASSWORD", leaky)]
+
+
+def _guard_fails():
+    """The AssertionError message of test_no_secret_in_committable_files, or None."""
+    try:
+        test_no_secret_in_committable_files()
+    except AssertionError as e:
+        return str(e)
+    return None
+
+
+def test_guard_checks_every_wifi_file():
+    w = _wifi_setup()
+    import os
+    import tempfile
+    g = globals()
+    pw = "made-up-" + str(os.getpid()) + "-pw"      # built at run time: in no committed file
+    old_env, old_files = os.environ.get(w.ENV), g["_committable"]
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = os.path.join(tmp, "wifi.py")
+        w.save(fake, "MadeUpNet-" + str(os.getpid()), pw)
+        os.environ[w.ENV] = fake
+        try:
+            assert _guard_fails() is None                # nothing committed holds them
+            leaky = os.path.join(tmp, "notes.md")
+            with open(leaky, "w") as f:
+                f.write("pw=" + pw)
+            g["_committable"] = lambda: [leaky]
+            msg = _guard_fails()
+            assert msg and "WIFI_PASSWORD" in msg and pw not in msg, "guard missed it"
+            with open(fake, "w") as f:
+                f.write("WIFI_PASSWORD = " + repr(pw) + " +\n")
+            msg = _guard_fails()
+            assert msg and "cannot check" in msg and pw not in msg, "unreadable file passed"
+        finally:
+            g["_committable"] = old_files
+            if old_env is None:
+                os.environ.pop(w.ENV, None)
+            else:
+                os.environ[w.ENV] = old_env
