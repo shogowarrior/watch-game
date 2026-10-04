@@ -6,6 +6,8 @@ open/close, arrow smoothing, the wedge glide between 10 Hz params, toast
 motion and phase timers. Each strip is composed off-screen (field blit
 through the palette, then overlays whose bounding boxes intersect the strip)
 and pushed whole with ``display.push_strip(y0, h, buf)`` (hal/st7789.py API).
+Strips go out top to bottom, so the panel takes them as one window, all from
+one buffer (the display has sent a strip when ``push_strip`` returns).
 
     r = Renderer()
     beats = r.frame(params, display, ticks_ms())    # display=None: state only
@@ -160,13 +162,13 @@ class FrameCapture:
 
 
 class Renderer:
-    """RenderParams -> strips. ``full_map=True`` trades 28.8 KB for speed."""
+    """RenderParams -> strips, each drawn in ``buf`` and pushed top to bottom."""
 
-    def __init__(self, full_map=False):
+    def __init__(self):
         self.buf = bytearray(W * SH * 2)
         self.fb = framebuf.FrameBuffer(self.buf, W, SH, framebuf.RGB565)
         self.field = RippleField()
-        self.map = RingMap(self.buf, SH, full_map)
+        self.map = RingMap(SH, (self.buf,))
         self.tc = tx.TextCache()
         self._last = {}
         self._ev1 = {}
@@ -607,22 +609,21 @@ class Renderer:
         return TEXT_PRI
 
     # ---- drawing ---------------------------------------------------------------
-    def _strip(self, p, t, y0):
-        fb = self.fb
+    def _strip(self, p, t, y0, fb):
+        """Overlays for the strip at ``y0`` onto its field in ``fb``."""
         y1 = y0 + SH
-        self.map.blit(y0, self.field.pal)
         g = self.g
         scr = self._scr
         # beam / sweep wedge layer
         if (self.sweep or self.pacer) and y0 < 232 and y1 > 8:
             wedge = self.pacer or self._sub == "sweep"
             if self.sweep:
-                self._draw_bins(p, y0, 0 if wedge else 2)
+                self._draw_bins(p, fb, y0, 0 if wedge else 2)
             if wedge:
                 sw = p.sweep
                 gl.draw_wedge(fb, y0, WARN if sw[3] else PROX[6])
                 if self.sweep:
-                    self._draw_bins(p, y0, 1)
+                    self._draw_bins(p, fb, y0, 1)
         # glyph layer
         if self.arrow:
             if y0 < G_Y1[G_ARROW] and y1 > G_Y0[G_ARROW]:
@@ -640,7 +641,7 @@ class Renderer:
             elif g == G_CHECK:
                 gl.draw_check(fb, y0)
             elif g == G_RUNES:
-                self._draw_runes(p, t, y0)
+                self._draw_runes(p, fb, t, y0)
             elif g == G_BATT:
                 st = p.status
                 gl.draw_battery(fb, y0, st[0] if st is not None else None)
@@ -685,7 +686,7 @@ class Renderer:
                 if "v" in sel and MENU_MORE_DN_Y < y1 and MENU_MORE_DN_Y + 6 > y0:
                     fb.poly(MENU_MORE_X, MENU_MORE_DN_Y - y0, _TRI_DN, TEXT_SEC, True)
 
-    def _draw_bins(self, p, y0, which):
+    def _draw_bins(self, p, fb, y0, which):
         """Scan bins. Game passes a per-tick tuple of the scan's bins (the
         float objects are reused while a bin is unchanged) and blinks the best
         bin in ``result`` by toggling ``active_bin``, so each slot is
@@ -695,7 +696,6 @@ class Renderer:
         active bin (drawn over the wedge: the wedge always covers the bin
         being sampled, which would hide its highlight), 2 = all.
         """
-        fb = self.fb
         sw = p.sweep
         bins = sw[1]
         act = sw[2]
@@ -726,8 +726,7 @@ class Renderer:
             else:
                 gl.draw_bin(fb, y0, k, q, act_c if k == act else PROX[3])
 
-    def _draw_runes(self, p, t, y0):
-        fb = self.fb
+    def _draw_runes(self, p, fb, t, y0):
         ids = p.runes
         if ids is None:
             return
@@ -773,9 +772,14 @@ class Renderer:
             self._snap(p, t)
         self._plan(p, t)
         self._palette(p, t)
+        pal = self.field.pal
+        arr = self.field.pal_arr
+        m = self.map
         buf = self.buf
+        fb = self.fb
         for s in range(NS):
             y0 = s * SH
-            self._strip(p, t, y0)
+            m.blit(y0, pal, arr, buf, fb)
+            self._strip(p, t, y0, fb)
             display.push_strip(y0, SH, buf)
         return ev

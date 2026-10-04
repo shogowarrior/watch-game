@@ -1,0 +1,8 @@
+{
+  "name": "homing-core",
+  "version": "0.1.0",
+  "description": "Homing portable C++ core (no hardware calls)",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {"srcDir": "src", "includeDir": "include"}
+}

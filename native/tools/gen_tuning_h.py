@@ -1,0 +1,177 @@
+"""Generate the native ports' constant headers (CPython only).
+
+    python3 native/tools/gen_tuning_h.py            # (re)write the headers
+    python3 native/tools/gen_tuning_h.py --check    # exit 1 if one is stale
+
+native/core/include/hm/tuning.h: docs/design/tokens.json -> tools/gen_tuning.py
+-> finder/tuning.py -> this header, so the C++ ports read the same values as
+the MicroPython game. native/core/include/hm/field_tables.h: the tables and Q8
+constants ui/field.py derives at import, copied so the C++ field matches
+CPython bit for bit instead of re-deriving them with another libm.
+Emission is generic: scalars become constexpr values, flat tuples arrays,
+tuples of equal-length tuples 2-D arrays, string-keyed dicts one constant per
+key (NAME_KEY), and mixed tuples one constant per element (NAME_0, NAME_1,
+...). Floats are float (the watch's MicroPython is single precision too).
+Values none of these fit (RUNES) are listed in the header as skipped.
+"""
+
+import array
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+INC = os.path.join(ROOT, "native", "core", "include", "hm")
+sys.path.insert(0, ROOT)
+
+from finder import tuning as T  # noqa: E402
+from ui import field as F  # noqa: E402
+
+ARRAY_TYPES = {"b": "int8_t", "B": "uint8_t", "h": "int16_t", "H": "uint16_t", "i": "int32_t"}
+
+
+def _is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _num(v, as_float):
+    if as_float:
+        s = repr(float(v))
+        return (s if "e" in s or "." in s else s + ".0") + "f"
+    return str(v)
+
+
+def _cstr(s):
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _key(k):
+    return "".join(c if c.isalnum() else "_" for c in str(k)).upper()
+
+
+def _int_type(vals):
+    return "int32_t" if all(-2 ** 31 <= v < 2 ** 31 for v in vals) else "int64_t"
+
+
+def _array(name, vals):
+    """Flat tuple -> one array line, or None if the items are not uniform."""
+    if all(isinstance(v, str) for v in vals):
+        return "constexpr const char* const %s[%d] = {%s};" % (
+            name, len(vals), ", ".join(_cstr(v) for v in vals))
+    if all(_is_num(v) for v in vals):
+        fl = any(isinstance(v, float) for v in vals)
+        ty = "float" if fl else _int_type(vals)
+        return "constexpr %s %s[%d] = {%s};" % (ty, name, len(vals), ", ".join(_num(v, fl) for v in vals))
+    return None
+
+
+def _table(name, rows):
+    """Tuple of equal-length numeric tuples -> 2-D array, else None."""
+    if not rows or not all(isinstance(r, tuple) and len(r) == len(rows[0]) for r in rows):
+        return None
+    flat = [v for r in rows for v in r]
+    if not all(_is_num(v) for v in flat):
+        return None
+    fl = any(isinstance(v, float) for v in flat)
+    ty = "float" if fl else _int_type(flat)
+    body = ", ".join("{" + ", ".join(_num(v, fl) for v in r) + "}" for r in rows)
+    return "constexpr %s %s[%d][%d] = {%s};" % (ty, name, len(rows), len(rows[0]), body)
+
+
+def emit(name, v, out, skipped):
+    """Append the C++ lines for one value; returns nothing."""
+    if v is None:
+        out.append("// %s: None" % name)
+    elif isinstance(v, (array.array, bytearray)):
+        ty = ARRAY_TYPES[v.typecode] if isinstance(v, array.array) else "uint8_t"
+        out.append("constexpr %s %s[%d] = {%s};" % (ty, name, len(v), ", ".join(str(x) for x in v)))
+    elif type(v).__name__ == "Lut":                 # ui.field.Lut: c (swapped RGB565) + r, g, b
+        for ch in ("c", "r", "g", "b"):
+            emit("%s_%s" % (name, ch.upper()), getattr(v, ch), out, skipped)
+    elif isinstance(v, bool):
+        out.append("constexpr bool %s = %s;" % (name, "true" if v else "false"))
+    elif isinstance(v, int):
+        out.append("constexpr %s %s = %d;" % (_int_type([v]), name, v))
+    elif isinstance(v, float):
+        out.append("constexpr float %s = %s;" % (name, _num(v, True)))
+    elif isinstance(v, str):
+        out.append("constexpr const char %s[] = %s;" % (name, _cstr(v)))
+    elif isinstance(v, dict):
+        for k in v:
+            emit("%s_%s" % (name, _key(k)), v[k], out, skipped)
+    elif isinstance(v, tuple):
+        line = _array(name, v) or _table(name, v)
+        if line is not None:
+            out.append(line)
+        elif all(not isinstance(x, tuple) or _array("x", x) or _table("x", x) for x in v):
+            for i, x in enumerate(v):
+                emit("%s_%d" % (name, i), x, out, skipped)
+        else:
+            skipped.append(name)
+    else:
+        skipped.append(name)
+
+
+def render(mod, src, ns, title, keep=lambda v: True):
+    """Header text for the uppercase names of ``mod`` that ``keep`` accepts."""
+    out = []
+    skipped = []
+    for name in sorted(n for n in dir(mod) if n.isupper()):
+        v = getattr(mod, name)
+        if keep(v):
+            emit(name, v, out, skipped)
+    head = [
+        "// %s" % title,
+        "// GENERATED by native/tools/gen_tuning_h.py from %s -- DO NOT EDIT." % src,
+        "// Regenerate: python3 native/tools/gen_tuning_h.py   (check: --check)",
+        "// Skipped (no generic C++ form): %s" % (", ".join(skipped) or "none"),
+        "#pragma once",
+        "#include <stdint.h>",
+        "",
+        "namespace hm {",
+        "namespace %s {" % ns,
+        "",
+    ]
+    return "\n".join(head + out + ["", "}  // namespace %s" % ns, "}  // namespace hm", ""])
+
+
+def _field_value(v):
+    # ui.field's own derived values; the tokens come from tuning.h
+    return not isinstance(v, str) and type(v).__name__ != "module"
+
+
+OUTPUTS = (
+    ("tuning.h", lambda: render(T, "finder/tuning.py", "T", "Tuning constants for the native ports.")),
+    ("field_tables.h", lambda: render(F, "ui/field.py", "F", "Ripple-field tables and Q8 constants.",
+                                      _field_value)),
+)
+
+
+def main(args):
+    if args not in ([], ["--check"]):
+        print(__doc__)
+        return 2
+    stale = 0
+    for name, gen in OUTPUTS:
+        path = os.path.join(INC, name)
+        rel = os.path.relpath(path, ROOT)
+        text = gen()
+        if not args:
+            with open(path, "w") as f:
+                f.write(text)
+            print("wrote %s" % rel)
+            continue
+        try:
+            with open(path) as f:
+                cur = f.read()
+        except OSError:
+            cur = None
+        if cur != text:
+            print("%s is stale: run python3 native/tools/gen_tuning_h.py" % rel)
+            stale = 1
+        else:
+            print("%s is up to date" % rel)
+    return stale
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

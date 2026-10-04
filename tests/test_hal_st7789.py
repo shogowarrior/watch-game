@@ -156,21 +156,59 @@ def test_push_strip_window_and_framing():
     del log[:]
     buf = bytearray(240 * 24 * 2)
     buf[0] = 0xAB
+    b2 = bytearray(240 * 24 * 2)
+    b2[1] = 0xCD
+    b3 = bytearray(240 * 24 * 2)
+    b3[2] = 0xEF
     d.push_strip(48, 24, buf)
-    cmds, frames = _decode(log)
+    assert d._cs.v == 0                       # window left open for the next strip
+    d.push_strip(72, 24, b2)                  # continues it: one write, no command
+    d.push_strip(216, 24, b3)                 # not contiguous: a new window; the
+    cmds, frames = _decode(log)               # bottom row closes it
     assert frames == 1
     assert cmds == [
         (0x2A, b"\x00\x00\x00\xef"),
-        (0x2B, bytes([0, 128, 0, 151])),      # rows 48..71 + 80
-        (0x2C, bytes(buf)),
+        (0x2B, bytes([0, 128, 1, 63])),       # rows 48..239 + 80
+        (0x2C, bytes(buf) + bytes(b2)),
+        (0x2A, b"\x00\x00\x00\xef"),
+        (0x2B, bytes([1, 40, 1, 63])),        # rows 216..239 + 80
+        (0x2C, bytes(b3)),
     ]
+    assert len([e for e in log if e[0] == "spi"]) == 6 + 1 + 6
     dc = [v for (n, v) in log if n == "dc"]
-    assert dc == [0, 1, 0, 1, 0, 1]
+    assert dc == [0, 1, 0, 1, 0, 1] * 2
     try:
         d.push_strip(0, 24, bytearray(10))
         assert False
     except ValueError:
         pass
+
+
+def test_strips_top_to_bottom_are_one_window():
+    d, log, _, _, _ = _rig()
+    strips = [bytes([k]) * (240 * 24 * 2) for k in range(10)]
+    for _ in range(2):                        # the next frame opens a new window
+        del log[:]
+        for k in range(10):
+            d.push_strip(24 * k, 24, strips[k])
+        cmds, frames = _decode(log)
+        assert frames == 1 and len(cmds) == 3
+        assert cmds[1] == (0x2B, b"\x00\x50\x01\x3f")
+        assert cmds[2] == (0x2C, b"".join(strips))
+        assert len([e for e in log if e[0] == "spi"]) == 5 + 10
+
+
+def test_a_command_closes_an_open_window():
+    d, log, _, _, _ = _rig()
+    strip = bytes(240 * 24 * 2)
+    del log[:]
+    d.push_strip(0, 24, strip)
+    d.sleep()                                 # DISPOFF ends the RAMWR
+    d.push_strip(24, 24, strip)               # so this one opens a new window
+    d.push_strip(48, 216 - 24, bytes(240 * 192 * 2))
+    cmds, _ = _decode(log)
+    assert [c for c, _ in cmds] == [0x2A, 0x2B, 0x2C, 0x28, 0x10, 0x2A, 0x2B, 0x2C]
+    assert cmds[6] == (0x2B, bytes([0, 104, 1, 63]))
 
 
 def test_push_frame_strips_under_one_cs():

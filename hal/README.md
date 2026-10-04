@@ -29,7 +29,15 @@ BMA423 INT1 39) are input-only and have no pull-ups. The I2S amplifier pins
 You draw into RGB565 `framebuf` strips (usually a GS8 buffer blitted through a
 palette), then push them with `push_strip(y0, h, buf)` (a full-width strip)
 or `push_frame(fb)` (115,200 B sent as strip-sized writes in one CS-low burst;
-the slice list is cached, so it allocates nothing). You can also paint directly
+the slice list is cached, so it allocates nothing). A strip that starts where
+the last one ended continues its window (CS stays low, no new command), so 10
+strips top to bottom cost what `push_frame` does (44.1 ms on the watch, against
+52.4 ms with a window per strip and 37.3 ms as one write; the wire alone takes
+34.6 ms at 26.67 MHz). Every write is copied from the PSRAM heap into an
+internal DMA buffer by ESP-IDF, so a write costs about 0.7 ms on top of the
+wire. A send thread was tried (4 Oct 2026) and measured no faster: the caller's
+drawing holds the GIL that the thread needs to queue each DMA chunk, so strips
+go out in the caller. You can also paint directly
 with `fill_rect` or `fill`. The SPI bus is SPI(1) with sck 18, mosi 19, cs 5 and
 dc 27. There is **no reset pin**, so `init()` does a software reset: SWRESET,
 SLPOUT, COLMOD 0x55, MADCTL **0xC0** with a **row offset of 80** (the upright
@@ -98,8 +106,15 @@ and then call `begin()` and poll `ready()`.
 - Reading: `fifo_read_mg()` drains the FIFO with one `readfrom_mem_into` into a
   preallocated buffer, decodes it into `self.fifo_mg` (x, y, z milli-g
   interleaved, `array('h')`) and returns the sample count. Call it every frame.
-  The FIFO holds 170 frames, which is 1.7 s at 100 Hz. `read_xyz_mg()` reads
-  one sample from DATA_8..13.
+  The decode is compiled with `@micropython.viper` on the watch
+  (`DECODE_KERNEL`, after a self-check against the plain version): about
+  45 us a sample in Python, which at 800 Hz is 36 ms of every second.
+  The FIFO holds 170 frames, which is 1.7 s at 100 Hz (212 ms at 800 Hz).
+  `set_odr(hz)` changes the rate while running and empties the FIFO.
+  `read_xyz_mg()` reads one sample from DATA_8..13.
+- `z_sign` records how the board mounts the chip (`hal/board.py` passes
+  `pins.BMA423_Z_SIGN`, -1 on the V1: face-up reads z = -1 g). Samples stay in
+  the chip's frame; `app/imu_feed.py` applies it.
 - Interrupts are **polled, never IRQ-driven**, so no Python IRQ handler ever
   touches the shared I2C bus. `map_interrupts(int1=EV_*...)` routes events to a
   pin (feature events need latched mode). `poll_events()` reads and clears

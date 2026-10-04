@@ -179,9 +179,81 @@ def _data_bits(ev):
     return m
 
 
+_DSRC = """
+def decode_kernel(buf, n: int, out, rng: int, off: int) -> int:
+    bp = ptr8(buf)
+    op = ptr16(out)
+    j = off
+    k = 0
+    i = 0
+    while k < n:
+        x = int(bp[i]) | (int(bp[i + 1]) << 8)
+        y = int(bp[i + 2]) | (int(bp[i + 3]) << 8)
+        z = int(bp[i + 4]) | (int(bp[i + 5]) << 8)
+        if x == 0x8000:
+            if y == 0x8000:
+                if z == 0x8000:
+                    break
+        if x > 32767:
+            x -= 65536
+        if y > 32767:
+            y -= 65536
+        if z > 32767:
+            z -= 65536
+        # 12-bit count = v >> 4 (arithmetic); mg = count * range_mg / 2048, rounded
+        op[j] = ((x >> 4) * rng + 1024) >> 11
+        op[j + 1] = ((y >> 4) * rng + 1024) >> 11
+        op[j + 2] = ((z >> 4) * rng + 1024) >> 11
+        j += 3
+        k += 1
+        i += 6
+    return k
+"""
+
+# Self-check frames: rest, both signs, full scale, the 12-bit LSB nibble, and
+# an all-0x8000 frame that ends the batch.
+_DCHECK = bytes((0x10, 0x00, 0xF0, 0xFF, 0x00, 0x20, 0xF0, 0x7F, 0x00, 0x80, 0x0F, 0x00,
+                 0x5A, 0xC3, 0x3C, 0xA5, 0xFF, 0x01, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80,
+                 0x10, 0x00, 0x10, 0x00, 0x10, 0x00))
+
+
+def _ident(x):
+    return x
+
+
+def _decode_agrees(ka, kb):
+    for rng in (4000, 16000):
+        out = []
+        for fn in (ka, kb):
+            a = array("h", [7] * 18)
+            k = fn(_DCHECK, 5, a, rng, 3)
+            out.append(bytes(a) + bytes((k,)))
+        if out[0] != out[1]:
+            return False
+    return True
+
+
+def _compile_decode():
+    ns = {"ptr8": _ident, "ptr16": _ident}
+    exec(_DSRC, ns)
+    py = ns["decode_kernel"]
+    try:
+        vs = {}
+        exec("@micropython.viper" + _DSRC, vs)
+    except Exception:  # noqa: BLE001 - no viper (CPython, wasm): plain Python
+        return py, "python"
+    if not _decode_agrees(py, vs["decode_kernel"]):
+        return py, "python (viper self-check failed)"
+    return vs["decode_kernel"], "viper"
+
+
+_decode, DECODE_KERNEL = _compile_decode()
+
+
 def decode_frames(buf, n, out, range_mg=4000, off=0):
     """Decode ``n`` headerless 6-byte frames from ``buf`` into ``out`` as
-    x, y, z milli-g (out[off], out[off+1], ...). Allocation-free.
+    x, y, z milli-g (out[off], out[off+1], ...; an array 'h'). Allocation-free.
+    Compiled with @micropython.viper on the watch (``DECODE_KERNEL``).
 
     Stops early at an all-0x8000 frame (what the FIFO returns when read past
     its fill level). Returns the number of frames decoded.
@@ -189,28 +261,12 @@ def decode_frames(buf, n, out, range_mg=4000, off=0):
     cap = (len(out) - off) // 3
     if n > cap:
         n = cap
-    j = off
-    k = 0
-    while k < n:
-        i = k * 6
-        x = buf[i] | buf[i + 1] << 8
-        y = buf[i + 2] | buf[i + 3] << 8
-        z = buf[i + 4] | buf[i + 5] << 8
-        if x == 0x8000 and y == 0x8000 and z == 0x8000:
-            break
-        if x & 0x8000:
-            x -= 0x10000
-        if y & 0x8000:
-            y -= 0x10000
-        if z & 0x8000:
-            z -= 0x10000
-        # 12-bit count = v >> 4 (arithmetic); mg = count * range_mg / 2048, rounded
-        out[j] = ((x >> 4) * range_mg + 1024) >> 11
-        out[j + 1] = ((y >> 4) * range_mg + 1024) >> 11
-        out[j + 2] = ((z >> 4) * range_mg + 1024) >> 11
-        j += 3
-        k += 1
-    return k
+    return _decode(buf, n, out, range_mg, off)
+
+
+def _acc_conf(odr):
+    """ACC_CONF: performance mode, normal filter (-3 dB at about 0.4 x odr)."""
+    return ACC_PERF | ACC_BWP_NORMAL | ODR_CODES[odr]
 
 
 def temperature_c(raw):
@@ -228,10 +284,12 @@ class BMA423:
 
     ``start=False`` skips init; then call ``init()`` (blocking, a few ms) or
     ``begin()`` and ``ready()`` from the main loop (non-blocking).
+    ``z_sign`` is how the board mounts the chip (-1: face-up reads z = -1 g);
+    samples stay in the chip's frame, and app/imu_feed.py applies it.
     """
 
     def __init__(self, i2c, addr=None, *, range_g=4, odr=100, fifo=True,
-                 start=True, fifo_frames=FIFO_FRAMES):
+                 start=True, fifo_frames=FIFO_FRAMES, z_sign=1):
         if range_g not in RANGE_CODES:
             raise ValueError("range_g must be 2, 4, 8 or 16")
         if odr not in ODR_CODES:
@@ -242,6 +300,7 @@ class BMA423:
         self.range_mg = range_g * 1000
         self.odr = odr
         self.fifo = fifo
+        self.z_sign = z_sign
         self.feat_state = FEAT_NONE
         self.feat_error = None
         self._feat_on = False         # game features switched on (poll_features)
@@ -354,7 +413,7 @@ class BMA423:
     def _configure(self):
         self._w8(REG_PWR_CONF, 0x00)  # adv_power_save off (on after reset)
         sleep_us(APS_WAIT_US)
-        self._w8(REG_ACC_CONF, ACC_PERF | ACC_BWP_NORMAL | ODR_CODES[self.odr])
+        self._w8(REG_ACC_CONF, _acc_conf(self.odr))
         self._w8(REG_ACC_RANGE, RANGE_CODES[self.range_g])
         self._w8(REG_FIFO_CONFIG_0, 0x00)  # stream mode, no sensortime frame
         self._w8(REG_FIFO_CONFIG_1, FIFO_ACC_EN if self.fifo else 0x00)
@@ -367,6 +426,15 @@ class BMA423:
             # init without reset after a failed engine init: INIT_CTRL spent
             self.feat_state = FEAT_ERROR
             self.feat_error = "internal_status %d (reset to retry)" % msg
+
+    def set_odr(self, odr):
+        """Change the output data rate while running and empty the FIFO (its
+        samples were taken at the old rate)."""
+        if odr not in ODR_CODES:
+            raise ValueError("odr must be one of 25..1600 Hz")
+        self._w8(REG_ACC_CONF, _acc_conf(odr))
+        self.odr = odr
+        self.fifo_flush()
 
     def error(self):
         """ERR_REG (0 = fine)."""

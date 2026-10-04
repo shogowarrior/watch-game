@@ -101,26 +101,34 @@ stages in order:
    `game.on_packet(t_rx, mac, rssi, beacon)`. The game updates the partner view,
    feeds pairing/calibration, calls `est.update(t, rssi, peer_rssi, my_motion,
    peer_motion)` and, while scanning, `scan.on_packet` with the raw RSSI.
-2. **touch**: `FT6336.read()` -> `GestureRecognizer` (multi-touch ignored).
-   Touch is also sampled after every 2nd strip while a frame renders (about
-   8 ms apart, so a 60 ms tap measures right); what those samples find waits
-   for this stage: `game.on_touch_down` when a finger landed
-   (`GestureRecognizer.began`) and `game.on_gesture`, in time order: a press
-   lands before its gesture; when a gesture ends on the sample where a new
-   finger lands, the gesture goes first. It runs before imu, so the finger's
-   own spike is guarded.
-3. **imu**: `ImuFeed.poll` drains the BMA423 FIFO, averages each block of 4
+2. **imu**: `ImuFeed.poll` drains the BMA423 FIFO, averages each block of
    samples into one 25 Hz sample for `MotionTracker.add_sample` (steps,
-   activity, stillness, tilt, face-up) and runs the bump spike detector on
-   every 100 Hz sample (-> `game.on_accel_tap`), ignoring samples inside haptic
-   blanking (the motor shakes the accelerometer, so samples from the start of a
-   buzz until 150 ms after it are ignored). There are two blanking windows:
+   activity, stillness, tilt, face-up) and, while `game.bump_armed()` (HOT,
+   FOUND, PAIRING seen / confirmed; the logic stage sets it each tick), samples at
+   800 Hz and runs the bump spike detector on every sample
+   (-> `game.on_accel_tap`). The FIFO decode and the per-sample loop
+   (gravity, spike runs, block sums) are integer kernels compiled with
+   `@micropython.viper` on the watch, after a self-check against their plain
+   Python versions, which are what CPython, the wasm port and the browser
+   run. Spikes inside haptic blanking are dropped (the motor shakes the
+   accelerometer, so samples from the start of a buzz until 150 ms after it
+   are ignored; HOT has no heartbeat for this reason). There are two blanking windows:
    ImuFeed's own, from the actual motor edges (`ImuFeed.blanked`, which the
    game also gets as `blank_fn`), and Game's `BlankWindow`, set for each haptic
    event it raises (also the only one in the simulator, which has no feed).
    `Game.blanked` ORs them and the scan uses it, so a tap must clear both. Once
    a second the optional feature engine adds chip steps and activity, and
    wrist-wear -> `game.on_wake` (only while the screen is off).
+3. **touch**: `FT6336.read()` -> `GestureRecognizer` (multi-touch ignored).
+   Touch is also sampled after a strip, at least 15 ms apart, while a frame
+   renders (so a 60 ms tap measures right); what those samples find waits
+   for this stage: `game.on_touch_down` when a finger landed
+   (`GestureRecognizer.began`; the rain filter) and `game.on_gesture`, in
+   time order: a press lands before its gesture; when a gesture ends on the
+   sample where a new finger lands, the gesture goes first. It runs after
+   imu: players knock the watches screen to screen, so a knock's spike is
+   known when its touch's gesture arrives, and the game drops that gesture
+   (ui-spec §8).
 4. **button**: `AXP202.poll()` -> `game.on_button(t, long)`.
 5. **logic** (every 100 ms): `game.set_tracker`, battery every 10 s, then
    `game.tick(t)`. Inside `tick`: the delivery meter (the share of the partner's
@@ -129,14 +137,23 @@ stages in order:
    gated trend (WARMER/COLDER, shown only once the change is clearly bigger
    than the noise); the active mode runs (`pairing`, hunt with `arrow`, `scan`,
    link-lost, found, menu); FOUND is checked from the bump match; the result is
-   one `RenderParams`. The runtime then applies screen power (the panel wakes
-   dark; the backlight follows `params.backlight` after each rendered frame),
-   and shuts the PMU down only once `game.power_off`.
-6. **render** (at `params.fps_cap`): `Renderer.frame(params, display, now)`
-   composes each 240x24 strip off-screen (a map of each pixel's ring number,
+   one `RenderParams`. The battery reading also tells the game whether VBUS
+   is present (`game.set_usb`: on USB the screen stays on). The runtime then
+   applies screen power (the panel wakes dark; the backlight follows
+   `params.backlight` after each rendered frame), and shuts the PMU down only
+   once `game.power_off`.
+6. **render** (on the frame lock, `app/pacer.py`): frames start on an even
+   grid at the fastest of 20, 10, 8, 7, 6, 5 fps at or under `params.fps_cap`
+   that the loop's measured cost fits, and `Renderer.frame(params, display,
+   slot)` animates to the frame's slot time, so motion steps evenly (ui-spec
+   §4 rule 6). It composes each 240x24 strip off-screen (a map of each pixel's ring number,
    coloured through a 256-entry palette of byte-swapped RGB565, then glyph and
    text overlays) and
-   pushes it with `display.push_strip`. With the screen off it runs with
+   pushes it with `display.push_strip`. Strips go top to bottom, so the panel
+   takes them as one window, all drawn in one buffer. The field is coloured
+   from a quarter of the ring map, eight pixels a pass mirrored left-right
+   and top-bottom (a viper kernel on the watch, checked against the framebuf
+   path when the renderer starts; elsewhere a framebuf palette blit). With the screen off it runs with
    `display=None`, so ring and heartbeat timing continue. It returns only the
    heartbeat names, locked to ring spawns.
 7. **tx**: when due, `game.fill_beacon` fills the 16-byte beacon (seq, own and
@@ -150,8 +167,10 @@ stages in order:
    `HapticPlayer`; `tick(now)` gives the motor level, applied by `Motor.set`
    only on change. The motor is also serviced after every strip, and in
    `idle` while a pattern plays.
-9. **gc**: `gc.collect()` once a second when the next frame is at least 10 ms
-   away (forced after 4 s).
+9. **gc**: `gc.collect()` every 10 s when the next frame is at least 10 ms
+   away (forced after 20 s). A collect sweeps the whole 4 MB SPIRAM heap
+   (about 70 ms on the watch, bring-up), so it runs rarely; the loop's
+   allocations take far longer than that to fill the heap.
 
 `step` returns the ms to the next deadline; `run` sleeps that long (at most
 50 ms). OSErrors that reach the loop from a part are counted in `io_errors` and
@@ -185,12 +204,12 @@ fallback is both short presses within 3 s in HOT.
 | What | Rate | Where |
 |---|---|---|
 | Game logic (`Game.tick`) | 10 Hz (100 ms) | `finder.tuning.LOGIC_MS` |
-| Render | 20 fps (15 in saver / low battery); a frame is about 40 ms on the watch, about 35 ms of it SPI at 26.67 MHz | `params.fps_cap`, `tuning.FPS_TARGET`, `tuning.SAVER_FPS` |
+| Render | locked to 20, 10, 8, 7, 6 or 5 fps: the fastest at or under the cap (20; 10 in saver / low battery) the loop holds; a frame is about 80 ms on the watch, about 40 ms of it SPI at 26.67 MHz; with `fps_log_ms` (main.py) a serial `fps` line every 10 s | `app.pacer`, `params.fps_cap`, `tuning.FPS_LOCKS`, `tuning.SAVER_FPS` |
 | Beacons | 10 Hz normal, 20 Hz in HOT and while scanning, 5 Hz in saver | `game.beacon_hz`, `tuning.BEACON_HZ_*` |
-| BMA423 FIFO | 100 Hz, drained every loop (holds 1.7 s) | `app.imu_feed` |
+| BMA423 FIFO | 100 Hz (holds 1.7 s), 800 Hz while a bump can count (holds 212 ms); drained every loop | `app.imu_feed` |
 | Motion tracker | 25 Hz | `app.runtime.IMU_OUT_HZ` |
 | Feature engine poll | 1 Hz | `app.runtime.CHIP_MS` |
-| Touch / button poll | touch: every loop and after every 2nd display strip (about 8 ms apart while a frame renders); button: every loop, at least every 20 ms | `app.runtime.INPUT_MS` |
+| Touch / button poll | touch: every loop and, while a frame renders, after a strip once 15 ms have passed since the last sample; button: every loop, at least every 20 ms | `app.runtime.INPUT_MS`, `TOUCH_GAP_MS` |
 | Battery | every 10 s; a falling reading at or under 20 % must repeat 3 times, 1 s apart; on USB a shutdown-level reading never reaches the game | `BATTERY_MS`, `BATT_LOW_READS` |
 | Haptics | pulses and gaps >= 60 ms; motor serviced every strip and every 1 ms while a pattern plays | `finder.haptic_patterns` |
 | Link loss | 5 s with no packet after a fix -> LINK_LOST | `finder.game`, ui-spec §6 |

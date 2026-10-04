@@ -391,6 +391,32 @@ def test_serial_frames_each_record_as_one_line():
     assert dl.SerialLink().out is sys.stdout.buffer       # the REPL's UART on the watch
 
 
+def test_serial_log_line_goes_between_records():
+    """``log`` queues a plain text line (no 0x1E) behind the records already
+    waiting, so it never lands inside one; the bridge shows it as text."""
+    port = Port()
+    link = dl.SerialLink("A", port)
+    assert link.send('{"ev":"s","x":"%s"}' % ("y" * 200))     # two pieces
+    assert link.log("fps 9.9 lock 10")
+    assert link.send('{"ev":"btn"}')
+    link.drain()
+    lines = port.data().split(b"\n")
+    assert lines[1] == b"fps 9.9 lock 10" and lines[0][:1] == lines[2][:1] == b"\x1e"
+    assert lines[3] == b"" and link.n_tx == 3
+
+
+def test_wifi_log_line_is_printed():
+    """On Wi-Fi the records never use the USB port, so the fps line is a print."""
+    link = dl.DebugLink("A")
+    out = []
+    dl.print = out.append                  # the module's print, before the builtin
+    try:
+        link.log("fps 9.9 lock 10")
+    finally:
+        del dl.print
+    assert out == ["fps 9.9 lock 10"] and link.n_tx == 0
+
+
 def test_serial_pieces_fill_whole_fifo_loads():
     """Pieces of at most 128 bytes, cut once in ``send`` every 128 bytes of
     the queued stream: a pass that finds the FIFO empty writes all 128 bytes,
@@ -699,7 +725,7 @@ def _run_main(config, secrets, ap_key=PW, tele=None, start=None):
         _clean(d)
     assert len(calls) == 1, out.getvalue()
     board, kw = calls[0]
-    assert kw.pop("watchdog_ms") == 8000
+    assert kw.pop("watchdog_ms") == 8000 and kw.pop("fps_log_ms") == 10000
     return board, kw, out.getvalue()
 
 

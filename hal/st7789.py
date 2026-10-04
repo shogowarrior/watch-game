@@ -24,6 +24,14 @@ SWRESET; otherwise turn LDO2 on yourself before constructing the driver.
 This driver only ever calls ``bl_power(True)``; backlight off is PWM duty
 0. If LDO2 is ever cut on purpose, the panel loses its registers and GRAM:
 call ``init()`` (full SWRESET sequence) after restoring it, not ``wake()``.
+
+Strips: ``push_strip`` keeps the window open (CS low, no new command) after
+a strip that does not reach the bottom row, so strips pushed top to bottom
+cost one SPI write each (a windowed strip costs five more small writes:
+52.4 vs 44.1 ms a frame on the watch). Any other SPI use closes it.
+Strips go out in the caller: a send thread was tried and measured no faster
+on the watch (4 Oct 2026), since drawing (viper kernels, framebuf calls)
+holds the GIL the thread needs to queue each DMA chunk.
 """
 
 import machine
@@ -114,12 +122,14 @@ class ST7789:
             self._pwm = machine.PWM(machine.Pin(backlight, machine.Pin.OUT), freq=bl_freq, duty_u16=0)
         self.asleep = False
         self._slpin_t = None      # ticks_ms of the last SLPIN
+        self._next = -1           # row an open full-width window continues at
         if init:
             self.init()
 
     # --- low level -------------------------------------------------------
     def _cmd(self, c, data=None):
         """One command (+ optional data) framed by its own CS pulse."""
+        self._next = -1           # a command ends any open window
         cs = self._cs
         dc = self._dc
         cs(0)
@@ -152,6 +162,7 @@ class ST7789:
 
     def _begin(self, x0, y0, x1, y1):
         """CS low, CASET/RASET (+offsets), RAMWR, DC high: ready for pixels."""
+        self._next = -1
         self._cs(0)
         self._addr(CASET, x0 + self.xoff, x1 + self.xoff)
         self._addr(RASET, y0 + self.yoff, y1 + self.yoff)
@@ -191,12 +202,24 @@ class ST7789:
 
     # --- pixels ----------------------------------------------------------
     def push_strip(self, y0, h, buf):
-        """Push a full-width strip of ``h`` rows starting at row ``y0``."""
+        """Push a full-width strip of ``h`` rows starting at row ``y0``.
+
+        A strip that starts where the last one ended continues its window;
+        otherwise a window from ``y0`` to the bottom row opens. CS stays low
+        until a strip reaches the bottom row or another command is sent.
+        """
         if len(buf) != self.width * h * 2:
             raise ValueError("strip buf must be width*h*2 bytes")
-        self._begin(0, y0, self.width - 1, y0 + h - 1)
+        n = self._next
+        self._next = -1           # until this strip is out
+        if y0 != n:
+            self._begin(0, y0, self.width - 1, self.height - 1)
         self.spi.write(buf)
-        self._cs(1)
+        y = y0 + h
+        if y >= self.height:
+            self._cs(1)
+        else:
+            self._next = y
 
     def _slice_frame(self, fb):
         # Kept out of push_frame: a comprehension there would turn its locals

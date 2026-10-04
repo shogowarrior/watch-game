@@ -3,17 +3,19 @@
 # Skip the app (REPL stays free for mpremote / the notebook) by creating
 # /noapp (tools/deploy.py --noapp) or by double-pressing, or holding, the side
 # key within the first second after boot. Ctrl-C stops the game; then
-# ``import app; app.rt.print_stats()`` shows the loop timing. With /tele
-# (tools/deploy.py --tele A) the game logs telemetry to /log. With /debug
-# the watch also sends its telemetry to the laptop (hal/debuglink.py):
-# tools/deploy.py --debug A sends it over this USB port, playing exactly as
-# normal; --debug A --wifi first joins the Wi-Fi in /secrets.py (up to 10 s,
-# screen dark) and sends over it, or prints why it cannot and plays
-# normally. The watchdog (hal/watchdog.py) is the stoppable soft one while
-# the game has only run on USB, and the ESP32 hardware WDT from the first
-# battery reading off USB. A game started on battery keeps the hardware WDT
-# after USB is plugged in, so Ctrl-C then reboots the watch within 8 s
-# (tools/deploy.py hard-resets first for this reason).
+# ``import app; app.rt.print_stats()`` shows the loop timing; every 10 s the game
+# prints an ``fps ... lock ... jit ...`` line (frame lock and jitter,
+# app/runtime.py). With /tele (tools/deploy.py --tele A) the game logs
+# telemetry to /log. With /debug the watch also sends its telemetry to the
+# laptop (hal/debuglink.py): tools/deploy.py --debug A sends it over this USB
+# port, playing exactly as normal (the fps line then rides the same link);
+# --debug A --wifi first joins the Wi-Fi in /secrets.py (up to 10 s, screen
+# dark) and sends over it, or prints why it cannot and plays normally. The
+# watchdog (hal/watchdog.py) is the stoppable soft one while the game has only
+# run on USB, and the ESP32 hardware WDT from the first battery reading off
+# USB. A game started on battery keeps the hardware WDT after USB is plugged
+# in, so Ctrl-C then reboots the watch within 8 s (tools/deploy.py hard-resets
+# first for this reason).
 
 from hal.board import Board, safe_boot
 
@@ -59,7 +61,8 @@ else:
                 tl.dev = link.dev               # the page's label (A or B)
                 tl.sink = link
                 kw["telemetry"] = tl
-            app.run(board, watchdog_ms=8000, **kw)   # hal/watchdog.py: reboots a hung loop
+            # hal/watchdog.py reboots a hung loop; an fps line every 10 s (app/runtime.py)
+            app.run(board, watchdog_ms=8000, fps_log_ms=10000, **kw)
     except KeyboardInterrupt:
         print("stopped: import app; app.rt.print_stats()")
     except Exception as e:  # noqa: BLE001 - keep the REPL reachable

@@ -9,7 +9,7 @@ A two-player "find each other" game for two **LILYGO T-Watch 2020 V1** watches
 compass, FT6336 touch, vibration motor). The watches broadcast 16-byte ESP-NOW
 beacons. Each watch turns the partner's RSSI plus both watches' step and
 activity hints into a distance estimate, and shows it as a green ripple field
-(a "Sheikah sensor" homage, codename *Sheikah Finder*). A guided 360° body-turn
+(a homage to the proximity sensor in the Zelda games; the game is called *Homing*). A guided 360° body-turn
 scan gives a direction arrow. The round ends when the players physically bump
 watches. The watch runs **stock MicroPython v1.29.0 (`ESP32_GENERIC-SPIRAM`)**,
 pure `.py`, no custom C modules.
@@ -25,8 +25,9 @@ over their USB cables or over Wi-Fi.
 | Path | What |
 |---|---|
 | `boot.py` | Minimal: silences IDF logs. No Wi-Fi, no webrepl, no app code. |
-| `main.py` | Safe-boot check (`/noapp` or side-key double press / hold), debug mode (`/debug`: `hal.debuglink.start()`, which joins the Wi-Fi first on the Wi-Fi link), `Board().init()`, then `app.run(board, watchdog_ms=8000)`. |
-| `app/runtime.py` | The watch main loop `Runtime.step(now)`: radio, touch, imu, button, logic (10 Hz), render, tx, haptic, gc. |
+| `main.py` | Safe-boot check (`/noapp` or side-key double press / hold), debug mode (`/debug`: `hal.debuglink.start()`, which joins the Wi-Fi first on the Wi-Fi link), `Board().init()`, then `app.run(board, watchdog_ms=8000, fps_log_ms=10000)`. |
+| `app/runtime.py` | The watch main loop `Runtime.step(now)`: radio, imu, touch, button, logic (10 Hz), render, tx, haptic, gc. |
+| `app/pacer.py` | `FramePacer`: the frame lock (20, 10, 8, 7, 6, 5 fps from measured cost), slot times for even motion, the serial fps line's counters. |
 | `app/imu_feed.py` | BMA423 FIFO (100 Hz mg) -> `MotionTracker` at 25 Hz in g, plus the bump spike detector. |
 | `app/telemetry.py` | JSONL telemetry for field tests (`session()`; main.py turns it on when `/tele` exists). In debug mode its `sink` (a `hal/debuglink.py` link) sends each record, plus an `rp` record (the `RenderParams`), as one line on USB or one UDP datagram on Wi-Fi. |
 | `hal/` | The only code that touches hardware. See `hal/README.md` (drivers, gotchas, bench tools). |
@@ -52,6 +53,7 @@ over their USB cables or over Wi-Fi.
 | `finder/render_params.py` | `RenderParams`, the only thing the renderer reads (ui-spec §3). |
 | `ui/` | Strip renderer: `renderer.py` (10 strips of 240x24), `field.py` (ripple palette), `glyphs.py`, `text.py`, `font.py`. Colours in `ui/__init__.py` are byte-swapped RGB565. |
 | `sim/` | Two-watch simulator: `world.py`, `radio.py` (RSSI profiles clean/typical/harsh/indoor, per-watch beacon period), `imu.py`, `accel_synth.py`, `scenarios.py`, `rng.py`, `link.py` (`GameLink`: beacon hand-off between two Games), `Sim`; `webhost.py` drives the browser sim. |
+| `native/` | Arduino and ESP-IDF ports (PlatformIO), work in progress: a shared C++ core (the ripple field, checked frame by frame against `ui/field.py`; display, PMU and IMU sequences from `hal/`) and the display benchmark both builds run. See `native/README.md`; `tests/test_native.py` runs its host tests. |
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). Its **Simulator \| Real watches** toggle shows the real watches in debug mode. |
 | `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`; `socket.py`, a fake UDP `socket` installed by `fakes.install_socket()`; `serial_port.py`, a fake USB serial port that checks `SerialLink`'s pacing against the 115200-baud line), `est_helpers.py` (shared estimator fixtures), `test_deploy.py` (`tools/deploy.py`, CPython only). |
 | `tests/test_debuglink.py` `test_debug_server.py` `test_fake_watches.py` `test_wifi_setup.py` `test_secrets_guard.py` | Debug mode: the watch side (USB and Wi-Fi links) and `main.py` wiring on fakes; the bridge's UDP-to-SSE relay, serial reader (on pseudo-terminals) and log over real localhost sockets (CPython only); the fake watches; `tools/wifi_setup.py` (the saved file, its permissions, nothing printed); no tracked file holds a value from a saved Wi-Fi file. |
@@ -111,6 +113,8 @@ sets it as CPython would.
 | `python3 tools/drift_demo.py` | Why accelerometer double integration fails. |
 | `python3 tools/build_sim.py` | Build the web simulator into `dist/sim/` (needs `tools/mpy` npm install). |
 | `mpremote run tools/bench_display.py` | **On the watch**: real SPI clock, push/blit timings, fps. |
+| `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push) and the overlays of each strip, push variants, whether a send thread could overlap the drawing, IMU cost per rate, which kernels run as viper, and 10 s of the game loop (with its serial `fps` lines: frame lock, misses, jitter) with bump sensing off then on. |
+| `mpremote run tools/bench_spi_clock.py` | **On the watch**: MicroPython's full-frame push at 26.67, 40 and 80 MHz (pokes the SPI clock register, then puts 26.67 back), with a test card held 5 s per clock to check by eye. |
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |
@@ -135,9 +139,15 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
 2. **Allocation-light hot paths; the render loop allocates nothing.** Per-packet,
    per-sample and per-frame code reuses preallocated buffers; floats are heap
    objects on MicroPython, so the renderer and ripple field work in Q8
-   integers. Why: GC pauses on the ESP32 cost tens of ms and would stutter the
-   20 fps frame and the haptic timing. `tools/bench_est.py` and the renderer
-   tests measure it.
+   integers. Why: a collect on the watch's 4 MB SPIRAM heap takes about 70 ms
+   and would stutter the frame and the haptic timing. `tools/bench_est.py` and
+   the renderer tests measure it. The hottest integer loops (palette, field
+   blit, FIFO decode, IMU feed) are one source string each, run as plain
+   Python (identity `ptr` shims) on CPython and wasm, and compiled with
+   `@micropython.viper` on the watch only after a self-check against the plain
+   version or the framebuf path; `tools/bench_frame.py` prints which ran.
+   Viper needs 32-bit words: on a 64-bit unix port the self-checks fail
+   (`ptr32` loads are not sign-extended) and the plain versions run.
 3. **Byte-swapped RGB565.** `framebuf` stores RGB565 little-endian, the ST7789
    wants MSB-first. Every colour given to a framebuf, palette or `fill` goes
    through `rgb565()`/`swap16()`; `ui/__init__.py` takes the pre-swapped values
@@ -182,7 +192,7 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
     `debug_server.py`).
 13. Other ui-spec §12 "don'ts" hold everywhere: no haptic pulse under 60 ms, no
     new patterns beyond the 9, no full-screen flashes, no Nintendo assets or
-    "Sheikah" on screen, nothing mapped near the AXP202 power-off hold.
+    names on screen, nothing mapped near the AXP202 power-off hold.
 
 14. **GPIO12 is a boot strapping pin (flash voltage).** On the V1 it is also the
     backlight. It must be LOW at reset, so never add a pull-up to it, never claim it

@@ -10,19 +10,21 @@ One ``step(now)`` does, in order:
 
   radio   drain ESP-NOW -> LinkMonitor (partner lock = ``game.pair.peer_mac``,
           seq dedup) -> valid beacons -> ``game.on_packet``
-  touch   FT6336 -> GestureRecognizer (multi-touch ignored, §8). Also sampled
-          after every 2nd strip, so a 60 ms tap measures right while a frame
-          renders; what those samples find waits for this stage (the game
-          changes only between frames): ``game.on_gesture``, and
-          ``game.on_touch_down`` when a finger lands (bump guard, ui-spec §6;
-          before the imu stage, so the finger's own spike is guarded), in
-          time order: a press lands before its gesture; on one sample the
-          gesture goes first (it ended the previous press)
-  imu     BMA423 FIFO -> MotionTracker (25 Hz, g) + bump spikes -> ``on_accel_tap``;
+  imu     BMA423 FIFO -> MotionTracker (25 Hz, g) + bump spikes -> ``on_accel_tap``
+          (the FIFO runs fast only while ``game.bump_armed()``, set each tick);
           once a second the feature engine (if ``bma423conf.bin`` loaded):
           chip steps/activity -> tracker, wrist-wear -> ``game.on_wake`` (only
           when the screen is off: polled up to 1 s late, face_up has usually
-          woken it, and a second wake would drop taps for 300 ms)
+          woken it, and a second wake would drop taps for 300 ms). Before the
+          touch stage, so a knock's spike is known when its touch's gesture
+          arrives (screen-to-screen knocks touch the panel, ui-spec §8)
+  touch   FT6336 -> GestureRecognizer (multi-touch ignored, §8). Also sampled
+          after a strip once TOUCH_GAP_MS (15) have passed, so a 60 ms tap
+          measures right while a frame renders; what those samples find
+          waits for this stage (the game changes only between frames):
+          ``game.on_gesture``, and ``game.on_touch_down`` when a finger lands
+          (rain filter), in time order: a press lands before its gesture; on
+          one sample the gesture goes first (it ended the previous press)
   button  AXP202 PEK -> ``game.on_button`` (short / long; wakes when off)
   logic   every 100 ms: tracker + battery (every 10 s) -> ``game.tick``
           -> RenderParams; screen power; AXP202 shutdown only once
@@ -32,19 +34,40 @@ One ``step(now)`` does, in order:
           shutdown-level one never on USB; until then the game keeps its
           last value, so one sagging reading never alarms, turns the saver
           on or powers the watch off
-  render  at ``params.fps_cap`` (20, saver 15): strips -> ``display.push_strip``.
+  render  on the frame lock (app/pacer.py): the fastest of 20, 10, 8, 7, 6, 5
+          fps at or under ``params.fps_cap`` (20, saver 10) that the loop's
+          measured cost fits; each frame is drawn at its slot time, so motion
+          steps evenly (ui-spec §4 rule 6). Strips -> ``display.push_strip``.
           With the screen off the renderer still runs state-only
           (``display=None``) so heartbeats keep their time grid (ui-spec §7).
-          A frame takes ~40 ms on the watch, so the motor is serviced after
-          every strip (~4 ms) and the frame's haptic events start at the
+          A frame takes ~80 ms on the watch, so the motor is serviced after
+          every strip (~9 ms) and the frame's haptic events start at the
           post-render time (pulses keep their 60 ms ERM floor). The backlight
           follows ``params.backlight`` after each frame, so a woken panel is
           lit only over a fresh frame (§8: no stale frame)
   radio   beacon (``game.fill_beacon``) at ``game.beacon_hz`` via ``maybe_send``
   haptic  ``params.haptic`` (``play_named``; telemetry logs only accepted ones)
           + renderer heartbeats (``heartbeat``) -> HapticPlayer (buzz mode) -> Motor
-  gc      ``gc.collect()`` once per ``GC_PERIOD_MS`` when the next frame is at
-          least ``GC_BUDGET_MS`` away (forced after 4 periods)
+  gc      ``gc.collect()`` once per ``GC_PERIOD_MS`` (10 s) when the next frame
+          is at least ``GC_BUDGET_MS`` away (forced after ``GC_FORCE_MS``). On
+          the SPIRAM build a collect sweeps the whole 4 MB heap: about 70 ms
+          however little is garbage (bring-up, 3 Oct 2026), so it runs rarely.
+          The two-watch simulator allocates under 1.5 MB in 10 s per watch
+          (fakes included) against 3.7 MB free, and MicroPython collects by
+          itself if the heap ever runs out first
+
+With ``fps_log_ms`` (main.py: 10000) the loop prints one line that often:
+
+    fps 9.9 lock 10 miss 0 late 4/18 jit 2.1 max 112 cost 86 gc 1 log 0.6
+
+frames shown per second, the frame lock, slots missed, how late frames started
+after their slot (avg/max ms), the sd and max of the interval between shown
+frames (ms: the frame-time jitter), the lock's frame cost (busy ms between
+frames), collects in the window and how long the previous line took to print
+(ms; under 128 bytes it fits the UART FIFO, so print never waits on the wire).
+In debug mode the line goes to the telemetry sink's ``log`` instead: on USB a
+print could land inside a record the link is still writing, so the link queues
+it between records (the bridge shows it as a text line).
 
 ``step`` returns the ms until the next deadline; ``run`` sleeps exactly that
 (never longer than ``MAX_SLEEP_MS``) with ``idle``, which ticks the motor
@@ -81,6 +104,7 @@ from finder import gestures as G
 from finder.game import Game
 from finder.haptic_patterns import HapticPlayer
 from finder.link import LinkMonitor, R_BAD, R_DUP
+from app.pacer import FramePacer
 from hal.axp202 import EV_SHORT, EV_LONG
 from hal.bma423 import EV_WRIST_WEAR, FEAT_OK, FEAT_PENDING
 from hal.watchdog import MODE_SOFT, Watchdog
@@ -89,6 +113,7 @@ PARTS = ("pmu", "display", "imu", "touch", "haptics", "radio")
 GAME_ID = 1
 TICK_MS = T.LOGIC_MS       # game logic rate (10 Hz)
 INPUT_MS = 20              # touch/button/imu poll when nothing else is due
+TOUCH_GAP_MS = 15          # touch samples between strips at least this far apart
 HAPTIC_SLICE_MS = 1        # ``idle`` motor tick while a pattern plays
 BATTERY_MS = 10000
 BATT_LOW_READS = 3         # falling readings <= 20 % in a row before the game sees one
@@ -97,7 +122,8 @@ IMU_OUT_HZ = 25            # MotionTracker rate (25-50 Hz; 25 halves its float w
 CHIP_MS = 1000             # BMA423 feature engine (steps/activity/wrist) poll
 CHIP_TRIES = 5             # engine starts in all: at boot, then at the poll after a bus error
 MAX_SLEEP_MS = 50
-GC_PERIOD_MS = 1000
+GC_PERIOD_MS = 10000       # one ~70 ms collect per period (4 MB SPIRAM heap)
+GC_FORCE_MS = 20000        # ... even with no slack before the next frame
 GC_BUDGET_MS = 10
 STAGES = ("radio", "imu", "touch", "button", "logic", "render", "tx", "haptic", "gc", "tele")
 S_RADIO = 0
@@ -121,9 +147,9 @@ _NO_EVENTS = ()
 
 class _HapticDisplay:
     """Display proxy for the renderer: services the motor after each strip,
-    so pulse edges stay within one strip (~4 ms) of schedule mid-frame,
-    samples touch after every 2nd strip (~8 ms apart) and pumps the debug
-    sink after each strip."""
+    so pulse edges stay within one strip of schedule mid-frame, samples
+    touch after a strip once TOUCH_GAP_MS have passed since the last sample,
+    and pumps the debug sink after each strip."""
 
     def __init__(self, rt, display):
         self.rt = rt
@@ -134,7 +160,7 @@ class _HapticDisplay:
         rt = self.rt
         t = rt.clock()
         rt._stage_haptic(t)
-        if y0 // h & 1 and rt.touch is not None:
+        if rt.touch is not None and ticks_diff(t, rt._touch_t) >= TOUCH_GAP_MS:
             rt._sample_touch(t)
         tl = rt.tele
         if tl is not None and tl.sink is not None:
@@ -145,9 +171,12 @@ class Runtime:
     """One watch: owns the Game, renderer, haptic player and loop timing."""
 
     def __init__(self, board, parts=PARTS, clock=None, sleep_ms=None, clock_us=None,
-                 renderer=None, telemetry=None, gc_collect=None, z_sign=1, watchdog_ms=None):
+                 renderer=None, telemetry=None, gc_collect=None, z_sign=None, watchdog_ms=None,
+                 fps_log_ms=None):
         self.board = board
         self.watchdog_ms = watchdog_ms
+        self.fps_log_ms = fps_log_ms
+        self.log_line = print                 # the fps line's sink (tests swap it)
         self.wd = None
         self.parts = parts
         self.clock = clock or ticks_ms
@@ -156,7 +185,7 @@ class Runtime:
         self.renderer = renderer
         self.tele = telemetry
         self.gc_collect = gc_collect or gc.collect
-        self.z_sign = z_sign
+        self.z_sign = z_sign                  # None: the board's (hal/pins.py BMA423_Z_SIGN)
         self.errors = {}
         self.io_errors = [0] * len(STAGES)
         self.started = False
@@ -233,6 +262,7 @@ class Runtime:
             self._chip_start()
         self._rx_cb = self._on_rx
         self._td_t = None                     # touch-down sampled, not yet dispatched
+        self._touch_t = now                   # last touch sample
         self._g_code = 0                      # gesture sampled, not yet dispatched
         self._g_t = self._g_t0 = self._g_x = self._g_y = 0
         self._buzz = -1
@@ -242,7 +272,12 @@ class Runtime:
         self._fps_t = now
         self._fps_n = 0
         self._t_tick = now
-        self._t_frame = now
+        self.pacer = FramePacer(now)
+        self._busy = 0                        # loop busy ms since the last drawn frame
+        self._gc_ms = 0
+        self._log_t = now
+        self._log_gc = 0                      # collects since the last fps line
+        self._log_us = 0                      # the last fps line's print time
         self._t_input = now
         self._t_batt = now
         # a start stopped by a bus error waits one poll period (_chip_start says why)
@@ -260,7 +295,8 @@ class Runtime:
     def run(self, max_ms=None):
         """Loop until ``stop()``/power-off (or ``max_ms``); Ctrl-C stops it too.
         An exception is logged (telemetry ``crash``) and re-raised; telemetry
-        is flushed on every exit."""
+        is flushed on every exit, and ``quiet()`` stops the motor and slows
+        the IMU."""
         self.begin()
         t0 = self.clock()
         if self.watchdog_ms and self.wd is None:
@@ -335,11 +371,18 @@ class Runtime:
             self.sleep_ms(HAPTIC_SLICE_MS if r > HAPTIC_SLICE_MS else r)
 
     def quiet(self):
-        """Motor off (after Ctrl-C or an exception)."""
+        """Motor off and the IMU back at its slow rate (after Ctrl-C or an
+        exception), so a notebook's next feed finds the chip as it expects."""
         m = self.motor
         if m is not None:
             try:
                 m.set(0)
+            except OSError:
+                pass
+        f = self.feed
+        if f is not None:
+            try:
+                f.set_fast(False)
             except OSError:
                 pass
 
@@ -349,6 +392,8 @@ class Runtime:
             self.begin(now)
         if now is None:
             now = self.clock()
+        t0 = now
+        self._gc_ms = 0
         us = self.us
         self.loops += 1
         if self.powered_off:
@@ -357,12 +402,12 @@ class Runtime:
         if self.radio is not None:
             self._stage_radio(now)
             a = self._acc(S_RADIO, a)
-        if self.touch is not None:
-            self._stage_touch(now)
-            a = self._acc(S_TOUCH, a)
         if self.feed is not None:
             self._stage_imu(now)
             a = self._acc(S_IMU, a)
+        if self.touch is not None:
+            self._stage_touch(now)
+            a = self._acc(S_TOUCH, a)
         if self.pmu is not None:
             self._stage_button(now)
             a = self._acc(S_BUTTON, a)
@@ -372,10 +417,10 @@ class Runtime:
             if self.powered_off:
                 return MAX_SLEEP_MS
             now = self.clock()        # a panel wake blocks ~120 ms (SLPOUT)
-        if ticks_diff(now, self._t_frame) >= 0:
-            self._stage_render(now)
+        if ticks_diff(now, self.pacer.t_next) >= 0:
+            self._stage_render(now, t0)
             a = self._acc(S_RENDER, a)
-            now = self.clock()        # a frame takes ~40 ms on the watch
+            now = self.clock()        # a frame takes ~80 ms on the watch
         if self.radio is not None:
             self._stage_tx(now)
             a = self._acc(S_TX, a)
@@ -393,18 +438,24 @@ class Runtime:
         self._t_input = ticks_add(now, INPUT_MS)
         if ticks_diff(now, self._t_gc) >= GC_PERIOD_MS:
             # slack to the next frame/tick (inputs and beacons can slip a few ms)
-            nx = self._t_frame if ticks_diff(self._t_frame, self._t_tick) < 0 else self._t_tick
+            nx = self.pacer.t_next
+            if ticks_diff(self._t_tick, nx) < 0:
+                nx = self._t_tick
             if (ticks_diff(nx, self.clock()) >= GC_BUDGET_MS
-                    or ticks_diff(now, self._t_gc) >= 4 * GC_PERIOD_MS):
+                    or ticks_diff(now, self._t_gc) >= GC_FORCE_MS):
                 self._gc(now)
-        return self._wait(self.clock())
+        if self.fps_log_ms and ticks_diff(now, self._log_t) >= self.fps_log_ms:
+            self._fps_log(now)
+        t = self.clock()
+        self._busy += ticks_diff(t, t0) - self._gc_ms
+        return self._wait(t)
 
     def _wait(self, now):
         nx = self._t_input
         t = self._t_tick
         if ticks_diff(t, nx) < 0:
             nx = t
-        t = self._t_frame
+        t = self.pacer.t_next
         if ticks_diff(t, nx) < 0:
             nx = t
         r = self.radio
@@ -506,6 +557,7 @@ class Runtime:
     def _sample_touch(self, t):
         """FT6336 -> GestureRecognizer at ``t``; a landing finger and a gesture
         wait for ``_stage_touch`` (at most one of each per frame)."""
+        self._touch_t = t
         try:
             r = self.touch.read()           # [touching, x, y, contacts]
         except OSError:
@@ -528,7 +580,7 @@ class Runtime:
         td = self._td_t                     # in time order; on one sample the gesture
         self._td_t = None                   # first (it ended the press before that finger)
         if td is not None and (not code or ticks_diff(self._g_t, td) > 0):
-            self.game.on_touch_down(td)     # a finger landed: its own spike is no bump
+            self.game.on_touch_down(td)     # a finger landed (rain filter)
             td = None
         if code:
             self._g_code = 0
@@ -574,6 +626,11 @@ class Runtime:
         p = g.tick(now)
         self.params = p
         self._fresh = True
+        if self.feed is not None:
+            try:
+                self.feed.set_fast(g.bump_armed())
+            except OSError:
+                self.io_errors[S_IMU] += 1
         self.ticks += 1
         b = g.buzz
         if b != self._buzz:
@@ -601,6 +658,7 @@ class Runtime:
             self.wd = self._make_watchdog(usb=False)
         if usb and pct is not None and pct <= T.BATT_SHUTDOWN_PCT:
             pct = T.BATT_SHUTDOWN_PCT + 1     # on USB: never an automatic power-off
+        self.game.set_usb(now, usb)           # on USB: the screen stays on (§8)
         b = self.game.battery
         if pct is not None and pct <= T.BATT_WARN_PCT and (b is None or pct < b):
             self._low_n += 1                  # a drop on the LOW-BATTERY ladder: confirm it
@@ -624,8 +682,9 @@ class Runtime:
                 except OSError:
                     self.io_errors[S_LOGIC] += 1
             self.bl_level = 0.0
+            self._busy = 0
             if on:
-                self._t_frame = now      # first frame at once (§8: no intro)
+                self.pacer.restart(now)  # first frame at once (§8: no intro)
         if on and self.renderer is None:
             self._backlight(p.backlight)  # no frames to wait for
 
@@ -660,25 +719,34 @@ class Runtime:
                 except OSError:
                     self.io_errors[S_LOGIC] += 1
 
-    def _stage_render(self, now):
+    def _stage_render(self, now, t0=None):
+        """A frame on the lock's grid: drawn at its slot time (``pacer.begin``),
+        so the animation moves on by whole lock periods; ``t0`` is when this
+        loop pass started (its busy time up to here belongs to this frame)."""
         p = self.params
         if p is None:
             return
-        cap = p.fps_cap or T.FPS_TARGET
-        per = 1000 // cap
-        nx = ticks_add(self._t_frame, per)
-        self._t_frame = nx if ticks_diff(nx, now) > 0 else ticks_add(now, per)
         r = self.renderer
+        d = self._hdisp if (r is not None and self.screen_is_on) else None
+        busy = None
+        if d is not None:                     # state-only frames leave the lock alone
+            pre = 0 if t0 is None else ticks_diff(now, t0)
+            busy = self._busy + pre
+            self._busy = -pre                 # the rest of this pass: the next frame's
+        else:
+            self._busy = 0                    # not a drawn frame's cost: never grows
+        pc = self.pacer
+        slot = pc.begin(now, p.fps_cap or T.FPS_TARGET, busy)
         event = p.haptic if self._fresh else None    # params.haptic plays once
         self._fresh = False
         if r is None:
             self._no_renderer(now, p)
             ev = _NO_EVENTS
         else:
-            d = self._hdisp if self.screen_is_on else None
-            ev = r.frame(p, d, now)
+            ev = r.frame(p, d, slot)
             now = self.clock()        # events start when the frame is out
             if d is not None:
+                pc.shown(now)
                 self._backlight(p.backlight)    # lit only over a fresh frame
                 self.frames += 1
                 self._fps_n += 1
@@ -737,7 +805,10 @@ class Runtime:
 
     def _gc(self, now):
         a = self.us()
+        t = self.clock()
         self.gc_collect()
+        self._gc_ms += ticks_diff(self.clock(), t)    # not frame cost: the lock ignores it
+        self._log_gc += 1
         d = ticks_diff(self.us(), a)
         self._t_gc = now
         self.gc_n += 1
@@ -745,6 +816,27 @@ class Runtime:
         if d > self.gc_max_us:
             self.gc_max_us = d
         self._acc(S_GC, a)
+
+    def _fps_log(self, now):
+        """The serial fps line (module docstring); its own print is timed and
+        shown on the next line. Allocates (formatting): once per fps_log_ms."""
+        pc = self.pacer
+        el = ticks_diff(now, self._log_t)
+        n = pc.frames
+        a = self.us()
+        line = "fps %.1f lock %d miss %d late %d/%d jit %.1f max %d cost %d gc %d log %.1f" % (
+            n * 1000.0 / el if el > 0 else 0.0, pc.fps, pc.missed,
+            pc.late_sum // n if n else 0, pc.late_max, pc.jitter_ms(), pc.iv_max,
+            pc.cost, self._log_gc, self._log_us / 1000.0)
+        tl = self.tele
+        if tl is not None and tl.sink is not None:
+            tl.sink.log(line)       # debug mode: USB queues it between records
+        else:
+            self.log_line(line)
+        self._log_us = ticks_diff(self.us(), a)
+        self._log_t = now
+        self._log_gc = 0
+        pc.window()
 
     # ---- stats ----------------------------------------------------------------------
     def _init_stats(self):

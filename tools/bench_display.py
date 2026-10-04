@@ -71,7 +71,7 @@ a1 = gc.mem_alloc()
 T_push = report("push_frame", len(frame))
 print("  heap alloc per push_frame: %d B" % ((a1 - a0) // N))
 
-# %% [3] T_push: 10 x push_strip (window per strip) ---------------------------
+# %% [3] T_push: 10 x push_strip (top to bottom: one window) -------------------
 strip = bytearray(240 * STRIP * 2)
 sfb = framebuf.FrameBuffer(strip, 240, STRIP, framebuf.RGB565)
 sfb.fill(rgb565(80, 0, 0))

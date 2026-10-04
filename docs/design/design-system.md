@@ -1,4 +1,4 @@
-# Sheikah Finder design system (v0.2.0)
+# Homing design system (v0.2.0)
 
 A small design system for the watch UI of the two-player hide-and-seek game on the LILYGO T-Watch 2020 (240×240 ST7789 IPS, RGB565, one side button, vibration motor, BMA423). The machine-readable source of truth is [`tokens.json`](./tokens.json). If this document and the JSON disagree, the JSON wins.
 
@@ -41,7 +41,7 @@ per frame:
 - **Vignette:** 1.0 out to r = 88, falling to 0.4 at r = 120 and 0.15 in the corners (r = 168). This makes the square screen read as a round sensor dish and keeps the corner text zones dim.
 - **Byte order:** `framebuf` stores RGB565 little-endian, but the ST7789 expects big-endian bytes. Put the `rgb565_swapped` values from `tokens.json` into the palette (`finder/tuning.py` carries them pre-swapped, and `ui/__init__.py` takes them from there).
 - **Memory:** a full ring map would take 57,600 B and a full RGB565 frame 115,200 B. The watch runs stock MicroPython v1.29.0 `ESP32_GENERIC-SPIRAM` (`tools/flash.sh`), so RAM is not the limit, but the renderer still draws 10 strips of 240×24 to keep the heap small and GC pauses short.
-- **Frame budget:** stock firmware caps SPI at 26.67 MHz, so sending a full frame takes about 35 ms. The target is 20 fps, with a 15 fps floor (and 15 fps in saver). Keep per-frame palette maths to about 170 LUT lookups and precompute everything else; the field works in Q8 integers, so a frame allocates nothing.
+- **Frame budget:** stock firmware caps SPI at 26.67 MHz, so sending a full frame takes about 35 ms. The target is 20 fps; frames are locked to an even grid at the fastest of 20, 10, 8, 7, 6 and 5 fps the watch holds (10 fps in saver; ui-spec §4 rule 6). Keep per-frame palette maths to about 170 LUT lookups and precompute everything else; the field works in Q8 integers, so a frame allocates nothing.
 
 ---
 
@@ -188,7 +188,7 @@ A rounded rect is two `fill_rect` calls plus four `framebuf.ellipse(..., True, m
 
 | Token | Value |
 |---|---|
-| Frame rate | Target 20 fps (50 ms), minimum 15 fps, 15 fps in saver |
+| Frame rate | Target 20 fps (50 ms); locked to 20, 10, 8, 7, 6 or 5 fps (`motion.fps.locks`), 10 fps in saver |
 | `duration.fast / base / slow` | 150 / 250 / 600 ms |
 | Hue crossfade | 1500 ms (400 ms into FOUND) |
 | Breathing | FOUND standing wave 2400 ms (1 ramp step per 1.2 s half-cycle), PAIRING 2400 ms, `in_out_sine` |

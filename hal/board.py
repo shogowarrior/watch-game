@@ -145,7 +145,7 @@ class Board:
 
     def _make_imu(self):
         from hal.bma423 import BMA423
-        return BMA423(self.i2c0)
+        return BMA423(self.i2c0, z_sign=pins.BMA423_Z_SIGN)
 
     def _make_touch(self):
         from hal.ft6336 import FT6336

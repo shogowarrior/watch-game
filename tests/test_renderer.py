@@ -263,16 +263,117 @@ def test_core_dot_level_in_frame():
     assert r.field.iris == 0
 
 
-def test_half_and_full_map_frames_identical():
+def test_field_strips_match_the_full_map():
+    """A field-only frame, drawn strip by strip from both buffers in turn,
+    equals the full ring map palette-blitted in one go."""
     _need_fb()
-    kw = _warm(glyph="chevrons", trend=-1, trend_strong=True, top_text="TAP TO SCAN")
-    a = Renderer()
-    b = Renderer(full_map=True)
-    ca = FrameCapture()
-    cb = FrameCapture()
-    _run(a, ca, kw, 700)
-    _run(b, cb, kw, 700)
-    assert ca.buf == cb.buf
+    r = Renderer()
+    cap = FrameCapture()
+    _run(r, cap, rs.hunt(2, status=None), 700)
+    ref = bytearray(240 * 240 * 2)
+    full = framebuf.FrameBuffer(fld.build_map(240), 240, 240, framebuf.GS8)
+    framebuf.FrameBuffer(ref, 240, 240, framebuf.RGB565).blit(full, 0, 0, -1, r.field.pal)
+    assert cap.buf == ref
+    # The overlays are not in this frame: the snapshot CRCs
+    # (test_fixtures_match_snapshots) catch overlays drawn into the wrong strip.
+
+
+def test_strips_go_top_to_bottom_from_one_buffer():
+    """In order (one panel window), each drawn in the same buffer."""
+    _need_fb()
+    r = Renderer()
+    seen = []
+
+    class D:
+        def push_strip(self, y0, h, buf):
+            seen.append((y0, h, buf is r.buf))
+
+    _run(r, D(), rs.hunt(2, status=None), 0)
+    assert seen == [(24 * k, 24, True) for k in range(10)], seen
+
+
+class _P16:
+    """ptr16 stand-in over a bytearray (little-endian, as on the ESP32)."""
+
+    def __init__(self, b):
+        self.b = b
+
+    def __getitem__(self, i):
+        return self.b[2 * i] | self.b[2 * i + 1] << 8
+
+    def __setitem__(self, i, v):
+        self.b[2 * i] = v & 255
+        self.b[2 * i + 1] = (v >> 8) & 255
+
+
+class _P32:
+    """ptr32 stand-in over a bytearray (little-endian, as on the ESP32)."""
+
+    def __init__(self, b):
+        self.b = b
+
+    def __getitem__(self, i):
+        b = self.b
+        j = 4 * i
+        return b[j] | b[j + 1] << 8 | b[j + 2] << 16 | b[j + 3] << 24
+
+    def __setitem__(self, i, v):
+        b = self.b
+        j = 4 * i
+        b[j] = v & 255
+        b[j + 1] = (v >> 8) & 255
+        b[j + 2] = (v >> 16) & 255
+        b[j + 3] = (v >> 24) & 255
+
+
+def _py_blit_kernel(src=None):
+    """ui.field's blit kernel source (or ``src``) as plain Python (viper is
+    device-only)."""
+    ns = {"ptr16": lambda b: b if isinstance(b, array.array) else _P16(b),
+          "ptr32": _P32}
+    exec(fld._BSRC if src is None else src, ns)
+    return ns["blit_kernel"]
+
+
+def test_blit_kernel_matches_the_framebuf_path():
+    """The viper strip blit, run as Python, passes RingMap's self-check and
+    draws the same frame from the map's quadrant; kernels that read the
+    wrong rows, swap a pixel pair, skip a row or mirror the left half
+    without reversing it are refused."""
+    _need_fb()
+    k = _py_blit_kernel()
+    r = Renderer()
+    assert r.map.kind in ("framebuf", "viper"), r.map.kind
+    r.map = fld.RingMap(24, (r.buf,), kernel=k)
+    assert r.map.kind == "kernel" and r.map.kern is k
+    assert len(r.map.q) == 120 * 120
+    cap = FrameCapture()
+    _run(r, cap, rs.hunt(2, status=None), 300)
+    ref = bytearray(240 * 240 * 2)
+    full = framebuf.FrameBuffer(fld.build_map(240), 240, 240, framebuf.GS8)
+    framebuf.FrameBuffer(ref, 240, 240, framebuf.RGB565).blit(full, 0, 0, -1, r.field.pal)
+    assert cap.buf == ref
+
+    def mirrored(dst, q, pal, y0, h):         # a bottom strip from its top mirror, not reversed
+        k(dst, q, pal, y0 if y0 < 120 else 216 - y0, h)
+
+    def swapped(dst, q, pal, y0, h):
+        k(dst, q, pal, y0, h)
+        for i in range(0, len(dst), 4):
+            a = dst[i:i + 2]
+            dst[i:i + 2] = dst[i + 2:i + 4]
+            dst[i + 2:i + 4] = a
+
+    def short(dst, q, pal, y0, h):
+        k(dst, q, pal, y0, h - 1)
+
+    src = fld._BSRC.replace("dp[lt] = c3 | (c2 << 16)", "dp[lt] = c2 | (c3 << 16)")
+    assert src != fld._BSRC
+    unreversed = _py_blit_kernel(src)          # left half: one pixel pair in the wrong order
+
+    for bad in (mirrored, swapped, short, unreversed):
+        m = fld.RingMap(24, (r.buf,), kernel=bad)
+        assert m.kern is None and m.q is None and "failed" in m.kind, m.kind
 
 
 def _crest(r):

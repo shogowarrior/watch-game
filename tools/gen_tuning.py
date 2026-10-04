@@ -56,8 +56,8 @@ SPEC = (
         ("WAVELENGTH_TOL_PX", 1.0, "wavelength == |speed| * period / 1000 within this"),
         ("GLOW_R_MAX_PX", 96.0, None),
         ("CONE_DRAW_MIN_DEG", 12.0, "cone half-angle is clamped to 12..60 for drawing"),
-        ("FPS_CAP_MIN", 12, None),
-        ("FPS_CAP_MAX", 20, None),
+        ("FPS_CAP_MIN", 5, "the slowest frame lock (motion.fps.locks)"),
+        ("FPS_CAP_MAX", 20, "the fastest frame lock (motion.fps.locks)"),
         ("COUNTDOWN_MAX", 99, "2-digit type.display countdown (split 30..0)"),
     )),
     ("Per-screen field extras (ui-spec §6)", (
@@ -92,15 +92,24 @@ SPEC = (
         ("SCAN_HOLD_REPEAT_MS", 3000, "partner HOLD haptic repeat"),
         ("SCAN_HOLD_REPEAT_MAX", 3, None),
     )),
+    ("Frame lock (ui-spec §4 rule 6; app/pacer.py)", (
+        ("FPS_COST_N", 16, "frame cost = 2nd largest busy ms of the last 16 frames"),
+        ("FPS_MARGIN_PCT", 10, "a faster lock needs cost + 10 % to fit its period"),
+        ("FPS_RAISE_MS", 3000, "... for this long before the lock rises one step"),
+        ("FPS_LOG_MS", 10000, "serial fps line period (main.py)"),
+    )),
     ("Pairing, found, battery, power, input (ui-spec §6, §8)", (
         ("PAIR_SPLIT_S", 30, None),
         ("PAIR_GO_MS", 1000, "split: GO shown 1 s at 0"),
+        ("PAIR_READY_HINT_MS", 5000, "split: chip TAP WHEN READY from 5 s in"),
+        ("PAIR_READY_LEFT_S", 3, "split: both ready -> the countdown jumps to 3"),
         ("CAL_GATE_WINDOW_MS", 1000, "RSSI sd over 1 s > unstable_sd pauses the fill"),
         ("SEARCHING_WALK_ABOUT_MS", 45000, None),
-        ("BUMP_TOUCH_GUARD_MS", 300, "ignore taps 300 ms after a screen touch"),
-        ("BUMP_TOUCH_LEAD_MS", 100, "... and from 100 ms before its touch-down (§8)"),
-        ("BUMP_SPIKE_G", 2.5, "gravity-removed |a| above this (§6 HOT)"),
-        ("BUMP_SPIKE_MS", (10, 20), "spike run length min..max"),
+        ("KNOCK_TOUCH_BEFORE_MS", 300, "a touch whose touch-down a counted spike precedes by up to this"),
+        ("KNOCK_TOUCH_AFTER_MS", 100, "... or follows by up to this may be a knock's (§8) ..."),
+        ("KNOCK_WAIT_MS", 500, "... so it waits this long after the spike for the partner's: "
+                               "a knock spikes both watches, a finger only its own"),
+        ("BUMP_ODR_HZ", 800, "accelerometer rate while a bump can count"),
         ("BUMP_REFRACTORY_MS", 200, None),
         ("BUMP_READY_HOLD_MS", 1500, "band <3 held 1.5 s"),
         ("BUMP_READY_BAND", 0, "index of '<3'"),
@@ -116,7 +125,9 @@ SPEC = (
         ("LOST_TIMER_MAX_S", 599, "m:ss up to 9:59, then 10M+"),
         ("LOST_HINT_AFTER_MS", 20000, "GO BACK / KEEP ON"),
         ("WAKE_BOOST_MS", 3000, None),
-        ("WRIST_DOWN_MS", 2000, None),
+        ("WRIST_DOWN_MS", 10000, "on battery: screen off once lowered this long (§8)"),
+        ("WRIST_DOWN_DEG", 60, "lowered: tilted more than this from face-up"),
+        ("SCAN_READY_DOWN_MS", 2000, "scan ready: cancels once not flat this long"),
         ("IDLE_DIM_MS", 30000, None),
         ("IDLE_DIM_BACKLIGHT", 0.35, "ui-spec §8: face-up > 30 s with no input"),
         ("STATUS_AFTER_WAKE_MS", 3000, None),
@@ -131,7 +142,6 @@ SPEC = (
         ("TOUCH_BURST_COUNT", 3, ">= 3 touches in 1 s ..."),
         ("TOUCH_BURST_WINDOW_MS", 1000, None),
         ("TOUCH_BURST_IGNORE_MS", 2000, "... ignore touches for 2 s"),
-        ("BUMP_TAP_IGNORE_MS", 400, "HOT: touch within 400 ms of an accel tap is a bump"),
         ("MENU_AUTOCLOSE_MS", 8000, None),
         ("MENU_CONFIRM_MS", 3000, None),
         ("MENU_ROWS_Y", (32, 76, 120, 164), None),
@@ -409,6 +419,14 @@ def build(tok):
         ("FALLBACK_PRESS_WINDOW_MS", int(fg.group(2)) * 1000, None),
         ("FALLBACK_MAX_BAND", list(b["labels"]).index(fg.group(3)), "band <= '%s'" % fg.group(3)),
     ])
+    bs = th["bump_spike"]
+    if not 0.0 < float(bs["run_g"]) < float(bs["peak_g"]):
+        raise ValueError("tokens.json thresholds.bump_spike: need 0 < run_g < peak_g")
+    sec("Bump spike (thresholds.bump_spike, provisional)", [
+        ("BUMP_SPIKE_G", float(bs["peak_g"]), "a spike peaks at gravity-removed |a| >= this (§6 HOT)"),
+        ("BUMP_RUN_G", float(bs["run_g"]), "its run: samples above this ..."),
+        ("BUMP_SPIKE_MS", (0, int(bs["max_ms"])), "... one sample up to this wide"),
+    ])
 
     # saver / power
     lb = tok["states"]["LOW_BATTERY"]["own_le_10pct"]
@@ -545,8 +563,17 @@ def build(tok):
         raise ValueError("tokens.json motion.duration_ms.breathe_pairing != states.PAIRING.glow_breathe_ms")
     if int(du["hue_crossfade"]) != int(use["hue_ramp_crossfade"]["ms"]):
         raise ValueError("tokens.json motion.duration_ms.hue_crossfade != motion.use.hue_ramp_crossfade.ms")
+    locks = tuple(int(x) for x in mo["fps"]["locks"])
+    if list(locks) != sorted(set(locks), reverse=True) or locks[0] != int(mo["fps"]["target"]):
+        raise ValueError("tokens.json motion.fps.locks must fall strictly from motion.fps.target")
+    caps = dict(r[:2] for _, rows in SPEC for r in rows)
+    if (caps["FPS_CAP_MIN"], caps["FPS_CAP_MAX"]) != (locks[-1], locks[0]):
+        raise ValueError("SPEC FPS_CAP_MIN/MAX != the slowest/fastest of motion.fps.locks")
+    if int(tok["states"]["LOW_BATTERY"]["own_le_10pct"]["fps"]) not in locks:
+        raise ValueError("tokens.json states.LOW_BATTERY.own_le_10pct.fps is not a motion.fps.locks rate")
     sec("Motion (motion)", [
         ("FPS_TARGET", int(mo["fps"]["target"]), None),
+        ("FPS_LOCKS", locks, "frame lock rates, fastest first (app/pacer.py)"),
         ("BREATHE_PAIRING_MS", int(du["breathe_pairing"]), "PAIRING seen halo breathing"),
         ("TOAST_MS", int(du["toast_dwell"]), None),
         ("ZONE_CROSSFADE_MS", int(use["zone_param_crossfade"]["ms"]), None),

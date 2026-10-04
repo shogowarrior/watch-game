@@ -131,6 +131,21 @@ def test_init_options():
         assert False, kw
 
 
+def test_set_odr_rewrites_rate_and_flushes_fifo():
+    m, dev, b, imu = _imu()
+    assert imu.z_sign == 1                # the chip's frame unless the board says
+    del dev.writes[:]
+    imu.set_odr(800)
+    assert [r for (r, d) in dev.writes] == [0x40, 0x7E]
+    assert dev.regs[0x40] == 0xAB and _w(dev, 0x7E) == [0xB0] and imu.odr == 800
+    try:
+        imu.set_odr(700)
+    except ValueError:
+        assert imu.odr == 800
+        return
+    assert False, "odr 700 accepted"
+
+
 def test_nonblocking_reset_polls_chip_id():
     m, dev, b, imu = _imu(start=False)
     dev.boot_nacks = 2
@@ -189,6 +204,31 @@ def test_fifo_decode_known_bytes():
     assert n == 1 and list(out[3:6]) == [1000, -1, 0]
     # output capacity caps the count
     assert b.decode_frames(buf, 3, array("h", [0] * 3), 4000) == 1
+
+
+def test_decode_kernel_self_check_catches_a_wrong_kernel():
+    b = _mod()
+    assert b.DECODE_KERNEL in ("python", "viper")
+    k = b._decode
+    assert b._decode_agrees(k, k)
+
+    def no_sign(buf, n, out, rng, off):     # forgets the sign of y
+        r = k(buf, n, out, rng, off)
+        for j in range(off + 1, off + 3 * r, 3):
+            out[j] = abs(out[j])
+        return r
+
+    def no_marker(buf, n, out, rng, off):   # reads past the over-read marker
+        r = k(buf, n, out, rng, off)
+        return n if r < n else r
+
+    def unrounded(buf, n, out, rng, off):
+        r = k(buf, n, out, rng, off)
+        out[off] -= 1
+        return r
+
+    for bad in (no_sign, no_marker, unrounded):
+        assert not b._decode_agrees(k, bad), bad
 
 
 def test_fifo_read_drains_whole_frames():

@@ -21,7 +21,7 @@ decisions to ask the owner about before starting and the next steps in order.
 - When UI behaviour or visuals change, update in the same change: `ui-spec.md`
   first, then the code and tests, then the snapshots
   (`python3 tools/render_snapshots.py`) and the Design canvas mockups
-  ("Sheikah Finder watch UI", linked from `web/sim/index.html`) so they still
+  (linked from `web/sim/index.html`) so they still
   match the spec. Rebuild the web sim (`python3 tools/build_sim.py`) if
   `finder/`, `ui/`, `sim/` or `web/sim/` changed.
 - The `web-sim` preview (`.claude/launch.json`) runs `tools/debug_server.py

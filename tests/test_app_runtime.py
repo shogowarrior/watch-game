@@ -14,6 +14,7 @@ used there.
 from array import array
 
 from tests import fakes
+from finder.tuning import WRIST_DOWN_MS
 
 MAC_A = b"\x24\x0a\xc4\x10\x00\x0a"
 MAC_B = b"\x24\x0a\xc4\x10\x00\x0b"
@@ -33,31 +34,42 @@ class Clock:
 
 
 class FakeIMU:
-    """100 Hz FIFO in milli-g: face-up gravity plus scripted spikes."""
+    """BMA423-like FIFO in milli-g at 100 Hz (or the ``set_odr`` rate):
+    face-up gravity plus scripted spikes."""
 
     def __init__(self, clock, spikes=()):
         self.clock = clock
-        self.last = clock.now
         self.fifo_mg = array("h", [0] * (170 * 3))
         self.spikes = list(spikes)     # (t_ms, samples wide, extra mg on z)
+        self.odr = 100
+        self.odrs = []                 # set_odr calls
+        self.t0 = clock.now            # sample k (from 1) is taken k / odr s after t0
+        self.k = 0                     # samples read
+
+    def set_odr(self, hz):
+        self.odr = hz
+        self.odrs.append(hz)
+        self.t0 = self.clock.now       # FIFO emptied
+        self.k = 0
 
     def fifo_read_mg(self):
-        now = self.clock.now
-        n = (now - self.last) // 10
-        if n > 170:
-            self.last += (n - 170) * 10
+        hz = self.odr
+        k1 = (self.clock.now - self.t0) * hz // 1000
+        n = k1 - self.k
+        if n > 170:                    # stream mode: the newest 170 stay
+            self.k = k1 - 170
             n = 170
         a = self.fifo_mg
         for i in range(n):
-            t = self.last + (i + 1) * 10
+            t_us = self.t0 * 1000 + (self.k + i + 1) * 1000000 // hz
             z = 1000 + (3 if i & 1 else -3)
             for t0, w, mg in self.spikes:
-                if t0 <= t < t0 + w * 10:
+                if t0 * 1000 <= t_us < t0 * 1000 + w * 1000000 // hz:
                     z += mg
             a[3 * i] = 5
             a[3 * i + 1] = -4
             a[3 * i + 2] = z if z < 4000 else 3999
-        self.last += n * 10
+        self.k = k1
         return n
 
 
@@ -246,11 +258,12 @@ def test_two_watches_one_minute():
     from finder import pairing as P
     from hal.axp202 import EV_SHORT
     from finder import tuning as T
+    from app.runtime import GC_PERIOD_MS
     clock = Clock(0)
     ra = SimRadio(MAC_A, seed=11).begin()
     rb = SimRadio(MAC_B, seed=22).begin()
     ra.connect(rb, rssi=-50)
-    a = _watch(clock, ra, imu_spikes=((20000, 2, 3000), (22000, 6, 3000)),
+    a = _watch(clock, ra, imu_spikes=((1000, 2, 3000), (1500, 12, 3000), (20000, 2, 3000)),
                buttons=((2000, EV_SHORT),))
     y_buzz = T.MENU_ROWS_Y[2] + T.MENU_ROW_H // 2       # row 2: BUZZ
     y_resume = T.MENU_ROWS_Y[0] + T.MENU_ROW_H // 2     # row 0: RESUME
@@ -288,7 +301,7 @@ def test_two_watches_one_minute():
         assert rt.display.pushes == 10 * n
         assert rt.ticks >= 0.98 * RUN_MS / 100, rt.ticks
         assert rt.display.level is not None and rt.display.level > 0
-        assert rt.gc_count[0] >= 30, rt.gc_count
+        assert RUN_MS // GC_PERIOD_MS - 1 <= rt.gc_count[0] <= RUN_MS // GC_PERIOD_MS, rt.gc_count
         assert not any(rt.io_errors), rt.io_errors
         assert rt.fps > 18.0, rt.fps
 
@@ -305,10 +318,13 @@ def test_two_watches_one_minute():
         assert rt.game.mode != M_PAIRING, (rt.game.mode, rt.game.pair.sub)
     assert a.game.pair.runes == b.game.pair.runes
 
-    # bump spikes: 20 ms accepted, 60 ms (a shake) rejected
+    # bump spikes, sampled fast only in PAIRING seen / confirmed: 2.5 ms
+    # accepted, 15 ms (a shake) rejected; the split's 100 Hz sees none
+    assert a.board.imu.odrs[:2] == [T.BUMP_ODR_HZ, 100], a.board.imu.odrs
+    assert a.feed.fast == a.game.bump_armed()
     assert a.feed.n_taps == 1, (a.feed.n_taps, a.feed.n_rejected)
-    assert abs(a.feed.last_tap - 20000) <= 20, a.feed.last_tap
-    assert a.feed.n_rejected >= 1
+    assert abs(a.feed.last_tap - 1000) <= 2, a.feed.last_tap
+    assert a.feed.n_rejected == 1
     assert a.feed.n_samples >= 5900
 
     # haptics: the motor was driven; buzz OFF (via the menu) silenced watch B
@@ -318,7 +334,18 @@ def test_two_watches_one_minute():
     assert not any(b.motor._pwm.history[off_idx:]), b.motor._pwm.history[off_idx:]
     assert b.motor.duty_u16 == 0
     assert a.game.buzz == BUZZ_FULL
-    assert any(a.motor._pwm.history[a_idx:])     # A (FULL) kept buzzing
+    # A (FULL) still buzzes, B (OFF) does not; HOT has no heartbeat, so an event
+    # (a held one plays on the next tick)
+    assert a.game.px.zone == 3 and b.game.px.zone == 3
+    a_idx = len(a.motor._pwm.history)
+    for rt in rts:
+        rt.game._held = "NOPE"
+    end = clock.now + 1500
+    while clock.now < end:
+        w = min(rt.step(clock.now) for rt in rts)
+        clock.sleep(w if w > 0 else 1)
+    assert any(a.motor._pwm.history[a_idx:])
+    assert not any(b.motor._pwm.history[off_idx:])
     assert not b.game.menu_open
     for rt in rts:
         assert not rt.pmu.off and not rt.powered_off
@@ -348,9 +375,9 @@ def test_missing_parts_and_screen_off():
     # face down (z = -1 g) for > WRIST_DOWN_MS: display sleeps, frames stop
     imu.spikes.append((clock.now, 100000, -2000))
     n0 = d.pushes
-    rt.run(max_ms=4000)
+    rt.run(max_ms=WRIST_DOWN_MS + 2000)
     assert d.asleep and not rt.screen_is_on and rt.bl_level == 0.0
-    assert d.pushes < n0 + 10 * 20 * 3
+    assert d.pushes < n0 + 10 * 20 * (WRIST_DOWN_MS // 1000 + 1)
     n1 = d.pushes
     rt.run(max_ms=1000)
     assert d.pushes == n1
@@ -400,12 +427,15 @@ def test_no_renderer_uses_metronome():
 
 
 def test_imu_feed_spikes_blanking_and_rate():
-    from app.imu_feed import ImuFeed
+    from app.imu_feed import ImuFeed, FAST_HZ
     clock = Clock(0)
-    imu = FakeIMU(clock, spikes=((1000, 1, 3000), (1500, 2, 3000), (2000, 3, 3000),
-                                 (2600, 2, 3000), (2700, 2, 3000)))
+    imu = FakeIMU(clock, spikes=((1000, 1, 3000), (1500, 4, 3000), (2000, 10, 3000),
+                                 (2600, 2, 3000), (2700, 2, 3000), (4500, 2, 3000),
+                                 (3500, 3, 800),                    # peaks under 1 g
+                                 (3700, 40, 700), (3720, 2, 600)))  # slow, tops 1.3 g
     taps = []
     f = ImuFeed(imu, on_tap=taps.append)
+    f.set_fast(True)                       # 800 Hz: 1.25 ms a sample
     f.motor(3000, 1.0)
     f.motor(3060, 0.0)
     imu.spikes.append((3150, 2, 3000))     # 90 ms after the pulse: blanked
@@ -414,13 +444,192 @@ def test_imu_feed_spikes_blanking_and_rate():
         clock.sleep(30)
         f.poll(clock.now)
     assert taps == [1000, 1500, 2600, 3300], taps
-    assert f.n_blanked == 1
-    assert f.n_rejected == 3               # 30 ms wide, refractory, blanked
+    assert f.n_blanked == 1 and f.n_low == 1
+    assert f.n_rejected == 4               # 12.5 ms wide, refractory, blanked, slow
     assert f.tracker.face_up
     assert abs(f.tracker.gz - 1.0) < 0.1
-    assert f.n_samples == clock.now // 10
+    assert f.dec == FAST_HZ // 50 and f.n_samples == clock.now * FAST_HZ // 1000
     assert f.blanked(3000) and f.blanked(3200) and not f.blanked(3210)
     assert not f.blanked(2999)
+    f.set_fast(False)                      # 100 Hz: knocks are not looked for
+    while clock.now < 5000:
+        clock.sleep(30)
+        f.poll(clock.now)
+    assert len(taps) == 4 and f.n_rejected == 4
+    assert imu.odrs == [FAST_HZ, 100] and f.dec == 2 and f.tracker.face_up
+
+
+class FlakyIMU(FakeIMU):
+    """FakeIMU whose ``set_odr`` fails before the write or after it (in the
+    FIFO flush, with the new rate already set)."""
+
+    def __init__(self, clock):
+        FakeIMU.__init__(self, clock)
+        self.fail = None
+
+    def set_odr(self, hz):
+        if self.fail == "write":
+            raise OSError(5)
+        FakeIMU.set_odr(self, hz)
+        if self.fail == "flush":
+            raise OSError(5)
+
+
+class SlowChipIMU(FakeIMU):
+    """FakeIMU whose sample clock runs 1 % slow against ticks_ms."""
+
+    def fifo_read_mg(self):
+        hz = self.odr
+        k1 = (self.clock.now - self.t0) * hz * 99 // 100000
+        n = min(k1 - self.k, 170)
+        a = self.fifo_mg
+        for i in range(n):
+            t = self.t0 + (self.k + i + 1) * 100000 // (hz * 99)    # ms
+            z = 1000
+            for t0, w, mg in self.spikes:
+                if t0 <= t < t0 + w:
+                    z += mg
+            a[3 * i] = 5
+            a[3 * i + 1] = -4
+            a[3 * i + 2] = z if z < 4000 else 3999
+        self.k = k1
+        return n
+
+
+def _poll_until(clock, f, t_end, steps=(30,)):
+    i = 0
+    while clock.now < t_end:
+        clock.sleep(steps[i % len(steps)])
+        i += 1
+        f.poll(clock.now)
+
+
+def test_imu_feed_irregular_polls_and_spike_width_edges():
+    """At 800 Hz: 1 and 8 samples (1.25, 10 ms) count, 9 (11.25 ms) is too wide;
+    polls at odd intervals keep the times (fractional sample clock)."""
+    from app.imu_feed import ImuFeed
+    clock = Clock(0)
+    imu = FakeIMU(clock, spikes=((1000, 1, 3000), (1500, 8, 3000), (2000, 9, 3000),
+                                 (2600, 2, 3000)))
+    taps = []
+    f = ImuFeed(imu, on_tap=taps.append)
+    f.set_fast(True)
+    _poll_until(clock, f, 3000, (7, 13, 29, 41, 3))
+    assert len(taps) == 3 and f.n_rejected == 1, (taps, f.n_rejected)
+    for t, want in zip(taps, (1000, 1500, 2600)):
+        assert abs(t - want) <= 2, taps
+    assert f.n_samples == imu.k
+
+
+def test_imu_feed_recovers_from_a_knock_as_its_first_sample():
+    """A feed that starts on a fast chip seeds gravity from its first sample;
+    if that is a knock, the run outlasts spike_max_ms, gravity follows again,
+    and later knocks still count."""
+    from app.imu_feed import ImuFeed, FAST_HZ
+    clock = Clock(0)
+    imu = FakeIMU(clock, spikes=((0, 3, 3000), (1000, 2, 3000), (1600, 2, 3000)))
+    imu.odr = FAST_HZ                       # left fast by an earlier run
+    taps = []
+    f = ImuFeed(imu, on_tap=taps.append)
+    assert f.fast and f.hz == FAST_HZ
+    _poll_until(clock, f, 2000)
+    assert taps == [1000, 1600], (taps, f.n_rejected)
+    assert f.n_rejected >= 1                # the run the bad seed held open
+    f.set_fast(False)
+    assert imu.odrs == [100] and not f.fast
+
+
+def test_imu_feed_long_slap_never_holds_the_detector():
+    """A 0.4 s slap is one wide run (rejected), gravity follows it once it is
+    longer than spike_max_ms, and a knock after it still counts."""
+    from app.imu_feed import ImuFeed, FAST_HZ
+    clock = Clock(0)
+    imu = FakeIMU(clock)
+    taps = []
+    f = ImuFeed(imu, on_tap=taps.append)
+    _poll_until(clock, f, 500)              # 100 Hz: gravity settles
+    f.set_fast(True)
+    assert abs((f._st[2] >> f.g_shift) - 1000) <= 4     # carried over at the new scale
+    imu.spikes += [(800, 320, 2500), (1800, 2, 3000)]   # 400 ms slap (320 samples), a knock
+    _poll_until(clock, f, 2500)
+    assert taps == [1800], (taps, f.n_rejected)
+    assert f.n_rejected >= 1 and f._st[6] == 0
+
+
+def test_imu_feed_set_fast_follows_the_chip_on_bus_errors():
+    from app.imu_feed import ImuFeed, FAST_HZ
+    clock = Clock(0)
+    imu = FlakyIMU(clock)
+    f = ImuFeed(imu)
+    imu.fail = "write"                      # nothing reached the chip
+    try:
+        f.set_fast(True)
+        assert False, "no OSError"
+    except OSError:
+        pass
+    assert not f.fast and f.hz == 100 and imu.odr == 100
+    imu.fail = "flush"                      # rate written, flush failed
+    try:
+        f.set_fast(True)
+        assert False, "no OSError"
+    except OSError:
+        pass
+    assert f.fast and f.hz == FAST_HZ and f.dec == FAST_HZ // 50
+    imu.fail = None
+    f.set_fast(True)                        # already there: no second write
+    assert imu.odrs == [FAST_HZ]
+
+
+def test_imu_feed_resyncs_a_slow_chip_clock_within_10_ms():
+    """The chip's 800 Hz runs 1 % slow: the continued batch clock drifts, and
+    is re-anchored before it is 10 ms off (40 ms at 100 Hz would let a spike
+    land before a motor pulse that caused it)."""
+    from app.imu_feed import ImuFeed
+    clock = Clock(0)
+    imu = SlowChipIMU(clock, spikes=((3000, 2, 3000), (5000, 2, 3000)))
+    taps = []
+    f = ImuFeed(imu, on_tap=taps.append)
+    f.set_fast(True)
+    _poll_until(clock, f, 6000, (23, 31))
+    assert len(taps) == 2, taps
+    for t, want in zip(taps, (3000, 5000)):
+        assert abs(t - want) <= 11, taps
+
+
+def test_runtime_exit_slows_the_imu():
+    fakes.install()
+    from hal.radio import SimRadio
+    from finder import tuning as T
+    clock = Clock(0)
+    ra = SimRadio(MAC_A, seed=1).begin()
+    rt = _watch(clock, ra)
+    rt.begin(0)
+    _arm(rt)
+    rt.run(max_ms=500)
+    assert rt.imu.odrs == [T.BUMP_ODR_HZ, 100] and not rt.feed.fast
+
+
+def test_feed_kernel_self_check_catches_a_wrong_kernel():
+    from app import imu_feed as F
+    assert F.KERNEL in ("python", "viper")
+    k = F.feed_kernel
+    assert F.kernel_agrees(k, k)
+
+    def gravity_off(mg, n, st, ev):
+        r = k(mg, n, st, ev)
+        st[F.S_GX + 2] += 1
+        return r
+
+    def no_follow(mg, n, st, ev):           # never frees gravity on a long run
+        st[F.S_RMAX] = 1 << 30
+        return k(mg, n, st, ev)
+
+    def slow_only(mg, n, st, ev):
+        st[F.S_FAST] = 0
+        return k(mg, n, st, ev)
+
+    for bad in (gravity_off, no_follow, slow_only):
+        assert not F.kernel_agrees(k, bad), bad
 
 
 def test_telemetry_ring_and_state_record():
@@ -458,7 +667,7 @@ def test_real_board_drivers_short_run():
     imu = m.add_i2c_device(0, 0x19, {0x00: 0x13})
     tp = m.add_i2c_device(1, 0x38, {0xA3: 0x64})
     clock = Clock(5000)
-    frame = bytes((0, 0, 0, 0, 0x00, 0x20))       # z = +1 g at +-4 g
+    frame = bytes((0, 0, 0, 0, 0x00, 0xE0))       # face-up: z = -1 g (hal/pins.py BMA423_Z_SIGN)
 
     def imu_read(reg, n, _r=imu.read):
         if reg == B.REG_FIFO_LENGTH_0:
@@ -797,7 +1006,7 @@ def test_no_renderer_wake_restores_backlight():
     rt.begin(0)
     rt.renderer = None                     # MicroPython: begin() built a Renderer
     imu.spikes.append((1000, 100000, -2000))   # face down: the screen goes off
-    rt.run(max_ms=5000)
+    rt.run(max_ms=WRIST_DOWN_MS + 2000)
     assert d.asleep and not rt.screen_is_on
     rt.game.on_wake(clock.now)
     rt.run(max_ms=500)
@@ -845,7 +1054,7 @@ def test_wake_lights_a_fresh_frame_and_keeps_motor_timing():
                  clock=clock, sleep_ms=clock.sleep, renderer=_renderer(), gc_collect=lambda: None)
     rt.run(max_ms=1000)
     imu.spikes.append((clock.now, 100000, -2000))    # face down: the screen goes off
-    rt.run(max_ms=4000)
+    rt.run(max_ms=WRIST_DOWN_MS + 2000)
     assert d.asleep and not rt.screen_is_on
     del d.log[:]
     del m.log[:]
@@ -898,31 +1107,53 @@ def test_watchdog_turns_hardware_once_unplugged():
     assert rt.wd.mode == MODE_HW                     # cannot be stopped: still armed
 
 
-def test_touch_down_spike_is_not_a_bump():
-    """ui-spec §6/§8: the accelerometer spike of the finger itself is no bump
-    tap, whether it reaches the game just before or after the touch-down."""
+def _inputs(rt):
+    """Times of the gestures the game took (``game._input`` calls)."""
+    out = []
+    inp = rt.game._input
+    rt.game._input = lambda t: (out.append(t), inp(t))
+    return out
+
+
+def test_a_spike_with_a_touch_counts_and_the_gesture_waits():
+    """ui-spec §6/§8: players knock screen to screen, so a knock touches the
+    panel. Its spike counts whether it reaches the game before or after the
+    touch-down; the touch's gesture waits KNOCK_WAIT_MS for the partner's
+    spike. With no partner (a finger's own spike) it then runs; a touch apart
+    from any spike runs at once."""
+    from finder.tuning import KNOCK_WAIT_MS
     fakes.install()
     from hal.radio import SimRadio
     from app.telemetry import Telemetry
     import json
     clock = Clock(0)
     rt = _watch(clock, SimRadio(MAC_A).begin(),
-                imu_spikes=((4990, 2, 3000), (5250, 2, 3000), (7000, 2, 3000)),
-                touches=((5050, 5350, 120, 120), (8000, 8100, 120, 120)))
+                imu_spikes=((4990, 2, 3000), (7000, 2, 3000)),
+                touches=((5050, 5350, 120, 120), (6980, 7080, 120, 120),
+                         (9000, 9100, 120, 120)))
     rt.tele = Telemetry(cap=200, hz=0)
-    rt.begin(0)
-    _run(rt, clock, 6000)
+    _arm(rt)
+    took = _inputs(rt)
+    _run(rt, clock, 10000)
     ev = [json.loads(s) for s in rt.tele.lines()]
     taps = [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"]
-    assert taps == [(4990, True), (5250, False)], taps   # 4990: before the finger was seen
-    assert rt.game.bump_t is None                    # ... dropped at touch-down
-    assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"]
-    _run(rt, clock, 1500)
-    assert rt.game.bump_t == 7000                    # a real knock still counts
+    assert taps == [(4990, True), (7000, True)], taps
+    assert rt.game.bump_t == 7000
+    assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"] * 3
+    assert len(took) == 3, took
+    assert 4990 + KNOCK_WAIT_MS <= took[0] <= 4990 + KNOCK_WAIT_MS + 110, took
+    assert 7000 + KNOCK_WAIT_MS <= took[1] <= 7000 + KNOCK_WAIT_MS + 110, took
+    assert 9100 <= took[2] < 9300, took
     rt.board.touch.contacts = 2                      # two fingers: ignored (§8)
     n = rt.tele.n
     _run(rt, clock, 1000)
     assert not [s for s in rt.tele.lines(rt.tele.n - n) if '"touch"' in s]
+
+
+def _arm(rt):
+    """Begin with the game always taking bump spikes, so the IMU runs fast."""
+    rt.begin(0)
+    rt.game.bump_armed = lambda: True
 
 
 def _touch_downs(rt):
@@ -935,10 +1166,12 @@ def _touch_downs(rt):
 
 def test_short_taps_count_while_frames_render():
     """ui-spec §8: a 60-400 ms touch is a TAP. A frame takes 40 ms, so touch
-    is also sampled between strips: 70 ms taps at every phase all count."""
+    is also sampled between strips, TOUCH_GAP_MS apart: 70 ms taps at every
+    phase all count, and each touch-down is seen within a gap and a strip."""
     fakes.install()
     from hal.radio import SimRadio
     from app.telemetry import Telemetry
+    from app import runtime as rtm
     import json
     clock = Clock(0)
     taps = [(5000 + 507 * i, 5070 + 507 * i, 120, 120) for i in range(40)]
@@ -947,15 +1180,24 @@ def test_short_taps_count_while_frames_render():
     rt.tele = Telemetry(cap=400, hz=0)
     rt.begin(0)
     downs = _touch_downs(rt)
+    reads = []
+    rd = rt.touch.read
+    rt.touch.read = lambda: (reads.append(clock.now), rd())[1]
     _run(rt, clock, 26000)
     ev = [json.loads(s) for s in rt.tele.lines()]
     assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"] * 40, ev
-    assert len(downs) == 40 and all(0 <= d - t[0] <= 10 for d, t in zip(downs, taps)), downs
+    late = rtm.TOUCH_GAP_MS + 4
+    assert len(downs) == 40 and all(0 <= d - t[0] <= late for d, t in zip(downs, taps)), downs
+    gaps = [b - a for a, b in zip(reads, reads[1:])]
+    assert min(gaps) >= 0 and max(gaps) <= late, (min(gaps), max(gaps))
+    assert len(reads) <= 26000 // 12, len(reads)   # not after every 2nd 4 ms strip
 
 
-def test_finger_spike_after_a_mid_frame_touch_down():
-    """A touch-down sampled between strips reaches the game before the next
-    FIFO read, so the finger's spike just after it is no bump (§6)."""
+def test_knock_spike_after_a_mid_frame_touch_down():
+    """A touch-down sampled between strips, then the knock's spike: the spike
+    counts, and the imu stage runs before the touch stage, so the gesture
+    finds it and waits for the partner (§8); with none it runs late."""
+    from finder.tuning import KNOCK_WAIT_MS
     fakes.install()
     from hal.radio import SimRadio
     from app.telemetry import Telemetry
@@ -965,17 +1207,21 @@ def test_finger_spike_after_a_mid_frame_touch_down():
                 touches=((5020, 5150, 120, 120),))
     rt.board.display = SlowDisplay(clock)
     rt.tele = Telemetry(cap=200, hz=0)
-    rt.begin(0)
+    _arm(rt)
+    took = _inputs(rt)
     _run(rt, clock, 6000)
     ev = [json.loads(s) for s in rt.tele.lines()]
-    assert [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"] == [(5030, False)], ev
-    assert rt.game.bump_t is None
+    assert [(e["t"], e["ok"]) for e in ev if e["ev"] == "tap"] == [(5030, True)], ev
+    assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"], ev
+    assert rt.game.bump_t == 5030 and len(took) == 1 and took[0] >= 5030 + KNOCK_WAIT_MS, took
 
 
-def _bump_in_hot(t0, finger):
+def _bump_in_hot(t0, finger, knocks=()):
     """Two Runtimes on connected SimRadios, paired and both in HOT; both
-    accelerometers spike at ``t0`` and, with ``finger``, A's screen is tapped
-    then (touch-down 70 ms after the spike). Runs to ``t0`` + 1.2 s."""
+    accelerometers spike at ``t0`` and, with ``finger``, A's screen is touched
+    by the knock (touch-down 70 ms after the spike). Each time in ``knocks``
+    is one more knock on both, touching A's screen too. Runs to the last
+    knock + 1.2 s."""
     fakes.install()
     from hal.radio import SimRadio
     from hal.axp202 import EV_SHORT
@@ -985,16 +1231,20 @@ def _bump_in_hot(t0, finger):
     ra = SimRadio(MAC_A, seed=11).begin()
     rb = SimRadio(MAC_B, seed=22).begin()
     ra.connect(rb, rssi=-50)
-    a = _watch(clock, ra, imu_spikes=((t0, 2, 3000),), buttons=((1000, EV_SHORT),),
-               touches=((t0 + 70, t0 + 160, 120, 120),) if finger else ())
-    b = _watch(clock, rb, imu_spikes=((t0, 2, 3000),), buttons=((1100, EV_SHORT),))
+    spikes = tuple((t, 2, 3000) for t in (t0,) + tuple(knocks))
+    touches = tuple((t + 20, t + 110, 120, 120) for t in knocks)
+    if finger:
+        touches = ((t0 + 70, t0 + 160, 120, 120),) + touches
+    a = _watch(clock, ra, imu_spikes=spikes, buttons=((1000, EV_SHORT),), touches=touches)
+    b = _watch(clock, rb, imu_spikes=spikes, buttons=((1100, EV_SHORT),))
     rts = (a, b)
     for rt in rts:
         rt.begin(0)
         rt.game.pair.split_s = 1           # short split countdown
         rt.game.buzz = BUZZ_OFF            # no motor pulse can blank a spike
     hot = False
-    while clock.now < t0 + 1200:
+    end = (knocks[-1] if knocks else t0) + 1200
+    while clock.now < end:
         if not hot and clock.now >= t0 - 50:
             hot = True
             for rt in rts:
@@ -1005,20 +1255,23 @@ def _bump_in_hot(t0, finger):
             if d < w:
                 w = d
         clock.sleep(w if w > 0 else 1)
-    assert a.feed.n_taps == 1 and b.feed.n_taps == 1, (a.feed.n_taps, b.feed.n_taps)
+    n = 1 + len(knocks)
+    assert a.feed.n_taps == n and b.feed.n_taps == n, (a.feed.n_taps, b.feed.n_taps)
     return a.game, b.game
 
 
-def test_withdrawn_finger_spike_never_reaches_the_partner():
-    """ui-spec §6, rule 10: a spike withdrawn by a touch-down that follows it
-    was never a bump, on either watch. It is neither matched nor sent in
-    beacons until it is 100 ms old, so the partner's own knock 0 ms apart
-    finds nothing to match; without the finger, both watches enter FOUND."""
+def test_a_knock_that_touches_the_screen_is_found_on_both():
+    """ui-spec §6, rule 10: screen-to-screen knocks touch the panel; the touch
+    never withdraws the spike, so both watches enter FOUND, finger or not.
+    Knocks that go on after FOUND (on TAP=AGAIN) start no new round (§8)."""
     from finder.game import M_FOUND
+    from finder import tuning as T
     ga, gb = _bump_in_hot(7960, finger=True)
-    assert ga.mode != M_FOUND and gb.mode != M_FOUND, (ga.mode, gb.mode)
-    assert ga.bump_t is None and gb.peer.tap_t is None, (ga.bump_t, gb.peer.tap_t)
+    assert ga.mode == M_FOUND and gb.mode == M_FOUND, (ga.mode, gb.mode)
     ga, gb = _bump_in_hot(7960, finger=False)
+    assert ga.mode == M_FOUND and gb.mode == M_FOUND, (ga.mode, gb.mode)
+    k = 7960 + T.FOUND_CELEBRATE_MS
+    ga, gb = _bump_in_hot(7960, finger=True, knocks=(k + 300, k + 900))
     assert ga.mode == M_FOUND and gb.mode == M_FOUND, (ga.mode, gb.mode)
 
 
@@ -1068,8 +1321,9 @@ def test_touch_that_lands_in_the_wake_window_is_ignored():
     fakes.install()
     from hal.radio import SimRadio
     clock = Clock(0)
-    rt = _watch(clock, SimRadio(MAC_A).begin(), imu_spikes=((1000, 400, -2000),))
-    _run(rt, clock, 4500)                  # face down 1-5 s: the screen goes off
+    down = WRIST_DOWN_MS + 1000
+    rt = _watch(clock, SimRadio(MAC_A).begin(), imu_spikes=((1000, down // 10, -2000),))
+    _run(rt, clock, down + 500)            # face down 1 s on: the screen goes off
     g = rt.game
     assert not g.screen_on
     while not g.screen_on:                 # face up: wake
@@ -1302,7 +1556,7 @@ def test_bma423_feature_engine_started_and_polled():
     g.on_wake = on_wake
     dev.regs[0x1E] = 10
     dev.regs[0x27] = 1                     # walking
-    rt.run(max_ms=2500)                    # no FIFO samples: face down, dark after 2 s
+    rt.run(max_ms=WRIST_DOWN_MS + 500)     # no FIFO samples (no tilt), not face-up: dark
     assert rt.feed.tracker.chip_live and not woke and not g.screen_on
     dev.regs[0x1E] = 30
     dev.regs[0x1C] = 0x08                  # wrist-wear latched
@@ -1391,7 +1645,7 @@ def test_bma423_feature_engine_pending_then_missing():
         assert imu.calls[1:] == (["on"] if ok else [])
 
 
-class FlakyIMU(ChipIMU):
+class FlakyChipIMU(ChipIMU):
     """``ChipIMU`` whose first ``fails`` starts raise OSError, as a NACK
     mid-upload does; ``starts`` holds the clock time of every start."""
 
@@ -1417,7 +1671,7 @@ def _imu_runtime(imu, clock):
 def _flaky_run(ok, fails):
     fakes.install()
     clock = Clock(0)
-    imu = FlakyIMU(clock, ok, fails)
+    imu = FlakyChipIMU(clock, ok, fails)
     rt = _imu_runtime(imu, clock)
     rt.begin(0)
     rt.run(max_ms=6000)
@@ -1843,6 +2097,23 @@ def test_debug_usb_link_keeps_up_while_frames_render():
     assert port.overfill() is None
 
 
+def test_debug_usb_fps_line_rides_the_link():
+    """With the USB link on, the fps line goes through it as a whole text
+    line between records (a print could land inside one), not to log_line."""
+    clock = Clock(0)
+    rt, link, port = _usb_watch(clock, SlowDisplay(clock, 4))
+    rt.fps_log_ms = 2000
+    printed = []
+    rt.log_line = printed.append
+    _usb_run(rt, 4500)
+    link.drain()
+    assert printed == [] and port.overfill() is None
+    lines = port.data().split(b"\n")[:-1]
+    text = [ln for ln in lines if ln[:1] != b"\x1e"]
+    assert len(text) == 2 and all(ln.startswith(b"fps ") for ln in text), text
+    assert all(ln.count(b"\x1e") == 1 for ln in lines if ln[:1] == b"\x1e")
+
+
 def test_debug_usb_pump_reads_the_clock_after_the_record():
     """Building and queueing the 5 Hz records takes a few ms on the watch:
     the pump after them reads the clock again, so the FIFO model never
@@ -1882,3 +2153,78 @@ def test_debug_send_errors_never_stop_the_loop():
         assert not any(rt.io_errors)
     finally:
         restore()
+
+
+class CostDisplay(SlowDisplay):
+    """Strips cost ``costs[k % len]`` ms in turn (a frame ~70-90 ms)."""
+
+    def __init__(self, clock, costs=(7, 8, 9)):
+        SlowDisplay.__init__(self, clock)
+        self.costs = costs
+
+    def push_strip(self, y0, h, buf):
+        self.clock.now += self.costs[self.pushes % len(self.costs)]
+        self.pushes += 1
+
+
+def _paced_watch(clock, display, **kw):
+    from app.runtime import Runtime
+    rt = Runtime(Board(display=display, imu=FakeIMU(clock), haptics=RecMotor(clock)),
+                 parts=("display", "imu", "haptics"), clock=clock, sleep_ms=clock.sleep,
+                 renderer=_renderer(), gc_collect=lambda: None, **kw)
+    drawn = []                               # (the frame's time, real time) when drawn
+    frame = rt.renderer.frame
+
+    def rec(p, disp, now):
+        if disp is not None:
+            drawn.append((now, clock.now))
+        return frame(p, disp, now)
+    rt.renderer.frame = rec
+    return rt, drawn
+
+
+def test_frame_lock_holds_what_slow_frames_fit_and_steps_evenly():
+    """ui-spec §4 rule 6: 70-90 ms frames cannot hold 20 fps, so the lock
+    drops to 10 at once; every frame then animates exactly 100 ms on from the
+    one before and starts on its slot (nothing else costs time here)."""
+    fakes.install()
+    clock = Clock(0)
+    rt, drawn = _paced_watch(clock, CostDisplay(clock))
+    rt.run(max_ms=6000)
+    pc = rt.pacer
+    assert pc.fps == 10 and pc.changes == 1, (pc.fps, pc.changes)
+    late = [x for x in drawn if x[0] >= 1000]
+    assert len(late) >= 45, len(late)
+    for k in range(len(late) - 1):
+        assert late[k + 1][0] - late[k][0] == 100, late[k:k + 2]
+        assert late[k][1] == late[k][0], late[k]       # drawn on its slot
+    assert 9.5 <= rt.fps <= 10.5, rt.fps
+
+
+def test_fps_line_reports_lock_misses_and_jitter():
+    fakes.install()
+    clock = Clock(0)
+    rt, drawn = _paced_watch(clock, CostDisplay(clock), fps_log_ms=2000)
+    lines = []
+    rt.log_line = lines.append
+    rt.run(max_ms=6500)
+    assert len(lines) == 3, lines
+    w = lines[-1].split()
+    assert w[0::2] == ["fps", "lock", "miss", "late", "jit", "max", "cost", "gc", "log"], w
+    v = dict(zip(w[0::2], w[1::2]))
+    assert 9.0 <= float(v["fps"]) <= 10.5 and v["lock"] == "10" and v["miss"] == "0", v
+    assert v["late"] == "0/0", v                    # the fake loop wakes on the slot
+    assert int(v["max"]) <= 103 and float(v["jit"]) < 3.0, v   # strips 7-9 ms
+    assert 70 <= int(v["cost"]) <= 90, v
+    w0 = lines[0].split()
+    assert w0[3] == "20" or w0[3] == "10", w0       # first window: the drop shows
+
+
+def test_fps_line_off_by_default():
+    fakes.install()
+    clock = Clock(0)
+    rt, drawn = _paced_watch(clock, CostDisplay(clock))
+    lines = []
+    rt.log_line = lines.append
+    rt.run(max_ms=12000)
+    assert lines == []

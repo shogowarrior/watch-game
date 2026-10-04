@@ -24,7 +24,12 @@ def test_roundtrip_all_fields():
     r = proto.Beacon().unpack_from(buf)
     assert (r.game_id, r.seq, r.rssi_last, r.rssi_filt, r.steps) == (7, 65535, -71, -64, 1234)
     assert (r.activity, r.battery, r.state, r.bump_ago_ms) == (2, 88, 3, 420)
-    assert r.sweeping and r.walking and r.taps == 5
+    assert r.sweeping and r.walking and r.taps == 5 and not r.ready
+    b.set_flags(taps=2, ready=True)                 # READY (PAIRING split): bit 5
+    r = proto.Beacon().unpack_from(b.pack_into(bytearray(proto.SIZE)))
+    assert r.ready and r.taps == 2 and not r.sweeping and not r.walking and r.flags == 0x24
+    b.set_flags(sweeping=True, taps=5, walking=True)
+    buf = b.pack_into(bytearray(proto.SIZE))
     # matches struct's own decoding
     t = struct.unpack_from(proto.FMT, buf, 0)
     assert t[0] == proto.MAGIC and t[4] == -71 and t[11] == 420

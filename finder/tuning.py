@@ -6,7 +6,7 @@ Plain constants only; blocks marked 'ui-spec only' come from ui-spec.md.
 """
 
 TOKENS_VERSION = '0.2.0'
-TOKENS_HASH = '5dc7468eb630ab03'
+TOKENS_HASH = '471ac7fada25b8bd'
 
 # ---- Zones (thresholds.zones_m): boundary k is between zone k and k+1
 ZONE_FAR = 0
@@ -29,7 +29,7 @@ ZONE_PERIOD_MS = (2400, 1600, 1000, 500)  # ring spawn = heartbeat base period
 ZONE_SPEED_PX_S = (40.0, 56.0, 80.0, 120.0)
 ZONE_LEAD_PX = (3, 3, 3, 3)
 ZONE_TRAIL_PX = (22, 20, 18, 14)
-ZONE_HEARTBEAT = ('TICK', 'TICK', 'DOUBLE', 'TICK')
+ZONE_HEARTBEAT = ('TICK', 'TICK', 'DOUBLE', None)
 ZONE_HB_EVERY = (2, 1, 1, 1)  # play on every Nth live ring
 
 # ---- Intensity map (field.intensity_map)
@@ -119,8 +119,13 @@ BUMP_WINDOW_MS = 400  # both bump spikes within this
 FALLBACK_PRESS_WINDOW_MS = 3000
 FALLBACK_MAX_BAND = 1  # band <= '~5'
 
+# ---- Bump spike (thresholds.bump_spike, provisional)
+BUMP_SPIKE_G = 1.0  # a spike peaks at gravity-removed |a| >= this (§6 HOT)
+BUMP_RUN_G = 0.5  # its run: samples above this ...
+BUMP_SPIKE_MS = (0, 10)  # ... one sample up to this wide
+
 # ---- Saver and backlight (states.LOW_BATTERY, power.backlight)
-SAVER_FPS = 15
+SAVER_FPS = 10
 SAVER_PULSE_SCALE = 0.7
 SAVER_V_MAX = 5.0
 SAVER_BACKLIGHT = 0.35
@@ -249,6 +254,7 @@ LABEL_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ~<>+%:-?,/'
 
 # ---- Motion (motion)
 FPS_TARGET = 20
+FPS_LOCKS = (20, 10, 8, 7, 6, 5)  # frame lock rates, fastest first (app/pacer.py)
 BREATHE_PAIRING_MS = 2400  # PAIRING seen halo breathing
 TOAST_MS = 2500
 ZONE_CROSSFADE_MS = 600
@@ -347,8 +353,8 @@ WAVELENGTH_MAX_PX = 140.0
 WAVELENGTH_TOL_PX = 1.0  # wavelength == |speed| * period / 1000 within this
 GLOW_R_MAX_PX = 96.0
 CONE_DRAW_MIN_DEG = 12.0  # cone half-angle is clamped to 12..60 for drawing
-FPS_CAP_MIN = 12
-FPS_CAP_MAX = 20
+FPS_CAP_MIN = 5  # the slowest frame lock (motion.fps.locks)
+FPS_CAP_MAX = 20  # the fastest frame lock (motion.fps.locks)
 COUNTDOWN_MAX = 99  # 2-digit type.display countdown (split 30..0)
 
 # ---- ui-spec only: Per-screen field extras (ui-spec §6)
@@ -383,15 +389,24 @@ SCAN_PEER_WALK_FAIL_MS = 4000  # > 4 s: no fix, FRIEND MOVED
 SCAN_HOLD_REPEAT_MS = 3000  # partner HOLD haptic repeat
 SCAN_HOLD_REPEAT_MAX = 3
 
+# ---- ui-spec only: Frame lock (ui-spec §4 rule 6; app/pacer.py)
+FPS_COST_N = 16  # frame cost = 2nd largest busy ms of the last 16 frames
+FPS_MARGIN_PCT = 10  # a faster lock needs cost + 10 % to fit its period
+FPS_RAISE_MS = 3000  # ... for this long before the lock rises one step
+FPS_LOG_MS = 10000  # serial fps line period (main.py)
+
 # ---- ui-spec only: Pairing, found, battery, power, input (ui-spec §6, §8)
 PAIR_SPLIT_S = 30
 PAIR_GO_MS = 1000  # split: GO shown 1 s at 0
+PAIR_READY_HINT_MS = 5000  # split: chip TAP WHEN READY from 5 s in
+PAIR_READY_LEFT_S = 3  # split: both ready -> the countdown jumps to 3
 CAL_GATE_WINDOW_MS = 1000  # RSSI sd over 1 s > unstable_sd pauses the fill
 SEARCHING_WALK_ABOUT_MS = 45000
-BUMP_TOUCH_GUARD_MS = 300  # ignore taps 300 ms after a screen touch
-BUMP_TOUCH_LEAD_MS = 100  # ... and from 100 ms before its touch-down (§8)
-BUMP_SPIKE_G = 2.5  # gravity-removed |a| above this (§6 HOT)
-BUMP_SPIKE_MS = (10, 20)  # spike run length min..max
+KNOCK_TOUCH_BEFORE_MS = 300  # a touch whose touch-down a counted spike precedes by up to this
+KNOCK_TOUCH_AFTER_MS = 100  # ... or follows by up to this may be a knock's (§8) ...
+# ... so it waits this long after the spike for the partner's: a knock spikes both watches, a finger only its own
+KNOCK_WAIT_MS = 500
+BUMP_ODR_HZ = 800  # accelerometer rate while a bump can count
 BUMP_REFRACTORY_MS = 200
 BUMP_READY_HOLD_MS = 1500  # band <3 held 1.5 s
 BUMP_READY_BAND = 0  # index of '<3'
@@ -407,7 +422,9 @@ GOODBYE_GRACE_MS = 1000  # power off this long after the BYE word (§6 LOW-BATTE
 LOST_TIMER_MAX_S = 599  # m:ss up to 9:59, then 10M+
 LOST_HINT_AFTER_MS = 20000  # GO BACK / KEEP ON
 WAKE_BOOST_MS = 3000
-WRIST_DOWN_MS = 2000
+WRIST_DOWN_MS = 10000  # on battery: screen off once lowered this long (§8)
+WRIST_DOWN_DEG = 60  # lowered: tilted more than this from face-up
+SCAN_READY_DOWN_MS = 2000  # scan ready: cancels once not flat this long
 IDLE_DIM_MS = 30000
 IDLE_DIM_BACKLIGHT = 0.35  # ui-spec §8: face-up > 30 s with no input
 STATUS_AFTER_WAKE_MS = 3000
@@ -422,7 +439,6 @@ WAKE_TOUCH_IGNORE_MS = 300
 TOUCH_BURST_COUNT = 3  # >= 3 touches in 1 s ...
 TOUCH_BURST_WINDOW_MS = 1000
 TOUCH_BURST_IGNORE_MS = 2000  # ... ignore touches for 2 s
-BUMP_TAP_IGNORE_MS = 400  # HOT: touch within 400 ms of an accel tap is a bump
 MENU_AUTOCLOSE_MS = 8000
 MENU_CONFIRM_MS = 3000
 MENU_ROWS_Y = (32, 76, 120, 164)

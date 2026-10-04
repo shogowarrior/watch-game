@@ -140,7 +140,7 @@ class SerialLink:
     def __init__(self, dev="A", out=None):
         self.dev = dev
         self.out = sys.stdout.buffer if out is None else out
-        self.n_tx = 0            # records written out
+        self.n_tx = 0            # lines written out (records and log lines)
         self.drop = 0
         self.tx_err = 0
         self.err = None          # the last write error
@@ -156,13 +156,23 @@ class SerialLink:
         """Queue one record (str or UTF-8 bytes of compact JSON); False when it
         was dropped."""
         b = data.encode() if isinstance(data, str) else data
-        n = len(b) + 2
+        return self._queue(b"\x1e" + b + b"\n")
+
+    def log(self, text):
+        """Queue one plain text line (the runtime's fps line): a ``print``
+        could land inside a record still being written. The bridge shows it as
+        a text line; False when it was dropped."""
+        return self._queue(text.encode() + b"\n")
+
+    def _queue(self, line):
+        """Queue one whole line cut into pieces (allocates: 5 Hz at most)."""
+        n = len(line)
         a = SERIAL_FIFO - self._end           # the first piece fills up the last FIFO load
         k = 1 if n <= a else 1 + (n - a + SERIAL_FIFO - 1) // SERIAL_FIFO
         if self.queued + n > SERIAL_QMAX or self._n + k > SERIAL_SLOTS:
             self.drop += 1
             return False
-        line = memoryview(b"\x1e" + b + b"\n")
+        line = memoryview(line)
         q = self._q
         i = (self._h + self._n) % SERIAL_SLOTS
         q[i] = line[:a]
@@ -220,7 +230,7 @@ class SerialLink:
         if not self._n:
             self._end = 0
         self.queued -= len(p)
-        if p[-1] == 10:          # the line's last piece: the record is out
+        if p[-1] == 10:          # the line's last piece: the line is out
             self.n_tx += 1
         return True
 
@@ -327,6 +337,11 @@ class DebugLink:
             return False
         self.n_tx += 1
         return True
+
+    def log(self, text):
+        """The runtime's fps line: printed, as without debug mode (the records
+        go over the Wi-Fi, never on the USB port)."""
+        print(text)
 
     def pump(self, now):
         """Nothing waits: each datagram left in ``send``."""

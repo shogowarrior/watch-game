@@ -139,8 +139,8 @@ What the table shows:
 
 ## 5. Recommendation
 
-**What was built.** The BMA423 runs at ±4 g with a 100 Hz FIFO, block-averaged to
-25 Hz for `MotionTracker` (`app/imu_feed.py`). The arrow decays with the σ-cone
+**What was built.** The BMA423 runs at ±4 g with a 100 Hz FIFO (800 Hz while a
+bump can count, for the bump detector), block-averaged to 25 Hz for `MotionTracker` (`app/imu_feed.py`). The arrow decays with the σ-cone
 model (`finder/arrow.py`, ui-spec §5.6), not with the half-life decay below,
 which the game does not use (ui-spec §5.6). The
 probe (`WALK TEST`, R-15) is not built. The range filter is `kalman2`

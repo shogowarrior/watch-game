@@ -11,7 +11,8 @@
      10 B   activity     ACT_* code (finder.estimators.base)
      11 B   battery      percent 0..100, BATT_UNKNOWN if unknown
      12 B   game_state   screen code + ST_* bits, see finder/session.py (bump VERSION if it changes)
-     13 B   flags        bit0 sweeping, bits1-3 tap counter (mod 8), bit4 walking
+     13 B   flags        bit0 sweeping, bits1-3 tap counter (mod 8), bit4 walking,
+                         bit5 ready (PAIRING split: this player tapped READY)
      14 H   bump_ago_ms  ms since my last bump spike; BUMP_NONE = none / too old
 
 Packing uses ``struct.pack_into`` into a caller-owned buffer; decoding reads
@@ -35,6 +36,7 @@ F_SWEEP = const(0x01)
 F_TAPS = const(0x0E)
 F_TAPS_SHIFT = const(1)
 F_WALK = const(0x10)
+F_READY = const(0x20)
 
 _M0 = const(0x53)  # "S"
 _M1 = const(0x4B)  # "K"
@@ -110,10 +112,11 @@ class Beacon:
         self.seq = (self.seq + 1) & 0xFFFF
         return self.seq
 
-    def set_flags(self, sweeping=False, taps=0, walking=False):
+    def set_flags(self, sweeping=False, taps=0, walking=False, ready=False):
         self.flags = ((F_SWEEP if sweeping else 0)
                       | ((taps & 7) << F_TAPS_SHIFT)
-                      | (F_WALK if walking else 0))
+                      | (F_WALK if walking else 0)
+                      | (F_READY if ready else 0))
 
     def set_bump(self, now_ms, bump_t):
         self.bump_ago_ms = bump_ago(now_ms, bump_t)
@@ -125,6 +128,10 @@ class Beacon:
     @property
     def walking(self):
         return bool(self.flags & F_WALK)
+
+    @property
+    def ready(self):
+        return bool(self.flags & F_READY)
 
     @property
     def taps(self):

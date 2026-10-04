@@ -335,39 +335,140 @@ def build_map(rows):
     return buf
 
 
-class RingMap:
-    """Ring-index map blitted into RGB565 strips through a palette.
+def build_quadrant(full):
+    """Top-right quadrant of a full map (rows 0..119, columns 120..239;
+    14.4 KB): every other pixel mirrors one of these."""
+    q = bytearray(120 * 120)
+    for r in range(120):
+        q[r * 120:(r + 1) * 120] = full[r * W + 120:(r + 1) * W]
+    return q
 
-    ``full=False`` (default) keeps only the top half (28.8 KB): top strips are
-    one offset blit, bottom strips blit row by row from the mirrored row
-    (y -> 239 - y) into 240x1 row FrameBuffers over the strip. ``full=True``
-    keeps the whole 57.6 KB map and does one offset blit per strip.
+
+# ---- strip blit kernel --------------------------------------------------------
+# Strip rows y0..y0+h-1 through the palette into ``dst``, from the map's
+# quadrant ``q`` (build_quadrant): row y reads quadrant row y (y < 120) or
+# 239 - y, and each palette colour lands at x and its mirror 239 - x. Four
+# map bytes per pass (one 32-bit load, four palette lookups) give eight
+# pixels (four 32-bit stores, little-endian as framebuf stores RGB565): half
+# the map reads and lookups of a straight blit, which on the watch run from
+# the PSRAM heap. Compiled with @micropython.viper where the port supports it
+# (the ESP32 build; RingMap checks it against the framebuf path before use);
+# elsewhere RingMap uses the framebuf palette blit.
+_BSRC = """
+def blit_kernel(dst, q, pal, y0: int, h: int):
+    dp = ptr32(dst)
+    qp = ptr32(q)
+    pp = ptr16(pal)
+    row = 0
+    while row < h:
+        y = y0 + row
+        if y < 120:
+            i = y * 30
+        else:
+            i = (239 - y) * 30
+        e = i + 30
+        rt = row * 120 + 60
+        lt = rt - 2
+        while i < e:
+            w = qp[i]
+            c0 = pp[w & 0xFF]
+            c1 = pp[(w >> 8) & 0xFF]
+            c2 = pp[(w >> 16) & 0xFF]
+            c3 = pp[(w >> 24) & 0xFF]
+            dp[rt] = c0 | (c1 << 16)
+            dp[rt + 1] = c2 | (c3 << 16)
+            dp[lt] = c3 | (c2 << 16)
+            dp[lt + 1] = c1 | (c0 << 16)
+            rt += 2
+            lt -= 2
+            i += 1
+        row += 1
+"""
+
+
+def _compile_blit():
+    try:
+        vs = {}
+        exec("@micropython.viper" + _BSRC, vs)
+    except Exception:  # noqa: BLE001 - no viper (CPython, wasm)
+        return None
+    return vs["blit_kernel"]
+
+
+blit_kernel = _compile_blit()
+
+
+def _aligned(b):
+    """True if ``b``'s bytes start on a 4-byte boundary (32-bit loads and
+    stores on the ESP32 fault otherwise); True where there is no uctypes."""
+    try:
+        import uctypes
+    except ImportError:
+        return True
+    return uctypes.addressof(b) & 3 == 0
+
+
+class RingMap:
+    """Ring-index map (240x240 GS8, 57.6 KB) blitted into RGB565 strips
+    through a palette, top to bottom: with the viper ``blit_kernel`` (``kind``
+    "viper", reading the map's quadrant) once it matches the framebuf path on
+    ``bufs`` (the strip buffers it will write), else a framebuf palette blit
+    (``kind`` "framebuf").
     """
 
-    def __init__(self, strip_buf, strip_h, full=False):
-        self.full = full
-        rows = 240 if full else 120
-        self.idx = build_map(rows)
+    def __init__(self, strip_h, bufs, kernel=None):
+        self.idx = build_map(W)
         self.h = strip_h
+        self.kern = None
+        self.q = None
+        self.kind = "framebuf"
         if framebuf is None:
+            self.kind = None
             return
-        self.map_fb = framebuf.FrameBuffer(self.idx, W, rows, framebuf.GS8)
-        self.strip_fb = framebuf.FrameBuffer(strip_buf, W, strip_h, framebuf.RGB565)
-        mv = memoryview(strip_buf)
-        self.rows = [framebuf.FrameBuffer(mv[k * W * 2:(k + 1) * W * 2], W, 1, framebuf.RGB565)
-                     for k in range(strip_h)]
+        self.map_fb = framebuf.FrameBuffer(self.idx, W, W, framebuf.GS8)
+        k = blit_kernel if kernel is None else kernel
+        if k is not None:
+            self.q = build_quadrant(self.idx)
+            ok = _aligned(self.q)
+            for b in bufs:
+                ok = ok and _aligned(b)
+            if ok and self.agrees(k, bufs[0]):
+                self.kern = k
+                self.kind = "viper" if kernel is None else "kernel"
+            else:
+                self.q = None
+                self.kind = "framebuf (kernel self-check failed)"
 
-    def blit(self, y0, pal):
-        """Paint strip rows y0..y0+h-1 of the field into the strip buffer."""
-        if self.full or y0 + self.h <= 120:
-            self.strip_fb.blit(self.map_fb, 0, -y0, -1, pal)
+    def agrees(self, kern, buf):
+        """True if ``kern`` writes the same strips into ``buf`` as the
+        framebuf path, at the top, across the middle row and at the bottom,
+        through a palette of distinct colours. Leaves ``buf`` dirty (the
+        next frame redraws it)."""
+        arr = array.array("H", [(i * 4099 + 0x1235) & 0xFFFF for i in range(256)])
+        pal = framebuf.FrameBuffer(arr, 256, 1, framebuf.RGB565)
+        fb = framebuf.FrameBuffer(buf, W, self.h, framebuf.RGB565)
+        k = self.kern
+        try:
+            for y0 in (0, 120 - self.h // 2, W - self.h):
+                self.kern = None
+                self.blit(y0, pal, arr, buf, fb)
+                want = bytes(buf)
+                fb.fill(0x5A5A)               # so a pixel the kernel skips shows
+                kern(buf, self.q, arr, y0, self.h)
+                if bytes(buf) != want:
+                    return False
+            return True
+        finally:
+            self.kern = k
+
+    def blit(self, y0, pal, arr, buf, fb):
+        """Field rows y0..y0+h-1 into the strip ``buf`` (``fb`` its
+        FrameBuffer). ``pal``: the palette as a framebuf, ``arr``: its array."""
+        k = self.kern
+        if k is not None:
+            k(buf, self.q, arr, y0, self.h)
             return
-        rows = self.rows
-        mfb = self.map_fb
-        for k in range(self.h):
-            y = y0 + k
-            src = y if y < 120 else 239 - y
-            rows[k].blit(mfb, 0, -src, -1, pal)
+        fb.blit(self.map_fb, 0, -y0, -1, pal)
 
 
 # ---- screen tables ----------------------------------------------------------

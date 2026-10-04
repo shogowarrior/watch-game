@@ -15,7 +15,7 @@ from finder.pairing import Calibrator, Pairing, rune_ids, fnv1a32, UNSTABLE_SHOW
 from finder.session import (PeerView, LiveMirror, fmt_mss, screen_code, SC_PAIRING, SC_FAR,
                             SC_NEAR, SC_WARM, SC_HOT, SC_FOUND, SC_SCANNING, SC_PAIRED, SC_BYE,
                             SC_MASK, ST_PRESS, ST_GOODBYE, ST_CONFIRMED, ST_TAP_HOT)
-from finder.gestures import GestureRecognizer
+from finder.gestures import GestureRecognizer, TAP as G_TAP
 from finder.render_params import validate
 from finder.estimators import NAMES, make
 from finder.estimators.base import RangeEstimator, MotionInfo, ACT_STILL, ACT_WALK
@@ -100,7 +100,10 @@ class Rig:
                     if not drop or self.n_pk % drop:
                         self.packet(t=k)
                     k += every
-            self.g.set_motion(self.t, self.activity, self.steps, 0.0, self.tilt, self.face_up)
+            tilt = self.tilt
+            if not self.face_up and tilt < 30.0:
+                tilt = 90.0           # lowered: the wrist hangs (unless a test tilts it)
+            self.g.set_motion(self.t, self.activity, self.steps, 0.0, tilt, self.face_up)
             p = self.g.tick(self.t)
             v = validate(p)
             assert not v, (self.t, p.screen, p.sub, v)
@@ -152,6 +155,42 @@ def hot_rig(d=2.0):
     r.run(2000)
     assert r.p.screen == "HOT"
     return r
+
+
+def test_bump_armed_only_where_a_spike_can_count():
+    """The IMU samples fast only in HOT, FOUND and PAIRING seen / confirmed (§6, §8)."""
+    r = Rig()
+    assert not r.g.bump_armed()                 # looking
+    r.rssi = -50
+    r.run(600)
+    assert r.g.pair.sub == "seen" and r.g.bump_armed()
+    r.g.on_button(r.t)
+    r.run(100)
+    assert r.g.pair.sub == "confirmed" and r.g.bump_armed()
+    r.state = SC_PAIRED | ST_CONFIRMED          # the partner confirms second: calibrate
+    r.rssi = -45
+    r.run(200)
+    assert r.g.pair.sub == "calibrate" and not r.g.bump_armed()
+    r.run(4300)
+    assert r.g.pair.sub == "split" and not r.g.bump_armed()
+    assert not warm_rig().g.bump_armed()
+    h = hot_rig()
+    assert h.g.bump_armed()
+    h.g.on_button(h.t)                          # second press in HOT: a scan, nothing to bump
+    h.g.on_button(h.t + 300)
+    assert h.g.mode == M_SCANNING and not h.g.bump_armed()
+    h = hot_rig()
+    _found_by_press(h)
+    assert h.g.bump_armed()                     # FOUND: knocks that go on are seen (§8)
+    s = Rig()                                   # split with no link: SEARCHING
+    s.rssi = -50
+    s.run(600)
+    s.g.on_button(s.t)
+    s.state = SC_PAIRED | ST_CONFIRMED
+    s.rssi = -45
+    s.run(4500)
+    s.run(31500, packets=False)
+    assert s.g.mode == M_SEARCHING and not s.g.bump_armed()
 
 
 def _found_by_press(r):
@@ -417,6 +456,113 @@ def test_split_length_is_settable():
     assert pr.sub == "done" and t == 1000 + 5000 + T.PAIR_GO_MS
 
 
+def _to_split(r):
+    """Rig through pairing and calibration into the split countdown (30 s left)."""
+    r.rssi = -50
+    r.run(600)
+    r.g.on_button(r.t)
+    r.state = SC_PAIRED | ST_CONFIRMED
+    r.rssi = -44
+    r.run(200)
+    while r.p.sub != "split":
+        r.run(100)
+        assert r.t < 10000
+    assert r.p.countdown == 30
+
+
+def _tap(r):
+    r.g.on_gesture(r.t, G_TAP, 120, 120, r.t - 60)
+
+
+def test_ready_on_both_watches_skips_the_split_to_three():
+    """§6 split: a tap says READY (TICK, chip WAITING FOR FRIEND); the
+    partner's READY arrives in its beacons (DOUBLE, chip FRIEND READY); once
+    both are ready the countdown jumps to 3 and ends with the usual 3/2/1
+    ticks and GO."""
+    r = Rig()
+    _to_split(r)
+    r.run(2000)
+    assert r.p.top_text == "NO PEEKING" and r.p.word == "SPLIT UP"
+    assert not r.g.pair.ready and not r.b.ready
+    r.run(T.PAIR_READY_HINT_MS - 2000)
+    assert r.p.top_text == "TAP WHEN READY" and r.p.word == "SPLIT UP"
+    t0 = r.t
+    _tap(r)
+    r.run(100)
+    assert r.p.top_text == "WAITING FOR FRIEND" and r.p.word == "READY"
+    assert r.haptics(t0) == ["TICK"], r.haptics(t0)
+    b = proto.Beacon(1)
+    r.g.fill_beacon(b, r.t)
+    assert b.ready                               # the partner learns it from the beacons
+    _tap(r)                                      # a second tap changes nothing
+    r.run(3000)
+    assert r.p.countdown > 20 and r.p.word == "READY"
+    t1 = r.t
+    r.flags = proto.F_READY                      # the partner taps READY
+    r.run(100)
+    assert r.p.top_text == "BOTH READY" and r.p.countdown == 3
+    assert r.haptics(t1)[0] == "DOUBLE", r.haptics(t1)
+    n = 0
+    while r.p.word != "GO":
+        r.run(100)
+        n += 1
+        assert n <= 31
+    assert r.p.countdown == 0 and r.haptics(t1) == ["DOUBLE", "TICK", "TICK", "CLOSER"], \
+        r.haptics(t1)
+    assert 2900 <= r.t - t1 <= 3100, r.t - t1
+    r.run(T.PAIR_GO_MS)
+    assert r.g.mode == M_HUNT
+
+
+def test_ready_on_one_watch_runs_the_full_split():
+    """The partner's READY alone (or this watch's alone) never shortens it;
+    a READY flag from a watch that is not in its split (it does not show
+    PAIRED) is ignored."""
+    r = Rig()
+    _to_split(r)
+    t0 = r.t
+    r.flags = proto.F_READY
+    r.state = SC_HOT                             # not a split: no READY
+    r.run(300)
+    assert not r.g.pair.peer_ready and r.p.top_text == "NO PEEKING"
+    r.state = SC_PAIRED
+    r.run(300)
+    assert r.g.pair.peer_ready and r.p.top_text == "FRIEND READY" and r.p.word == "SPLIT UP"
+    assert "DOUBLE" in r.haptics(t0)
+    while r.p.word != "GO":
+        r.run(100)
+        assert r.t - t0 < 31000
+    assert 29800 <= r.t - t0 <= 30200, r.t - t0
+    r2 = Rig()
+    _to_split(r2)
+    t0 = r2.t
+    _tap(r2)
+    while r2.p.word != "GO":
+        r2.run(100)
+        assert r2.t - t0 < 31000
+    assert 29800 <= r2.t - t0 <= 30200 and r2.p.top_text == "WAITING FOR FRIEND"
+
+
+def test_ready_after_go_or_outside_the_split_does_nothing():
+    pr = Pairing(MAC_A)
+    pr.set_ready(0)
+    pr.set_peer_ready(0, True)
+    assert not pr.ready and not pr.peer_ready    # looking: no split
+    pr.start_split(1000)
+    t = 1000
+    while pr.countdown != 0:
+        t += 100
+        pr.update(t)
+    pr.set_ready(t)
+    assert not pr.ready                          # GO: too late
+    pr.start_split(t)                            # a new round forgets READY
+    pr.set_ready(t)
+    pr.set_peer_ready(t, True)
+    assert pr.ready and pr.peer_ready
+    pr.start_split(t + 100)
+    assert not pr.ready and not pr.peer_ready
+
+
 def test_split_without_link_goes_to_searching_then_zone_on_three_packets():
     r = Rig()
     r.rssi = -50
@@ -629,11 +775,12 @@ def test_partner_already_found_follow_by_tap_or_press_only_while_fresh():
     assert r.g.mode == M_HUNT
 
 
-def test_tap_guards_touch_and_blanking():
+def test_a_touch_never_stops_a_spike_but_blanking_does():
     r = hot_rig()
     g = r.g
-    g.on_gesture(r.t, 1, 20, 20)                # outside the iris: no scan, but a touch
-    assert not g.on_accel_tap(r.t + 100)        # within 300 ms of a touch
+    g.on_touch_down(r.t)
+    g.on_gesture(r.t + 100, 1, 20, 20)          # a touch (knocks touch the panel too)
+    assert g.on_accel_tap(r.t + 50) and g._state_byte(r.t + 60) & ST_TAP_HOT
     r.run(1000)
     g._emit(r.t, "NOPE")                        # our own pulse blanks the accelerometer
     assert g.scan.blanked(r.t + 100)
@@ -643,53 +790,132 @@ def test_tap_guards_touch_and_blanking():
     assert not g2.on_accel_tap(5000)
 
 
-def test_a_finger_tap_in_hot_is_not_a_bump():
-    # real order: the finger lands, its spike, then the TAP after the lift
-    r = hot_rig(4.0)
-    r.run(1000)
+def test_a_knock_drops_its_touch_and_a_finger_keeps_it():
+    """Screen-to-screen knocks (§8): the spike counts at once. A gesture whose
+    touch-down lands from KNOCK_TOUCH_AFTER_MS before to KNOCK_TOUCH_BEFORE_MS
+    after its own counted spike waits for the partner: a knock (the partner
+    spiked within BUMP_WINDOW_MS) does nothing; a finger's own spike (no
+    partner spike by KNOCK_WAIT_MS) lets the gesture run then."""
+    # knock: the finger lands, the spike, the partner's spike, the TAP (WARM: a tap scans)
+    r = warm_rig()
     g = r.g
     t = r.t + 10
     g.on_touch_down(t)
-    assert not g.on_accel_tap(t + 10)
-    g.on_gesture(t + 200, 1, 120, 120)
-    assert g.bump_t is None and g.mode == M_SCANNING
-    # the spike is accepted before the touch-down is seen: the touch-down takes it back
-    r = hot_rig(4.0)
-    r.run(1000)
+    assert g.on_accel_tap(t + T.KNOCK_TOUCH_AFTER_MS)
+    assert g._tap(t + 120) == t + T.KNOCK_TOUCH_AFTER_MS   # no wait for a touch
+    r.peer_tap(t + 90)
+    g.on_gesture(t + 150, 1, 120, 120, t)
+    r.run(T.KNOCK_WAIT_MS + 300)
+    assert g.mode == M_HUNT and g._held_g is None
+    # the spike drained before its touch-down; the partner's reported after the gesture
+    r = warm_rig()
     g = r.g
     t = r.t + 10
     assert g.on_accel_tap(t)
-    g.on_touch_down(t + 30)
-    assert g.bump_t is None and not g._state_byte(t + 40) & ST_TAP_HOT
-    g.on_gesture(t + 200, 1, 120, 120)
+    g.on_touch_down(t + T.KNOCK_TOUCH_BEFORE_MS)
+    g.on_gesture(t + T.KNOCK_TOUCH_BEFORE_MS + 150, 1, 120, 120, t + T.KNOCK_TOUCH_BEFORE_MS)
+    r.run(100)
+    assert g._held_g is not None and g.mode == M_HUNT
+    r.peer_tap(t - 50)
+    r.run(T.KNOCK_WAIT_MS)
+    assert g.mode == M_HUNT and g._held_g is None
+    # a finger's own spike: no partner spike near it, so the tap runs after the wait
+    r = warm_rig()
+    g = r.g
+    r.peer_tap(r.t - 700)                       # an old partner spike: not this one
+    r.run(100)
+    t = r.t + 10
+    g.on_touch_down(t)
+    assert g.on_accel_tap(t + 5)
+    g.on_gesture(t + 150, 1, 120, 120, t)
+    r.run(T.KNOCK_WAIT_MS - 100)
+    assert g.mode == M_HUNT and g._held_g is not None
+    r.run(200)
+    assert g.mode == M_SCANNING and g._held_g is None
+    # a newer gesture runs the held one first, in order
+    r = warm_rig()
+    g = r.g
+    t = r.t + 10
+    assert g.on_accel_tap(t)
+    g.on_gesture(t + 150, 1, 120, 120, t)       # held (a scan once run)
+    g.on_gesture(t + 450, 1, 120, 120, t + 420) # outside the window: runs at once
+    assert g._held_g is None and g.mode == M_SCANNING
+    r.run(100)
+    assert g.mode == M_HUNT                     # the scan started, then the tap cancelled it
+    # just outside the window on either side: a tap
+    for d in (-T.KNOCK_TOUCH_AFTER_MS - 1, T.KNOCK_TOUCH_BEFORE_MS + 1):
+        r = warm_rig()
+        g = r.g
+        t = r.t + 400
+        assert g.on_accel_tap(t)
+        g.on_gesture(t + d + 150, 1, 120, 120, t + d)
+        assert g.mode == M_SCANNING, d
+    # a spike older than KNOCK_KEEP_MS is forgotten
+    r = warm_rig()
+    g = r.g
+    assert g.on_accel_tap(r.t + 10)
+    r.run(2500)
+    assert g._spike_t is None
+    # a blanked spike makes no knock (and does not count)
+    r = warm_rig()
+    g = r.g
+    g._emit(r.t, "NOPE")
+    t = r.t + 100
+    assert not g.on_accel_tap(t)
+    g.on_gesture(t + 150, 1, 120, 120, t)
     assert g.mode == M_SCANNING
-    # a spike reported late, just before a touch-down already seen
+
+
+def test_a_touch_in_hot_never_starts_a_scan():
+    """HOT is where watches knock: a missed or blanked knock's touch must not
+    start a scan and disarm the bump (§8); the second button press scans."""
     r = hot_rig(4.0)
     r.run(1000)
     g = r.g
-    g.on_touch_down(r.t + 50)
-    assert not g.on_accel_tap(r.t + 20)
-    # the finger's spike drained after its TAP was dispatched still counts from the landing
-    t = r.t + 1000
-    g.on_touch_down(t)
-    g.on_gesture(t + 350, 1, 10, 10)            # a 350 ms press outside the iris
-    assert not g.on_accel_tap(t + 5)
-    # a touch the gesture filters drop (here: just after a wake) still guards
-    r.face_up = False
-    r.run(2500)                                 # the screen goes dark
-    t = r.t + 10
-    g.on_wake(t)
-    g.on_gesture(t + 100, 1, 120, 120)
-    assert g.mode == M_HUNT and not g.on_accel_tap(t + 200)
-    # a centre TAP within 400 ms of an accepted spike in HOT is part of the bump (§8)
-    r = hot_rig(4.0)
-    r.run(1000)
-    g = r.g
-    t = r.t + 10
-    assert g.on_accel_tap(t)
-    g.on_touch_down(t + 200)
-    g.on_gesture(t + 300, 1, 120, 120)
+    g.on_gesture(r.t, 1, 120, 120)
+    r.run(100)
+    assert g.mode == M_HUNT and g.bump_armed()
+    g.on_button(r.t)
+    g.on_button(r.t + 300)
+    assert g.mode == M_SCANNING
+    g.on_gesture(r.t + 400, 1, 120, 120)        # a tap still cancels the scan
+    r.run(500)
     assert g.mode == M_HUNT
+
+
+def test_hot_heartbeat_is_muted_so_knocks_are_never_blanked():
+    """§6 HOT: a TICK every 0.5 s plus 150 ms blanking hid ~40 % of knocks."""
+    r = hot_rig(4.0)
+    t0 = r.t
+    r.run(3000)
+    assert not any(p.haptic == "TICK" for p in r.params if p.t_ms > t0)
+    assert not any(r.g.blanked(t) for t in range(t0 + 100, r.t, 25))
+    assert r.p.heartbeat is None and T.ZONE_HEARTBEAT[3] is None
+    assert warm_rig().p.heartbeat == "DOUBLE"
+
+
+def test_knocks_on_the_found_screen_never_start_a_new_round():
+    r = hot_rig()
+    g = r.g
+    _found_by_press(r)
+    r.state = SC_FOUND
+    r.run(T.FOUND_CELEBRATE_MS + 100)
+    assert g.bump_armed() and r.p.word == "TAP=AGAIN"
+    for k in range(3):                          # knocks go on: spikes + touch each
+        t = r.t + 10
+        g.on_touch_down(t)
+        assert g.on_accel_tap(t + 4)
+        r.peer_tap(t + 20, k + 1)
+        g.on_gesture(t + 120, 1, 120, 120, t)
+        r.run(T.KNOCK_WAIT_MS + 100)
+        assert g.mode == M_FOUND, k
+    r.run(2500)
+    t = r.t + 10                                # a finger tap spikes only its own watch
+    g.on_touch_down(t)
+    assert g.on_accel_tap(t + 4)
+    g.on_gesture(t + 120, 1, 120, 120, t)
+    r.run(T.KNOCK_WAIT_MS + 200)
+    assert g.mode == M_PAIRING and r.p.sub == "split"
 
 
 def test_fallback_both_short_presses_within_3s():
@@ -1119,7 +1345,7 @@ def test_low_battery_ladder_and_goodbye():
     g.set_battery(r.t, 10)
     r.run(100)
     assert r.p.glyph == "battery" and r.p.word == "SAVER ON" and r.p.haptic == "BATT"
-    assert r.p.fps_cap == 15 and g.beacon_hz == 5
+    assert r.p.fps_cap == T.SAVER_FPS == 10 and g.beacon_hz == 5
     r.run(2600)
     assert r.p.glyph != "battery"
     assert r.p.backlight == T.SAVER_BACKLIGHT          # before any idle dim
@@ -1228,13 +1454,12 @@ def test_unreliable_signal_pins_the_status_strip_with_warn_bars():
 def test_screen_off_on_wrist_down_and_wake_only_press():
     r = paired_rig(d=20.0)
     g = r.g
-    g.set_motion(r.t, ACT_STILL, 0, 0.0, 5.0, False)
-    for _ in range(25):
-        r.t += 100
-        g.set_motion(r.t, ACT_STILL, 0, 0.0, 5.0, False)
-        p = g.tick(r.t)
-        assert not validate(p)
-    assert not g.screen_on and p.backlight == 0.0
+    r.face_up = False
+    r.run(T.WRIST_DOWN_MS - 500)
+    assert g.screen_on                         # lowered, not yet WRIST_DOWN_MS
+    r.run(1000)
+    assert not g.screen_on and r.p.backlight == 0.0
+    r.face_up = True
     g.on_button(r.t)                           # wakes only: no scan
     assert g.screen_on and g.mode == M_HUNT
     g.on_gesture(r.t + 100, 1)                 # < 300 ms after wake: ignored
@@ -1251,6 +1476,38 @@ def test_screen_off_on_wrist_down_and_wake_only_press():
     assert g.screen_on and r.p.backlight == T.BACKLIGHT_NORMAL and not r.p.status[3]
     g.on_gesture(r.t + 100, 1, 120, 120)
     assert g.mode == M_SCANNING
+    # held at an angle (not face-up, not past WRIST_DOWN_DEG): the screen stays on
+    r2 = paired_rig(d=20.0)
+    r2.face_up = False
+    r2.tilt = T.WRIST_DOWN_DEG - 5.0
+    r2.run(T.WRIST_DOWN_MS + 2000)
+    assert r2.g.screen_on and r2.p.backlight > 0.0
+    r2.tilt = T.WRIST_DOWN_DEG + 5.0
+    r2.run(T.WRIST_DOWN_MS + 200)
+    assert not r2.g.screen_on
+
+
+def test_screen_stays_on_while_on_usb():
+    r = paired_rig(d=20.0)
+    g = r.g
+    g.set_usb(r.t, True)
+    r.face_up = False
+    r.run(T.WRIST_DOWN_MS * 3)
+    assert g.screen_on and r.p.backlight > 0.0
+    g.set_usb(r.t, False)                      # unplugged: the lowered clock starts now
+    r.run(T.WRIST_DOWN_MS - 500)
+    assert g.screen_on
+    r.run(1000)
+    assert not g.screen_on
+    g.set_usb(r.t, True)                       # plugged in: wakes
+    assert g.screen_on
+    r.run(T.WRIST_DOWN_MS + 500)
+    assert g.screen_on
+    # a watch already lit when plugged in gets no new wake (no touch-ignore window)
+    g.set_usb(r.t, False)
+    w = g._wake_t
+    g.set_usb(r.t + 10, True)
+    assert g._wake_t == w
 
 
 def test_screen_off_3s_after_lowering_at_5_percent():
@@ -1258,7 +1515,7 @@ def test_screen_off_3s_after_lowering_at_5_percent():
     g = r.g
     r.face_up = False
     r.run(2500)
-    assert g.screen_on                         # not after WRIST_DOWN_MS (2 s)
+    assert g.screen_on                         # BATT_SCREEN_OFF_MS (3 s), not WRIST_DOWN_MS
     r.run(1000)
     assert not g.screen_on
 
@@ -1271,7 +1528,7 @@ def test_hidden_turn_arrow_does_not_keep_the_screen_on_in_link_lost():
     r.run(5100, packets=False)
     assert g.mode == M_LINK_LOST and g.arrow.phase == A.PH_TURN
     r.face_up = False
-    r.run(2500, packets=False)
+    r.run(T.WRIST_DOWN_MS + 500, packets=False)
     assert not g.screen_on and r.p.backlight == 0.0
 
 
@@ -1474,7 +1731,7 @@ def _hourly(g, t, n, face_up=True):
     out = []
     for _ in range(n):
         t += 3600000
-        g.set_motion(t, ACT_STILL, 0, 0.0, 5.0, face_up)
+        g.set_motion(t, ACT_STILL, 0, 0.0, 5.0 if face_up else 90.0, face_up)
         p = g.tick(t)
         assert not validate(p), (t, validate(p))
         out.append(p)
@@ -1726,7 +1983,7 @@ def test_scan_ready_times_out_wrist_down_or_never_flat():
     r.run(1000)
     assert g.mode == M_HUNT and g.arrow is a and g.beacon_hz == T.BEACON_HZ_NORMAL
     assert not any(p.haptic == "NOPE" for p in r.params if p.t_ms > t0)
-    r.run(3000)
+    r.run(T.WRIST_DOWN_MS - 2000)
     assert not g.screen_on and r.p.backlight == 0.0
     # face-up but tilted: the countdown holds, then cancels after 15 s
     r.face_up = True
@@ -1952,7 +2209,7 @@ def test_partner_leaving_does_not_wake_a_lowered_screen():
         r = warm_rig(battery=bat)
         g = r.g
         r.face_up = False
-        r.run(4000)
+        r.run(T.WRIST_DOWN_MS + 500)
         assert not g.screen_on, bat
         r.state = SC_PAIRING                    # the partner ended the round
         t0 = r.t
