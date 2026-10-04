@@ -1,13 +1,18 @@
-"""Strip renderer: one RenderParams -> a 240x240 frame as 10 strips of 240x24.
+"""Frame renderer: one RenderParams -> a 240x240 frame, sent as 4 bands of 240x60.
 
 The renderer reads *only* RenderParams (ui-spec §3). It owns the time-based
 state the contract leaves to it: ring spawns and positions, crossfades, iris
 open/close, arrow smoothing, the wedge glide between 10 Hz params, toast
-motion and phase timers. Each strip is composed off-screen (field blit
-through the palette, then overlays whose bounding boxes intersect the strip)
-and pushed whole with ``display.push_strip(y0, h, buf)`` (hal/st7789.py API).
-Strips go out top to bottom, so the panel takes them as one window, all from
-one buffer (the display has sent a strip when ``push_strip`` returns).
+motion and phase timers. The whole frame is composed off-screen first (the
+field blitted through the palette band by band, then every overlay drawn once
+over the full frame: framebuf fills a polygon or ellipse over all its rows
+whatever the clip, so drawing per strip paid for each one in every strip it
+touched), then pushed band by band with ``display.push_strip(y0, h, buf)``
+(hal/st7789.py API) top to bottom, so the panel takes them as one window and
+the new frame sweeps down the panel in one push (~40 ms) instead of over the
+whole draw. ``display.service()``, if the display has one, runs after each
+band blit and after the overlays (the runtime's motor and touch servicing;
+its ``push_strip`` services after each push).
 
     r = Renderer()
     beats = r.frame(params, display, ticks_ms())    # display=None: state only
@@ -51,8 +56,8 @@ from ui.field import (COS, EASE_IC, EASE_OC, FL_A, FL_B, GL_A, GL_B, PU_A, PU_B,
                       V7, RingMap, RippleField, ZONE_LEAD, ZONE_TRAIL, ease, q8)
 
 W = const(240)
-SH = const(24)             # strip height
-NS = const(10)             # strips per frame
+BH = const(60)             # band height: field blits and pushes go a band at a time
+NB = const(4)              # bands per frame
 
 # ---- ids: index in T.SCREENS / T.GLYPHS (tests/test_renderer.py checks the consts) ----
 S_PAIRING = const(0)
@@ -80,7 +85,7 @@ GLYPHS = {n: i for i, n in enumerate(T.GLYPHS)}
 _IR = T.IRIS_R              # iris radius per glyph id (§2; countdown, turn, battery: as scan)
 IRIS_R = (_IR["none"], _IR["seeker"], _IR["chevrons"], _IR["arrow"], _IR["scan"],
           _IR["scan"], _IR["none"], _IR["runes"], _IR["scan"], _IR["bump"], _IR["runes"])
-# strip culling boxes: tests/test_renderer.py checks they cover every glyph
+# culling boxes (for drawing a band of rows): tests/test_renderer.py checks they cover every glyph
 G_Y0 = (0, 90, 76, 52, 96, 94, 79, 94, 103, 63, 114)
 G_Y1 = (0, 150, 165, 190, 145, 147, 162, 147, 137, 152, 126)
 
@@ -150,7 +155,7 @@ def _wrap_q4(d):
 
 
 class FrameCapture:
-    """Display stand-in that assembles pushed strips into one frame buffer."""
+    """Display stand-in that assembles pushed bands into one frame buffer."""
 
     def __init__(self):
         self.buf = bytearray(W * W * 2)
@@ -163,13 +168,19 @@ class FrameCapture:
 
 
 class Renderer:
-    """RenderParams -> strips, each drawn in ``buf`` and pushed top to bottom."""
+    """RenderParams -> a frame drawn whole in ``buf``, pushed band by band."""
 
     def __init__(self):
-        self.buf = bytearray(W * SH * 2)
-        self.fb = framebuf.FrameBuffer(self.buf, W, SH, framebuf.RGB565)
+        self.buf = bytearray(W * W * 2)
+        self.fb = framebuf.FrameBuffer(self.buf, W, W, framebuf.RGB565)
+        mv = memoryview(self.buf)
+        n = W * BH * 2
+        self.bands = tuple(mv[k * n:(k + 1) * n] for k in range(NB))
+        self.band_fbs = tuple(framebuf.FrameBuffer(b, W, BH, framebuf.RGB565) for b in self.bands)
+        self._disp = None               # the display ``_service`` was looked up on
+        self._service = None
         self.field = RippleField()
-        self.map = RingMap(SH, (self.buf,))
+        self.map = RingMap(BH, self.bands)
         self.tc = tx.TextCache()
         self._last = {}
         self._ev1 = {}
@@ -610,21 +621,22 @@ class Renderer:
         return TEXT_PRI
 
     # ---- drawing ---------------------------------------------------------------
-    def _strip(self, p, t, y0, fb):
-        """Overlays for the strip at ``y0`` onto its field in ``fb``."""
-        y1 = y0 + SH
+    def _strip(self, p, t, y0, fb, h=W):
+        """Overlays over rows y0..y0+h-1 (``fb`` holds those rows; the frame
+        draws them all at once: y0 0, h 240), on top of the field."""
+        y1 = y0 + h
         g = self.g
         scr = self._scr
         # beam / sweep wedge layer
         if (self.sweep or self.pacer) and y0 < 232 and y1 > 8:
             wedge = self.pacer or self._sub == "sweep"
             if self.sweep:
-                self._draw_bins(p, fb, y0, 0 if wedge else 2)
+                self._draw_bins(p, fb, y0, y1, 0 if wedge else 2)
             if wedge:
                 sw = p.sweep
                 gl.draw_wedge(fb, y0, WARN if sw[3] else PROX[6])
                 if self.sweep:
-                    self._draw_bins(p, fb, y0, 1)
+                    self._draw_bins(p, fb, y0, y1, 1)
         # glyph layer
         if self.arrow:
             if y0 < G_Y1[G_ARROW] and y1 > G_Y0[G_ARROW]:
@@ -689,7 +701,7 @@ class Renderer:
                 if "v" in sel and MENU_MORE_DN_Y < y1 and MENU_MORE_DN_Y + 6 > y0:
                     fb.poly(MENU_MORE_X, MENU_MORE_DN_Y - y0, _TRI_DN, TEXT_SEC, True)
 
-    def _draw_bins(self, p, fb, y0, which):
+    def _draw_bins(self, p, fb, y0, y1, which):
         """Scan bins. Game passes a per-tick tuple of the scan's bins (the
         float objects are reused while a bin is unchanged) and blinks the best
         bin in ``result`` by toggling ``active_bin``, so each slot is
@@ -705,7 +717,6 @@ class Renderer:
         act_c = PROX[5] if self._sub == "sweep" else PROX[7]
         bq = self._binq
         bo = self._bino
-        y1 = y0 + SH
         for k in range(12):
             if which == 1:
                 if k != act:
@@ -778,11 +789,19 @@ class Renderer:
         pal = self.field.pal
         arr = self.field.pal_arr
         m = self.map
-        buf = self.buf
-        fb = self.fb
-        for s in range(NS):
-            y0 = s * SH
-            m.blit(y0, pal, arr, buf, fb)
-            self._strip(p, t, y0, fb)
-            display.push_strip(y0, SH, buf)
+        bands = self.bands
+        fbs = self.band_fbs
+        if display is not self._disp:
+            self._disp = display
+            self._service = getattr(display, "service", None)
+        svc = self._service
+        for k in range(NB):
+            m.blit(k * BH, pal, arr, bands[k], fbs[k])
+            if svc is not None:
+                svc()
+        self._strip(p, t, 0, self.fb)
+        if svc is not None:
+            svc()
+        for k in range(NB):
+            display.push_strip(k * BH, BH, bands[k])
         return ev

@@ -1,8 +1,8 @@
-"""Centre glyphs drawn into a strip FrameBuffer (ui-spec §2, §6; tokens.glyphs).
+"""Centre glyphs drawn into a FrameBuffer (ui-spec §2, §6; tokens.glyphs).
 
-Every ``draw_*`` takes the strip FrameBuffer ``fb`` and its top row ``y0``
-and uses absolute screen coordinates (y is made strip-relative here), so
-framebuf clips to the strip. Thick strokes are filled polygons
+Every ``draw_*`` takes a FrameBuffer ``fb`` and the screen row ``y0`` of its
+top (0 for the renderer's full frame) and uses absolute screen coordinates
+(y is made relative to ``fb`` here), so framebuf clips to it. Thick strokes are filled polygons
 (``framebuf.poly``) or ellipse pairs, never 1 px lines. Geometry is
 precomputed at import; per-frame rotation writes into preallocated
 ``array('h')`` buffers with the integer Q14 sin/cos tables (no allocation).
@@ -451,7 +451,7 @@ def wedge_hits_bottom(deg):
 
 # Bin boxes: k*30 deg, 6 deg wide, r 70..110. Each sits in a 2 px bg.iris
 # track (r 68..112, +-4 deg) so a short bar reads as a bar against the live
-# halo behind it, not as a dark notch in it. Strip culling rows per bin:
+# halo behind it, not as a dark notch in it. Culling rows per bin:
 def _bin_rows():
     y0 = []
     y1 = []

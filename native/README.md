@@ -12,7 +12,7 @@ been ported yet. MicroPython (the rest of the repo) is untouched.
 | `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), LovyanGFX's SPI bus with DMA. |
 | `idf/` | PlatformIO: ESP-IDF 5.5, the `esp_lcd` SPI panel IO with DMA. |
 | `test/` | Host tests (g++ with address and UB sanitizers) on fake hardware, plus the golden palettes. |
-| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log). |
+| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU). |
 
 Both builds use pins and settings from `hal/pins.py`: SPI on HSPI with SCK 18,
 MOSI 19, CS 5, DC 27 and no MISO (GPIO12 is the backlight), MADCTL 0xC0 with
@@ -35,6 +35,27 @@ python3 -m pip install platformio     # once; the first build downloads the tool
 pio run -d native/arduino             # -> native/arduino/.pio/build/bench-lovyangfx/firmware.bin
 pio run -d native/idf                 # -> native/idf/.pio/build/bench-esplcd/firmware.bin
 ```
+
+## Boot in QEMU before flashing
+
+```sh
+python3 native/tools/qemu_run.py --install        # once: Espressif's QEMU, sha256-checked (Linux: apt-get install libslirp0)
+python3 native/tools/qemu_run.py native/idf       # or native/arduino, or a build dir; --env picks one of several builds
+```
+
+It checks the flash layout first (bootloader below the partition table at
+0x8000, app inside its partition, all inside the flash), then boots the image
+in Espressif's ESP32 emulator and passes at the first `HM hello` line. It fails
+on a panic, an abort, a stack overflow, a reboot after the app started, or an
+`HM error` line. Run it on every build before it goes to a watch: it caught an
+ESP-IDF bootloader that had grown past 0x8000 and would not have booted.
+
+QEMU emulates the ESP32 only. It has no model of the watch's screen, PMU or
+motion sensor (the bench stops at `HM error what=axp202`), and it does not keep
+the chip's timing: code runs as fast as the host allows and SPI transfers take
+no time. So it checks that a build boots and runs, never how fast: fps and
+push times come from the watch. The Arduino 2.0.17 bootloader resets a few
+times under QEMU before it starts the app; that does not happen on the watch.
 
 ## Flash and capture (one watch at a time)
 
