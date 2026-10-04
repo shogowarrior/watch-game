@@ -104,6 +104,7 @@ sets it as CPython would.
 | `python3 tools/build_sim.py` | Build the web simulator into `dist/sim/` (needs `tools/mpy` npm install). |
 | `mpremote run tools/bench_display.py` | **On the watch**: real SPI clock, push/blit timings, fps. |
 | `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push) and the overlays of each strip, push variants, whether a send thread could overlap the drawing, IMU cost per rate, which kernels run as viper, and 10 s of the game loop with bump sensing off then on. |
+| `mpremote run tools/bench_spi_clock.py` | **On the watch**: MicroPython's full-frame push at 26.67, 40 and 80 MHz (pokes the SPI clock register, then puts 26.67 back), with a test card held 5 s per clock to check by eye. |
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |
