@@ -31,9 +31,10 @@ a Wi-Fi network, so the Wi-Fi name and password are NOT copied unless
 ``--wifi`` (or ``--secrets``) is given. Needs ``pip install mpremote``.
 
 Debug mode (docs/design/debug-mode.md): ``--debug A`` writes /debug
-(``{"dev": "A", "link": "usb"}``) and copies nothing secret; on boot the
-watch writes what it does on its USB serial port, which
-``tools/debug_server.py --serial`` on this laptop reads. ``--debug A
+(``{"dev": "A", "link": "usb"}``), copies nothing secret, and removes any
+secrets.py an earlier ``--wifi`` deploy left; on boot the watch writes
+what it does on its USB serial port, which ``tools/debug_server.py
+--serial`` on this laptop reads. ``--debug A
 --wifi`` writes the Wi-Fi /debug (``{"dev": "A", "link": "wifi", "host":
 <this laptop's address>, "port": 47268}``) and copies the Wi-Fi file to the
 watch as secrets.py: the one ``tools/wifi_setup.py`` saved outside the
@@ -148,7 +149,8 @@ def build_cmd(mpremote, port, dirs, files, noapp=None, reset=True, tele=None, de
     """``noapp``/``tele``/``debug``: None leaves /noapp, /tele and /debug as
     they are, False removes them (``debug`` False also removes secrets.py);
     ``noapp`` True creates /noapp, a ``tele`` name writes /tele, a ``debug``
-    string (``debug_config``) writes /debug."""
+    string (``debug_config``) writes /debug (a USB one also removes
+    secrets.py unless ``files`` copies one)."""
     cmd = _connect(mpremote, port)
     cmd += ["exec", mkdirs_code(dirs)]
     for local, remote in files:
@@ -163,6 +165,8 @@ def build_cmd(mpremote, port, dirs, files, noapp=None, reset=True, tele=None, de
         cmd += ["+", "exec", _rm_code("/tele")]
     if debug:
         cmd += ["+", "exec", _write_code("/debug", debug)]
+        if json.loads(debug)["link"] == "usb" and SECRETS not in [r for _, r in files]:
+            cmd += ["+", "exec", _rm_code("/" + SECRETS)]   # the USB link reads no Wi-Fi file
     elif debug is False:
         cmd += ["+", "exec", _rm_code("/debug"), "+", "exec", _rm_code("/" + SECRETS)]
     if reset:
@@ -239,8 +243,8 @@ def main(argv=None):
     d = ap.add_mutually_exclusive_group()
     d.add_argument("--debug", metavar="DEV", choices=("A", "B"),
                    help="debug mode: the watch sends what it does to tools/debug_server.py on "
-                        "this laptop over the USB cable (--wifi: over Wi-Fi); DEV (A or B) is "
-                        "its name on the page")
+                        "this laptop over the USB cable and removes any secrets.py (--wifi: "
+                        "over Wi-Fi); DEV (A or B) is its name on the page")
     d.add_argument("--no-debug", action="store_true",
                    help="debug mode off: remove /debug and secrets.py from the watch")
     ap.add_argument("--wifi", action="store_true",

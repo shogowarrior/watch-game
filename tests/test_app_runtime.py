@@ -706,8 +706,8 @@ def test_real_board_drivers_short_run():
 
 # ---- review fixes -------------------------------------------------------------------
 class SlowDisplay(FakeDisplay):
-    """Each strip costs ``strip_ms`` of the watch's clock (a 10-strip frame
-    ~40 ms, as on the watch; hal/README.md)."""
+    """Each strip costs ``strip_ms`` of the watch's clock (default 4: a fast
+    10-strip frame of ~40 ms; ``CostDisplay`` holds the watch's ~8 ms strips)."""
 
     def __init__(self, clock, strip_ms=4):
         FakeDisplay.__init__(self)
@@ -1755,8 +1755,6 @@ class Sink:
     """Collects records as a hal/debuglink link gets them (and when); Wi-Fi's
     ``rp_ms`` unless given."""
 
-    channel = None
-
     def __init__(self, clock=None, rp_ms=200):
         self.clock = clock
         self.rp_ms = rp_ms
@@ -1930,28 +1928,36 @@ def test_debug_datagram_counts_bytes_not_characters():
     assert b["e"] == "\u00e9" * 100
 
 
-def test_debug_rp_names_the_wifi_channel():
-    """``rp`` carries the sink's Wi-Fi channel (``ch``), so the page can tell
-    two watches on different channels apart; null when the sink has none."""
+def test_debug_rp_names_the_radio_channel():
+    """``rp`` carries the radio's ESP-NOW channel (``ch``: 6 on USB, the
+    access point's on Wi-Fi), so the page can tell two watches on different
+    channels apart, even one on USB and one on Wi-Fi; null with no radio.
+    A sink's own ``channel`` (``DebugLink``'s; ``SerialLink`` has none)
+    does not matter."""
     fakes.install()
     import json
     from app.runtime import Runtime
     from app.telemetry import Telemetry
     from finder.render_params import make_params
+    from hal.radio import SimRadio, DEFAULT_CHANNEL
     clock = Clock(0)
-    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
-                 gc_collect=lambda: None)
+    rt = Runtime(Board(radio=SimRadio()), clock=clock, sleep_ms=clock.sleep,
+                 renderer=StubRenderer(), gc_collect=lambda: None)
     rt.begin(0)
     rt._stage_logic(1000)
     rt.params = make_params(t_ms=1000)
-    for ch in (11, None):
+    assert DEFAULT_CHANNEL == 6
+    for ch, sink_ch in ((6, None), (11, 3), (None, 11)):
+        if ch is None:
+            rt.radio = None
+        else:
+            rt.radio.channel = ch
         sink = Sink()
-        if ch is not None:
-            sink.channel = ch                  # DebugLink.channel: the access point's
+        sink.channel = sink_ch                 # not what ``rp.ch`` reports
         rt.tele = Telemetry(dev="A", sink=sink)
         rt.tele.record(1000, rt)
         rp = json.loads(sink.sent[-1])
-        assert rp["ev"] == "rp" and "ch" in rp and rp["ch"] == ch, rp
+        assert rp["ev"] == "rp" and "ch" in rp and rp["ch"] == ch, (rp, sink_ch)
 
 
 def test_debug_rp_rate_follows_the_link():
@@ -2086,13 +2092,15 @@ def test_debug_usb_link_writes_paced_lines_from_the_loop():
 
 
 def test_debug_usb_link_keeps_up_while_frames_render():
-    """On the watch a frame takes ~40 ms (10 strips of 4 ms), so one pump a
-    pass would carry too little. The link is also pumped after every strip:
-    nothing is dropped, the queue stays short, and no write overfills."""
+    """On the watch a frame takes ~80 ms (10 strips of ~8 ms, 10 fps lock),
+    so one pump a pass (one 128-byte piece per ~100 ms pass, ~1.3 KB/s) would
+    carry too little. The link is also pumped after every strip: the FIFO
+    refills about every second strip, about 5 pieces per frame; nothing is
+    dropped, the queue stays short, and no write overfills."""
     clock = Clock(0)
-    rt, link, port = _usb_watch(clock, SlowDisplay(clock, 4))
+    rt, link, port = _usb_watch(clock, CostDisplay(clock))
     top = _usb_run(rt, 60000)
-    assert rt.frames > 1000 and link.n_tx > 300, (rt.frames, link.n_tx)
+    assert rt.frames > 500 and link.n_tx > 300, (rt.frames, link.n_tx)
     assert link.drop == 0 and top < 1500, (link.drop, top)
     assert port.overfill() is None
 

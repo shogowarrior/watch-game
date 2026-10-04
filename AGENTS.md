@@ -15,8 +15,10 @@ watches. The watch runs **stock MicroPython v1.29.0 (`ESP32_GENERIC-SPIRAM`)**,
 pure `.py`, no custom C modules.
 
 Status: every layer is written and tested on CPython, on MicroPython
-(WebAssembly) and in a two-watch simulator. **It has not yet run on real
-watches.** Every threshold is a starting value to calibrate. Debug mode
+(WebAssembly) and in a two-watch simulator. First bring-up on two watches
+(3-4 Oct 2026) measured the display timings, the gc time, the IMU z sign and
+the bump levels; the radio calibration and the field test are still to do, so
+every other threshold is a starting value to calibrate. Debug mode
 (`docs/design/debug-mode.md`) shows the real watches live in the web sim page,
 over their USB cables or over Wi-Fi.
 
@@ -56,19 +58,19 @@ over their USB cables or over Wi-Fi.
 | `native/` | Arduino and ESP-IDF ports (PlatformIO), work in progress: a shared C++ core (the ripple field, checked frame by frame against `ui/field.py`; display, PMU and IMU sequences from `hal/`) and the display benchmark both builds run. See `native/README.md`; `tests/test_native.py` runs its host tests. |
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). Its **Simulator \| Real watches** toggle shows the real watches in debug mode. |
 | `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`; `socket.py`, a fake UDP `socket` installed by `fakes.install_socket()`; `serial_port.py`, a fake USB serial port that checks `SerialLink`'s pacing against the 115200-baud line), `est_helpers.py` (shared estimator fixtures), `test_deploy.py` (`tools/deploy.py`, CPython only). |
-| `tests/test_debuglink.py` `test_debug_server.py` `test_fake_watches.py` `test_wifi_setup.py` `test_secrets_guard.py` | Debug mode: the watch side (USB and Wi-Fi links) and `main.py` wiring on fakes; the bridge's UDP-to-SSE relay, serial reader (on pseudo-terminals) and log over real localhost sockets (CPython only); the fake watches; `tools/wifi_setup.py` (the saved file, its permissions, nothing printed); no file git would commit, and no commit in its history, holds a value from a saved Wi-Fi file. |
+| `tests/test_debuglink.py` `test_debug_server.py` `test_fake_watches.py` `test_wifi_setup.py` `test_secrets_guard.py` | Debug mode: the watch side (USB and Wi-Fi links) and `main.py` wiring on fakes; the bridge's UDP-to-SSE relay, serial reader (on pseudo-terminals) and log over real localhost sockets (CPython only); the fake watches; `tools/wifi_setup.py` (the saved file, its permissions, nothing printed); no file git would commit holds a value from a saved Wi-Fi file, and no commit in its history holds the password. |
 | `tools/` | Host and on-watch scripts (see Commands). `tools/mpy/run.mjs` runs Python under MicroPython WebAssembly; `tools/cli.py` is the shared `--key value` parser. |
 | `tools/debug_server.py` | Debug bridge (CPython, stdlib only): serves `dist/sim/` on 127.0.0.1, reads the watches' USB serial ports (`--serial`) and UDP datagrams, relays the records to the page as Server-Sent Events (`/events`), answers `/debug/status`, logs to `logs/`. |
 | `tools/fake_watches.py` | Two simulated watches that send real debug-mode records (same `app/telemetry.py` and `hal/debuglink.py` code), over UDP or through `SerialLink`; `debug_server.py --demo [--serial]` runs it. |
 | `tools/wifi_setup.py` | Asks for the Wi-Fi name and password on the laptop (debug mode over Wi-Fi) and saves them outside the repo, readable only by the owner; `--check`, `--forget`. Never prints them. |
 | `secrets.example.py` | The format of the Wi-Fi file (`WIFI_SSID`, `WIFI_PASSWORD`) that `tools/wifi_setup.py` saves and the watch reads as `/secrets.py`. Not to be filled in. |
-| `logs/` | Gitignored. `debug-*.jsonl` sessions from the bridge: each line is one `/events` payload `{"src", "rx", "rec"}`, ready to replay. |
+| `logs/` | Gitignored. `debug-*.jsonl` sessions from the bridge: each line is one `/events` payload, either a record `{"src", "rx", "rec"}` or, from a USB port, a text line `{"src", "rx", "line"}` (boot messages, errors, the fps line); a replay reads the `rec` lines. |
 | `docs/project/` | `handoff.md` (current state, open questions, next steps: read first); the Claude Project's `goal.md`, `instructions.md` and `setup.md` (how to create it). |
 | `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`, `debug-mode.md` (debug mode: decisions and the contract between watch, bridge and page). |
 | `docs/estimation/` | `bakeoff.md` (why kalman2), `imu-drift.md` (why no dead reckoning). |
 | `docs/research/user-research.md` | Personas, field-test plan, requirements R-01..R-15. |
 | `docs/architecture.md` `docs/hardware-setup.md` | Layers and data flow (with the debug data path); bring-up on real watches and how to use debug mode (§7). |
-| `notebooks/` | Jupyter "MicroPython - USB" notebooks. `finder_dev.ipynb` is the current one. `watch.ipynb` and `tools.ipynb` are legacy (old custom firmware) and do not run on stock v1.29. |
+| `notebooks/` | Jupyter "MicroPython - USB" notebooks. `finder_dev.ipynb` is the current one. `watch movement.ipynb`: steps, stillness and tilt from `MotionTracker`, plus the drift demo, on `hal/`. `watch.ipynb` and `tools.ipynb` are legacy (old custom firmware) and do not run on stock v1.29. |
 | `firmware/` | Old firmware images. **Do not touch.** |
 | `.claude/settings.json` `.claude/hooks/cloud-setup.sh` | SessionStart hook: in cloud sessions only, installs the `tools/mpy` package. |
 | `.claude/workflows/` | `review-fix-round.js` (verified review/fix round) and `debug-mode-build.js`; args in each header. |
@@ -118,7 +120,7 @@ sets it as CPython would.
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |
-| `python3 tools/deploy.py [--port P] [-n] [--noapp\|--app] [--tele DEV\|--no-tele] [--debug A\|B [--wifi [--debug-host IP]]\|--no-debug]` | Hard-reset the watch, copy `app/`, `finder/`, `hal/`, `ui/` (+ `bma423conf.bin`) and last `boot.py`, `main.py` with mpremote, then hard-reset again so `main.py` starts the game. `--tele DEV` makes the game log to `/log/<n>_DEV.jsonl`. `--debug A` writes `/debug` for the USB link (nothing secret is copied). `--debug A --wifi` writes it for the Wi-Fi link (the laptop's address, found by itself or `--debug-host`, which needs `--wifi`) and copies the Wi-Fi file `tools/wifi_setup.py` saved as `/secrets.py`. `--no-debug` removes `/debug` and `/secrets.py`. |
+| `python3 tools/deploy.py [--port P] [-n] [--noapp\|--app] [--tele DEV\|--no-tele] [--debug A\|B [--wifi [--debug-host IP]]\|--no-debug]` | Hard-reset the watch, copy `app/`, `finder/`, `hal/`, `ui/` (+ `bma423conf.bin`) and last `boot.py`, `main.py` with mpremote, then hard-reset again so `main.py` starts the game. `--tele DEV` makes the game log to `/log/<n>_DEV.jsonl`. `--debug A` writes `/debug` for the USB link (nothing secret is copied, and any `/secrets.py` an earlier `--wifi` deploy left is removed). `--debug A --wifi` writes it for the Wi-Fi link (the laptop's address, found by itself or `--debug-host`, which needs `--wifi`) and copies the Wi-Fi file `tools/wifi_setup.py` saved as `/secrets.py`. `--no-debug` removes `/debug` and `/secrets.py`. |
 | `python3 tools/debug_server.py [--serial [PORT ...]] [--http-port 8765] [--udp-port 47268] [--root dist/sim] [--no-log] [--demo]` | Debug bridge: open `http://localhost:8765/local.html` and pick Real watches. `--serial` reads the watches' USB ports (every one it finds, or the PORTs given) and holds them: stop it before `deploy.py` or `mpremote`. `--demo` adds two fake watches (`--demo --serial`: over the USB link, through pseudo-terminals; `--udp-port` only with `--demo`: the watches always send to 47268). Needs `python3 tools/build_sim.py` first. |
 | `python3 tools/wifi_setup.py [--check\|--forget]` | The **owner** runs it in their own terminal: saves the Wi-Fi name and password for `deploy.py --debug A --wifi` outside the repo. `--check` says whether the file is there, private and readable, `--forget` deletes it; neither shows the values. |
 | `python3 tools/fake_watches.py [--host 127.0.0.1] [--port 47268] [--seconds N] [--speed 1.0]` | Two simulated watches sending debug-mode datagrams to a bridge. |
@@ -288,13 +290,14 @@ of what each watch sent).
   `secrets.example.py` shows the format. The game joins Wi-Fi only in debug
   mode with `--wifi` (`/debug` with `"link": "wifi"`): `deploy.py` copies the
   file to the watch as `/secrets.py` only with `--debug A --wifi` (or
-  `--secrets`), and `--no-debug` removes it. The values are read only on the
-  watch (`hal/debuglink.py`) and by `deploy.py`'s check and copy, and are never
-  printed, logged or sent. Agents never open, print or search these files.
-  `tests/test_secrets_guard.py` checks that no file git would commit, and no
-  commit on any branch git knows, contains them (it runs where the Wi-Fi file
-  is, the owner's laptop, and skips elsewhere). Never commit credentials, tokens or `webrepl_cfg.py`, and never paste
-  them into notebook outputs, docs or tests.
+  `--secrets`), and `--no-debug` or a USB `--debug A` removes it. The values
+  are read only on the watch (`hal/debuglink.py`) and by `deploy.py`'s check
+  and copy, and are never printed, logged or sent. Agents never open, print or
+  search these files. `tests/test_secrets_guard.py` checks that no file git
+  would commit contains them, and no commit on any branch git knows contains
+  the password (it runs where the Wi-Fi file is, the owner's laptop, and skips
+  elsewhere). Never commit credentials, tokens or `webrepl_cfg.py`, and never
+  paste them into notebook outputs, docs or tests.
 - The first commit (`c79530c`) leaked the Wi-Fi name and password and the
   WebREPL password (in `boot.py` and `webrepl_cfg.py`); `boot.py` kept them
   until `44880ab`, so `0db0f98` holds them too. The repo is public, so they

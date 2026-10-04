@@ -100,6 +100,22 @@ def test_tilt_and_face_up():
     assert mt.face_up
 
 
+def test_face_up_is_the_scan_flat_rule():
+    # one face-up rule: the scan's flat check (ui-spec §6 SCANNING ready) and
+    # the game's scan-ready cancel (not face_up) use the same 20/30 deg pair
+    from finder import motion, scan, tuning
+    assert motion.FACE_ON_DEG == tuning.SCAN_FLAT_DEG == scan.FLAT_DEG
+    assert scan.FLAT_OFF_DEG == motion.FACE_OFF_DEG
+    assert motion.FACE_ON_DEG < motion.FACE_OFF_DEG
+    mt = MotionTracker()
+    t = _pose(mt, motion.FACE_ON_DEG - 2, 0, 100)
+    assert mt.face_up
+    t = _pose(mt, motion.FACE_OFF_DEG - 2, 0, 100, t)
+    assert mt.face_up
+    _pose(mt, motion.FACE_OFF_DEG + 2, 0, 100, t)
+    assert not mt.face_up
+
+
 def test_gestures_not_counted():
     mt = MotionTracker()
     t = _pose(mt, 0, 0, 50)

@@ -778,8 +778,9 @@ function zoneText(z) {
   const e = K.enter_m;
   return ZONE_WORDS[z] + ' (' + [`${e[0]} m or more`, `${e[1]}–${e[0]} m`, `${e[2]}–${e[1]} m`, `under ${e[2]} m`][z] + ')';
 }
-// Both watches live, and their latest rp records name different Wi-Fi channels (rp.ch: the access
-// point's; null on the fake watches): ESP-NOW follows the channel, so they cannot hear each other.
+// Both watches live, and their latest rp records name different channels (rp.ch: the radio's
+// ESP-NOW channel, 6 on USB and the access point's on Wi-Fi; null on the fake watches): ESP-NOW
+// follows the channel, so they cannot hear each other.
 function chSplit(now) {
   const ch = real.map((w) => (w.heard != null && !realSilent(w, now) && w.rp ? num(w.rp.ch) : null));
   return ch[0] != null && ch[1] != null && ch[0] !== ch[1];
@@ -792,7 +793,11 @@ function realWhy(i, w, now, linked) {
   if (age >= SILENT_MS) return !linked ? `Last heard ${heardAgo(age)}, before the page lost the bridge (see above).`
     : viaWifi(w.src) ? `Last heard ${heardAgo(age)}. Is the watch on, and on the same Wi-Fi as this computer?`
     : `Last heard ${heardAgo(age)}. Is the watch on, and its USB cable plugged in? Raw messages below show anything it printed.`;
-  if (chSplit(now)) return 'The two watches joined different parts of your Wi-Fi (different channels), so they cannot hear each other. Use a network with one access point.';
+  if (chSplit(now)) {
+    if (viaWifi(real[0].src) && viaWifi(real[1].src)) return 'The two watches joined different parts of your Wi-Fi (different channels), so they cannot hear each other. Use a network with one access point.';
+    const on = (v) => (viaWifi(v.src) ? `on your Wi-Fi's channel ${num(v.rp.ch)}` : `on channel ${num(v.rp.ch)} (USB)`);
+    return `Watch A talks ${on(real[0])} and watch B ${on(real[1])}, so they cannot hear each other. Load both watches with the same link (both on USB, or both with --wifi).`;
+  }
   if (pageError) return `Last heard ${heardAgo(age)}, but this page could not run its screen code: ${pageError} Reload the page; the readings below still update.`;
   if (w.bad) return `Last heard ${heardAgo(age)}, but its screen could not be drawn (${w.bad}). The readings below still update.`;
   if (w.rp && w.rp.on === false) return `Last heard ${heardAgo(age)}. Its screen is off (wrist down or timed out), so it is dark here too.`;

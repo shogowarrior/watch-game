@@ -152,13 +152,8 @@ class Bridge:
         not a valid record. Ignored once ``close`` has run (no log reopened,
         no stream fed)."""
         rec = None if data is None else parse(data)
-        line = None
-        if rec is not None:
-            try:              # strict JSON for the page and the log; parse lets no NaN through
-                line = json.dumps({"src": src, "rx": rx, "rec": rec}, separators=(",", ":"),
-                                  allow_nan=False)
-            except ValueError:
-                pass
+        line = None if rec is None else json.dumps({"src": src, "rx": rx, "rec": rec},
+                                                   separators=(",", ":"))
         with self._lock:
             if self.done.is_set():
                 return None
@@ -755,4 +750,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # a pipe (the web-sim preview, tee) shows each line as it is printed; not in main(),
+    # which the tests run with stdout redirected to a StringIO (no reconfigure)
+    sys.stdout.reconfigure(line_buffering=True)
     main()

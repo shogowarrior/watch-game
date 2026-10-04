@@ -5,8 +5,9 @@ Driver details and gotchas are in [`../hal/README.md`](../hal/README.md).
 Terms such as RSSI, dBm and the path-loss exponent are explained in the
 [ui-spec glossary](design/ui-spec.md#13-glossary).
 
-> None of this has been run on a real watch yet. Treat the checklist as the
-> bring-up plan, and write down what you find (see "Assumptions to verify").
+> First bring-up ran on 3-4 Oct 2026 (the dated notes below say what it
+> measured). The rest of the checklist is still the bring-up plan: write down
+> what you find (see "Assumptions to verify").
 
 ## 1. Identify the watch revision
 
@@ -194,8 +195,8 @@ kernel per watch).
 
 ## 6. Assumptions to verify
 
-Each of these is a design assumption in the code that nobody has checked on a real
-watch yet.
+Each of these is a design assumption in the code. A row that says "checked" or
+gives a date was measured at bring-up; the rest still need a real watch.
 
 | Assumption | Where | How to check |
 |---|---|---|
@@ -215,7 +216,7 @@ watch yet.
 | ESP-NOW on channel 6 at 20 dBm keeps 10-20 Hz beacons with the display running | `hal/radio.py` | ping-pong with `render=True` |
 | The frame lock holds 10 fps or more with few missed slots, and an estimator update is well under 2 ms | the serial `fps` line, `app/runtime.py` stats | `app.rt.print_stats()`, `tools/bench_est.py` on the watch (what to copy: [bakeoff.md section 3](estimation/bakeoff.md#when-to-switch-to-particle), step 1) |
 | The battery gauge is trustworthy enough for the low-battery and shutdown thresholds | `hal/axp202.py` `battery_percent` | compare it with the voltage over a discharge |
-| Debug mode over USB: opening a port does not restart the watch, and the link keeps up with the records | `tools/debug_server.py` `open_port`, `hal/debuglink.py` `SerialLink` | section 7 notes: `debug_stats` `drop` and `queued` stay near 0 |
+| Debug mode over USB: opening a port does not restart the watch, and the link keeps up with the records | `tools/debug_server.py` `open_port`, `hal/debuglink.py` `SerialLink` | section 7 notes: `debug_stats` `drop` stays near 0 |
 
 Record the results, and move any calibrated value into `docs/design/tokens.json`
 (then run `python3 tools/gen_tuning.py`), or into the driver defaults in `hal/`.
@@ -243,11 +244,14 @@ which needs the one-time `cd tools/mpy && npm install`).
    (`sudo usermod -aG dialout $USER`, then log out and back in).
 2. **Load each watch in debug mode**, one port each:
    ```sh
-   python3 tools/deploy.py --port /dev/cu.usbserial-A --debug A
-   python3 tools/deploy.py --port /dev/cu.usbserial-B --debug B
+   python3 tools/deploy.py --port /dev/cu.usbserial-A --app --debug A
+   python3 tools/deploy.py --port /dev/cu.usbserial-B --app --debug B
    ```
    This copies the game and writes `/debug` with the name the page shows (A or
-   B). Nothing secret is copied. Use A for one watch and B for the other.
+   B). Nothing secret is copied, and a `/secrets.py` an earlier `--wifi`
+   deploy left is removed. Use A for one watch and B for the other. `--app`
+   removes the `/noapp` left from the first-boot checklist; with `/noapp` the
+   watch skips the game (it prints `safe boot (flag)`) and sends nothing.
 3. **Start the bridge** on the laptop:
    ```sh
    python3 tools/debug_server.py --serial
@@ -283,8 +287,8 @@ that both watches and the laptop are on.
    deletes it.
 2. **Load each watch in Wi-Fi debug mode:**
    ```sh
-   python3 tools/deploy.py --port /dev/cu.usbserial-A --debug A --wifi
-   python3 tools/deploy.py --port /dev/cu.usbserial-B --debug B --wifi
+   python3 tools/deploy.py --port /dev/cu.usbserial-A --app --debug A --wifi
+   python3 tools/deploy.py --port /dev/cu.usbserial-B --app --debug B --wifi
    ```
    This also copies your Wi-Fi file to the watch (as `/secrets.py`), and
    writes this laptop's address into `/debug`; it finds the address by itself
@@ -292,9 +296,10 @@ that both watches and the laptop are on.
    whole network instead, which is less reliable: give the address with
    `--debug-host 192.168.1.23` (on macOS, `ipconfig getifaddr en0` prints it).
 3. **Start the bridge** with `python3 tools/debug_server.py` (add `--serial`
-   to read USB watches too) and open http://localhost:8765/local.html as
-   above. If macOS (or another firewall) asks whether Python may accept
-   incoming connections, allow it: that is how the watches reach the laptop.
+   to also read a plugged-in watch's boot messages) and open
+   http://localhost:8765/local.html as above. If macOS (or another firewall)
+   asks whether Python may accept incoming connections, allow it: that is how
+   the watches reach the laptop.
 4. **Switch the watches on** (or let them restart after the deploy). Each one
    tries to join the Wi-Fi for up to 10 s before the game starts, with the
    screen dark meanwhile.
@@ -307,7 +312,10 @@ system or a range extender can also put the two watches on different channels
 even though the network has one name; if both watches show up here but never
 find each other on the page, use a network with a single access point (when
 the two watches report different channels, the page says so under both
-screens).
+screens). A watch on the USB link plays on channel 6, so one watch on USB and
+one on Wi-Fi hear each other only when the access point happens to be on
+channel 6 (the page names both channels): load both watches with the same
+link.
 
 If a Wi-Fi watch does not show up:
 
@@ -343,11 +351,13 @@ The bridge saves everything the watches send to
 `logs/debug-YYYYmmdd-HHMMSS.jsonl` in the project folder (ignored by git; the
 bridge prints the file's name when it starts and when it stops). Each line is one
 message as the page received it: `{"src": the watch's port or address, "rx":
-laptop time in ms, "rec": what the watch sent}`. These sessions are real radio
-data to calibrate the estimators with later (`docs/estimation/bakeoff.md`). No
-tool replays them yet: a replay input for the bake-off is a planned next step
-([project/handoff.md](project/handoff.md)), and the files are already in the
-form it will read. Pass `--no-log` to save nothing.
+laptop time in ms, "rec": what the watch sent}`. Text a watch prints on its
+USB port (the boot message, an error, the fps line) is saved too, as
+`{"src", "rx", "line": the text}`. These sessions are real radio data to
+calibrate the estimators with later (`docs/estimation/bakeoff.md`). No tool
+replays them yet: a replay input for the bake-off is a planned next step
+([project/handoff.md](project/handoff.md)), and it will read the `rec` lines.
+Pass `--no-log` to save nothing.
 
 ### Try it without watches
 
@@ -361,8 +371,9 @@ Notes:
 - At bring-up, check that the USB link keeps up: stop the bridge, open the
   watch's REPL (`mpremote connect <port> repl`), press Ctrl-C and run
   `import app; app.rt.print_stats()`. In `debug_stats`, `drop` (messages left
-  out) and `queued` (bytes waiting) should stay near 0. Note too whether
-  starting the bridge restarts a watch (it should not).
+  out since boot) should stay at or near 0; `queued` reads 0 there because the
+  game sends everything waiting when it stops. Note too whether starting the
+  bridge restarts a watch (it should not).
 - If the Wi-Fi drops in the middle of a game, the watch keeps trying to
   reconnect, and until it is back within reach of the access point the watches
   can lose each other. Use Wi-Fi debug mode at home and for field tests near

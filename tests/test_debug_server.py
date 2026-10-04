@@ -492,6 +492,49 @@ def test_launch_config_runs_the_bridge_on_usb():
     assert a.serial == [] and a.http_port == web["port"] == 8765, args
 
 
+def test_piped_output_shows_each_line_as_it_is_printed():
+    """Run as a script with stdout on a pipe (the web-sim preview, tee), the
+    banner and the "Heard watch" lines arrive while the bridge runs, not when
+    it stops: Python block-buffers a pipe unless the entry point says not to."""
+    ds = _ds()
+    import select
+    import signal
+    import subprocess
+    import sys
+    import tempfile
+    import time
+    if os.name != "posix":
+        raise Skip("select() on a pipe: macOS or Linux")
+    env = dict(os.environ)
+    env.pop("PYTHONUNBUFFERED", None)
+    with tempfile.TemporaryDirectory() as tmp:
+        p = subprocess.Popen(
+            [sys.executable, os.path.join(ds.ROOT, "tools", "debug_server.py"), "--root",
+             _www(tmp), "--http-port", "0", "--udp-port", "0", "--no-log", "--demo"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        got = []
+        try:
+            end = time.time() + 20
+            while not any(ln.startswith("Heard watch") for ln in got):
+                left = end - time.time()
+                assert left > 0, got
+                ready = select.select([p.stdout], [], [], left)[0]
+                assert ready, got
+                ln = p.stdout.readline().decode()
+                assert ln and p.poll() is None, (got, p.poll())   # arrived while it runs
+                got.append(ln)
+        finally:
+            p.send_signal(signal.SIGINT)
+            try:
+                out, err = p.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                out, err = p.communicate()
+    assert got[0].startswith("Debug bridge running."), got
+    assert "Press Ctrl-C to stop.\n" in got, got
+    assert "Stopped. Heard" in out.decode(), (out, err)
+
+
 # ---- USB serial ------------------------------------------------------------------------
 
 def test_lines_split_trim_and_limit():

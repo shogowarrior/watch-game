@@ -56,8 +56,8 @@ BATT_MV = 3950
 
 class FakeWatch:
     """One simulated watch with what ``Telemetry.record`` reads from a
-    ``Runtime``: game, link, tx, params, screen and battery state. ``sink``
-    is its hal/debuglink.py link."""
+    ``Runtime``: game, link, tx, radio, params, screen and battery state.
+    ``sink`` is its hal/debuglink.py link."""
 
     def __init__(self, i, sink):
         self.game = Game(MACS[i])
@@ -66,6 +66,7 @@ class FakeWatch:
         self.rxb = proto.Beacon(GAME_ID)
         self.buf = bytearray(proto.SIZE)
         self.player = HapticPlayer()
+        self.radio = None              # no ESP-NOW radio, so ``rp.ch`` stays null
         self.params = None
         self.screen_is_on = True
         self.bl_level = 0.0

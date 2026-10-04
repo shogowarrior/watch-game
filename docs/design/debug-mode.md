@@ -41,8 +41,10 @@ laptop, never in a chat.
    - the 5 Hz state records (`"ev": "s"`: rssi, rssi_f, d_est/d_lo/d_hi,
      zone, trend, steps, act, ui/sub, battery, link counters);
    - its events;
-   - one new 5 Hz `"rp"` record with the frame's `RenderParams`, so the page
-     can draw the watch's real screen with the real renderer.
+   - an `"rp"` record with the frame's `RenderParams` (with every state record
+     on Wi-Fi, about once a second on USB, and at once when the screen, its
+     sub-state or its power changes), so the page can draw the watch's real
+     screen with the real renderer.
 
    Records are made in the 5 Hz telemetry path only, never in the render
    loop. Over USB they are written out a little at a time, once per loop pass
@@ -52,17 +54,21 @@ laptop, never in a chat.
    the watch joins the access point, the channel is the access point's. In
    debug mode:
    - The watch joins first and reads the channel.
-   - The ESP-NOW radio starts on that channel without dropping the Wi-Fi
-     connection. Today `EspNowRadio.begin()` always disconnects and allows
-     only channels 1, 6 and 11. Debug mode needs an explicit associated mode:
-     any channel from 1 to 13, no disconnect, `PM_NONE` kept.
-   - Normal play is unchanged.
+   - `Board` then starts ESP-NOW with `EspNowRadio.begin(sta=link.sta)`, its
+     associated mode: the connection stays up, ESP-NOW uses the access
+     point's channel (any of 1-13) and modem sleep stays off (`PM_NONE`).
+   - Normal play and the USB link are unchanged: `begin()` drops any
+     connection and uses channel 1, 6 or 11 (6 by default).
    - **Both watches must join the same access point**, so they share the
      channel.
+   - A watch on the USB link keeps ESP-NOW on channel 6, so a USB watch and a
+     Wi-Fi watch hear each other only when the access point is on 6: load
+     both watches with the same link.
    - Only `hal/` imports `network` and `socket` (AGENTS rule 12).
 5. **Switching it on**, like `/tele`:
    - `python3 tools/deploy.py --port P --debug A` writes `/debug` for the USB
-     link. Nothing else is copied.
+     link. Nothing secret is copied, and any `/secrets.py` an earlier `--wifi`
+     deploy left is removed (the USB link reads no Wi-Fi file).
    - `--debug A --wifi` writes `/debug` for the Wi-Fi link and copies the
      Wi-Fi name and password to the watch as `/secrets.py` (`WIFI_SSID`,
      `WIFI_PASSWORD`; the format of `secrets.example.py`).
@@ -82,9 +88,9 @@ laptop, never in a chat.
      with a hint to move it.
    - The values are read only on the watch and by `deploy.py`'s copy, and are
      never printed, logged or sent.
-   - `tests/test_secrets_guard.py` checks that no file git would commit, and
-     no commit on any branch git knows, contains them (on the laptop that
-     holds the Wi-Fi file; it skips elsewhere).
+   - `tests/test_secrets_guard.py` checks that no file git would commit
+     contains them, and no commit on any branch git knows contains the
+     password (on the laptop that holds the Wi-Fi file; it skips elsewhere).
 
 ## Contract between the parts
 
@@ -140,9 +146,9 @@ The kinds are:
 - `"s"`: the existing state record, with unchanged fields.
 - `"rp"`: `p` holds `finder.render_params.to_dict(params, json_ready=True)`;
   `on` is whether the screen is on; `bl` is the backlight from 0 to 100; `ch`
-  is the watch's Wi-Fi channel (the access point's), or null on the fake
-  watches or when unknown. The page compares the two watches' `ch` to explain
-  a channel split.
+  is the radio's ESP-NOW channel: 6 on USB, the access point's on Wi-Fi, null
+  when there is no radio (the fake watches) or it is unknown. The page
+  compares the two watches' `ch` to explain a channel split.
 - The other telemetry events (`btn`, `tap`, `haptic`, `pwr`, `crash`, ...), as
   they happen.
 
@@ -168,24 +174,28 @@ has room for.
   separator), the compact JSON object (no spaces after `,` and `:`), then
   `\n` (the port may add `\r`). This is RFC 7464's JSON text sequence. Every
   other line on the port (`print` output, the boot message, a traceback, the
-  REPL banner) is plain text.
+  REPL banner) is plain text. The runtime's `fps` line (every 10 s) goes
+  through the same queue (`log()`) as a plain text line, so it never lands
+  inside a record.
 - **Pacing:** `send(s)` frames a record and queues it, cut once (at 5 Hz)
   into pieces of at most 128 bytes. The cuts fall every 128 bytes of the
   queued stream, not of each record, so a pump that finds the FIFO empty can
   fill all of it. When a record would leave more than `SERIAL_QMAX` bytes
   (4096) waiting, the whole record is dropped and counted in `drop`.
   `pump(now)` writes whole pieces only while the FIFO has room: room refills
-  at 11 bytes per ms since the last write, up to 128. So a write never waits,
-  and `pump` allocates nothing.
+  at 11 bytes per ms counted from the tick after the last write (`ticks_ms`
+  floors, so a tick step can be almost no real time), up to 128. So a write
+  never waits, and `pump` allocates nothing.
 - **Where it pumps:** once per loop pass, at the end of `Runtime.step`'s
   telemetry stage (after the record and the flush, with the clock read again),
   and after each strip of a drawn frame (`_HapticDisplay.push_strip` in
   `app/runtime.py`, which also services the motor and touch). One pump per
-  pass was not enough: a frame takes about 40 ms, so a pass carried at most
-  128 bytes (about 2.5 KB/s), less than the records need, and the queue
-  filled up. After every strip (about 4 ms), the FIFO refills about 3 times
-  per frame. Since `pump` allocates nothing, the render loop stays
-  allocation-free (AGENTS rule 2).
+  pass was not enough: a frame takes about 80 ms, so a pass that draws one
+  carried at most 128 bytes (under 1.6 KB/s), less than the ~2.7 KB/s the
+  records need, and the queue filled up. Pumped after every strip (about
+  8-9 ms), a full FIFO load goes out at least every second strip, about 5 per
+  frame (about 7-8 KB/s). Since `pump` allocates nothing, the render loop
+  stays allocation-free (AGENTS rule 2).
 - **Loop exit and power off:** a forced telemetry flush sends what is left and
   calls `drain()`, which writes out everything queued, waiting on the port as
   `print` does, so the last records (such as `crash` or `pwr`) get out.
@@ -196,11 +206,12 @@ has room for.
   2.7 KB/s, a quarter of the line, so the queue only fills in a burst. An
   `rp` the queue did not take goes with the next `s`. The page keeps the
   screen animating between `rp` records.
-- **Counters:** `stats()` gives `dev`, `link` (`usb`), `tx` (records written
-  out), `drop` (records dropped whole), `queued` (bytes waiting), `tx_err`
-  (writes the port refused) and `err` (the last such error), like the Wi-Fi
-  link's. `Runtime.stats()` shows them as `debug_stats`. At bring-up, check
-  `drop` and `queued`: both should stay near 0 on a real watch.
+- **Counters:** `stats()` gives `dev`, `link` (`usb`), `tx` (lines written
+  out: records and the fps line), `drop` (lines dropped whole), `queued`
+  (bytes waiting), `tx_err` (writes the port refused) and `err` (the last
+  such error), like the Wi-Fi link's. `Runtime.stats()` shows them as
+  `debug_stats`. At bring-up, check that `drop` stays near 0 on a real watch
+  (`queued` reads 0 after Ctrl-C: the loop drains the link on exit).
 - The USB link needs no Wi-Fi name or password and leaves the radio as in
   normal play. It never reads the port, so the REPL's Ctrl-C still works.
 
@@ -225,8 +236,11 @@ python3 tools/debug_server.py [--serial [PORT ...]] [--http-port 8765] [--udp-po
   `{"ok": true, "udp_port": N, "clients": N, "packets": N, "bad": N, "log": path|null, "watches": {"<dev>": {"src": ip, "last_rx": ms, "n": N}}}`.
   The page checks this to decide whether Real mode is available.
 - Every valid datagram is appended to `logs/debug-YYYYmmdd-HHMMSS.jsonl`
-  (gitignored) unless `--no-log` is set. A recorded session can be replayed
-  later to calibrate the estimators on real radio data.
+  (gitignored) unless `--no-log` is set. The sessions are real radio data for
+  calibrating the estimators later (docs/estimation/bakeoff.md section 4); no
+  tool replays them yet. A watch's RSSI is in its 5 Hz state records
+  (`rssi`, the last beacon heard), not one line per beacon: debug mode leaves
+  `bcn_rx` off.
 - `--demo` runs `tools/fake_watches.py` in a thread, so Real mode can be tried
   with no watches. `--demo --serial` makes the fake watches use the USB link
   instead: each writes through `SerialLink` into a pseudo-terminal that the
@@ -269,9 +283,11 @@ Details the parts rely on:
 - `rx` is the laptop's wall clock in ms since 1970 (`Date.now()` on the page),
   never the watch's ticks.
 - `/debug/status` `log` is a path relative to the repo, such as
-  `logs/debug-20261003-210553.jsonl`, or null. The log is created with the first
-  record. Each of its lines is exactly one `/events` payload
-  (`{"src", "rx", "rec"}`), ready to replay.
+  `logs/debug-20261003-210553.jsonl`, or null. The log is created with the
+  first line it receives. Each of its lines is one `/events` payload:
+  `{"src", "rx", "rec"}` for a record, `{"src", "rx", "line"}` for text a
+  watch printed on its USB port (boot messages, tracebacks, the fps line); a
+  reader skips lines without `rec`.
 - The `/events` stream starts with `retry: 2000`, so the page's `EventSource`
   reconnects within 2 s after the bridge restarts. A comment line every 10 s
   finds closed tabs.
@@ -327,8 +343,12 @@ How the page reads the records:
 - Two different `mac` values under one label within 3 s are flagged as two
   watches with the same name. The same MAC on both watches is fine.
 - When both watches are live and their latest `rp` records carry different
-  non-null `ch`, both cards say the watches joined different parts of the
-  Wi-Fi (different channels) and suggest a network with one access point.
+  non-null `ch`, both cards say why they cannot hear each other. Both on
+  Wi-Fi: they joined different parts of the Wi-Fi (different channels), so use
+  a network with one access point. One on USB: the cards name both channels
+  ("Watch A talks on channel 6 (USB) and watch B on your Wi-Fi's channel 11
+  ...") and say to load both watches with the same link (both on USB, or both
+  with `--wifi`).
 - "Last heard" counts from the bridge's `rx`, not from the record's `t`.
 - An `rp` record without `p` keeps the last screen. A `mac` of null (a watch
   whose radio failed to start) is accepted.

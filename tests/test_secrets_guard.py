@@ -4,10 +4,11 @@ The Wi-Fi name and password are read from every Wi-Fi file there is (the one
 tools/wifi_setup.py saved, and an older secrets.py in the repo) with its
 shared reader (never run, never printed), and no file git would commit
 (tracked, or new and not ignored) may contain one; a failure names the
-variable and the files only. Nor may any commit git knows (every branch,
-fetched ones too): a pushed commit stays readable after a later one removes
-the value, so that failure says to change the password on the router. Without
-a Wi-Fi file both checks skip, so they also run on made-up ones
+variable and the files only. Nor may the password be in any commit git knows
+(every branch, fetched ones too; the name is broadcast, so it is checked in
+committable files only): a pushed commit stays readable after a later one
+removes the value, so that failure says to change the password on the router.
+Without a Wi-Fi file both checks skip, so they also run on made-up ones
 (test_guard_checks_every_wifi_file, test_history_guard_finds_a_removed_value).
 secrets.py, webrepl_cfg.py and logs/ must be ignored. Needs git and
 subprocess: skipped under MicroPython and outside a git checkout."""
@@ -26,15 +27,15 @@ def _wifi_setup():
     return w
 
 
-def _git(*args, cwd=None):
+def _git(*args, cwd=None, input=None):
     """``git args`` in the repo root (or ``cwd``) -> CompletedProcess; Skip
-    without git."""
+    without git. ``input`` bytes go to git's stdin."""
     try:
         import subprocess
     except ImportError:
         raise Skip("needs subprocess (CPython)")
     try:
-        r = subprocess.run(("git",) + args, capture_output=True, cwd=cwd)
+        r = subprocess.run(("git",) + args, capture_output=True, cwd=cwd, input=input)
     except OSError:
         raise Skip("git is not installed")
     if r.returncode == 128:              # fatal: not a git checkout
@@ -82,7 +83,8 @@ def _history_leaks(secrets, cwd=None):
     for name, v in secrets:
         if not revs:
             break
-        r = _git("grep", "-l", "-F", "-e", v, *revs, cwd=cwd)
+        # pattern on stdin: never in argv (ps, /proc)
+        r = _git("grep", "-l", "-F", "-f", "-", *revs, cwd=cwd, input=v.encode("utf-8"))
         assert r.returncode in (0, 1), r.stderr          # 1: no match
         for line in r.stdout.decode("utf-8", "replace").splitlines():
             commit, path = line.split(":", 1)
@@ -114,11 +116,14 @@ def test_no_secret_in_committable_files():
 
 
 def test_no_secret_in_git_history():
+    """Only the password: the Wi-Fi name is broadcast by the access point, so
+    an old name in history exposes nothing once the password has been changed
+    (handoff item 3: change the password, no scrub)."""
     for path, secrets in _wifi_secrets():
-        leaks = _history_leaks(secrets)
+        leaks = _history_leaks([s for s in secrets if s[0] == "WIFI_PASSWORD"])
         assert not leaks, (
             "a value from %s is in git history: %s. Anyone who can read the repo can "
-            "read a pushed commit, so change it on the router, then run "
+            "read a pushed commit, so change the password on the router, then run "
             "python3 tools/wifi_setup.py again" % (
                 path, "; ".join("%s in %s %s" % x for x in leaks)))
 
@@ -151,12 +156,25 @@ def test_guard_finds_a_planted_value():
         assert _leaks(found, [clean, leaky, gone]) == [("WIFI_PASSWORD", leaky)]
 
 
-def _guard_fails():
-    """The AssertionError message of test_no_secret_in_committable_files, or None."""
+def _guard_fails(test, wifi, **stubs):
+    """The AssertionError message of guard ``test`` run with ``wifi`` as the
+    saved Wi-Fi file and this module's globals ``stubs`` swapped in, or None."""
+    import os
+    w = _wifi_setup()
+    g = globals()
+    old_env, old = os.environ.get(w.ENV), dict((k, g[k]) for k in stubs)
+    os.environ[w.ENV] = wifi
+    g.update(stubs)
     try:
-        test_no_secret_in_committable_files()
+        test()
     except AssertionError as e:
         return str(e)
+    finally:
+        g.update(old)
+        if old_env is None:
+            os.environ.pop(w.ENV, None)
+        else:
+            os.environ[w.ENV] = old_env
     return None
 
 
@@ -164,39 +182,33 @@ def test_guard_checks_every_wifi_file():
     w = _wifi_setup()
     import os
     import tempfile
-    g = globals()
+    guard = test_no_secret_in_committable_files
     pw = "made-up-" + str(os.getpid()) + "-pw"      # built at run time: in no committed file
-    old_env, old_files = os.environ.get(w.ENV), g["_committable"]
     with tempfile.TemporaryDirectory() as tmp:
         fake = os.path.join(tmp, "wifi.py")
         w.save(fake, "MadeUpNet-" + str(os.getpid()), pw)
-        os.environ[w.ENV] = fake
-        try:
-            assert _guard_fails() is None                # nothing committed holds them
-            leaky = os.path.join(tmp, "notes.md")
-            with open(leaky, "w") as f:
-                f.write("pw=" + pw)
-            g["_committable"] = lambda: [leaky]
-            msg = _guard_fails()
-            assert msg and "WIFI_PASSWORD" in msg and pw not in msg, "guard missed it"
-            with open(fake, "w") as f:
-                f.write("WIFI_PASSWORD = " + repr(pw) + " +\n")
-            msg = _guard_fails()
-            assert msg and "cannot check" in msg and pw not in msg, "unreadable file passed"
-        finally:
-            g["_committable"] = old_files
-            if old_env is None:
-                os.environ.pop(w.ENV, None)
-            else:
-                os.environ[w.ENV] = old_env
+        assert _guard_fails(guard, fake) is None         # nothing committed holds them
+        leaky = os.path.join(tmp, "notes.md")
+        with open(leaky, "w") as f:
+            f.write("pw=" + pw)
+        msg = _guard_fails(guard, fake, _committable=lambda: [leaky])
+        assert msg and "WIFI_PASSWORD" in msg and pw not in msg, "guard missed it"
+        with open(fake, "w") as f:
+            f.write("WIFI_PASSWORD = " + repr(pw) + " +\n")
+        msg = _guard_fails(guard, fake, _committable=lambda: [leaky])
+        assert msg and "cannot check" in msg and pw not in msg, "unreadable file passed"
 
 
 def test_history_guard_finds_a_removed_value():
     """A value committed once and removed by the next commit is still found,
-    in the commit that held it."""
+    in the commit that held it. The guard looks for the password only (the
+    Wi-Fi name may stay in history once the password has been changed), and
+    never puts it on git's command line, where ps shows it."""
     _git("--version")                    # Skip first without subprocess or git
+    w = _wifi_setup()
     import os
     import tempfile
+    net = "MadeUpNet-" + str(os.getpid())
     pw = "made-up-" + str(os.getpid()) + "-hist"     # built at run time: in no committed file
     with tempfile.TemporaryDirectory() as tmp:
         def commit(text, msg):
@@ -210,7 +222,19 @@ def test_history_guard_finds_a_removed_value():
         assert _git("init", "-q", cwd=tmp).returncode == 0
         secrets = [("WIFI_PASSWORD", pw)]
         assert _history_leaks(secrets, cwd=tmp) == []                # no commits yet
-        first = commit("wlan.connect('net', %r)\n" % pw, "first")
+        first = commit("wlan.connect(%r, %r)\n" % (net, pw), "first")
         commit("import secrets\n", "stop tracking it")
         assert _history_leaks(secrets, cwd=tmp) == [("WIFI_PASSWORD", first[:9], "boot.py")]
         assert _history_leaks([("WIFI_PASSWORD", pw + "x")], cwd=tmp) == []
+        guard = test_no_secret_in_git_history
+        here = lambda s, f=_history_leaks: f(s, cwd=tmp)
+        argv = []
+        spy = lambda *a, f=_git, **k: (argv.append(a), f(*a, **k))[1]
+        fake = os.path.join(tmp, "wifi.py")
+        w.save(fake, net, pw + "-new")                 # the password changed, the name kept
+        assert _guard_fails(guard, fake, _history_leaks=here) is None
+        w.save(fake, net, pw)
+        msg = _guard_fails(guard, fake, _history_leaks=here, _git=spy)
+        assert msg and "WIFI_PASSWORD in " + first[:9] in msg, msg
+        assert "WIFI_SSID" not in msg and pw not in msg and net not in msg, msg
+        assert argv and not [x for a in argv for x in a if pw in x], "password in git's argv"

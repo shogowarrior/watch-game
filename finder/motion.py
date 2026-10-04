@@ -14,6 +14,7 @@ so that is what we use -- see docs/estimation/imu-drift.md.
 """
 
 import math
+from finder import tuning as T
 from finder.compat import ticks_diff
 from finder.estimators.base import ACT_UNKNOWN, ACT_STILL, ACT_WALK, ACT_RUN
 
@@ -22,8 +23,10 @@ CHIP_ACT = (ACT_STILL, ACT_WALK, ACT_RUN, ACT_UNKNOWN)
 
 STILL_ON_G = 0.012     # sd of |a| over the window to enter "still"
 STILL_OFF_G = 0.025    # ... and to leave it
-FACE_ON_COS = math.cos(20.0 * math.pi / 180.0)
-FACE_OFF_COS = math.cos(30.0 * math.pi / 180.0)
+FACE_ON_DEG = T.SCAN_FLAT_DEG   # face-up within 20 deg (ui-spec §6 SCANNING ready) ...
+FACE_OFF_DEG = 30.0             # ... left above 30 deg (spec-silent hysteresis, imu-drift.md)
+FACE_ON_COS = math.cos(FACE_ON_DEG * math.pi / 180.0)
+FACE_OFF_COS = math.cos(FACE_OFF_DEG * math.pi / 180.0)
 TAU_G_S = 0.5          # gravity low-pass
 TAU_BP_FAST_S = 0.053  # step band-pass: ~3 Hz low-pass ...
 TAU_BP_SLOW_S = 0.25   # ... minus ~0.6 Hz low-pass

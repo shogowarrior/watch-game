@@ -79,7 +79,8 @@ def main():
     bench("step(16)", s, lambda s: s.step(16), n * 3)
     bench("telemetry_json()", s, lambda s: s.telemetry_json(), n)
     s.walk_to(0, 30.0, 8.0)
-    bench("step(50) walking", s, lambda s: s.step(50), n)
+    # at most 200 steps: longer walks reach HOT, where a tap starts no scan
+    bench("step(50) walking", s, lambda s: s.step(50), min(n, 200))
     a = s.world.a
     s.set_pose(0, a.x, a.y)                   # stop where A is (a drag ends the walk)
     _step_until(s, lambda s: s.games[0].me.activity == ACT_STILL)

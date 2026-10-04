@@ -36,7 +36,7 @@ Then every record also carries ``dev`` and ``mac`` (the last 3 bytes of the
 radio MAC, hex, set by the runtime) and goes to the sink: at each 5 Hz state
 record the events since the last one, the state record, and an ``rp``
 record (``{"ev": "rp", "on": screen on, "bl": backlight 0-100, "ch": the
-sink's Wi-Fi channel or null, "p": the RenderParams as JSON}``) that lets
+radio's ESP-NOW channel or null, "p": the RenderParams as JSON}``) that lets
 the page draw the watch's screen. ``rp`` goes once the sink's ``rp_ms`` has
 passed since the last one it took (Wi-Fi 200: with every state record; USB
 1000), and at once when the screen, its sub-state or its power changes. ``rp``
@@ -240,16 +240,19 @@ class Telemetry:
 
     def _send_rp(self, now, rt):
         """The ``rp`` record, when due (``_rp_due``): the latest RenderParams,
-        the screen's state and the Wi-Fi channel (``ch``: the page tells two
-        watches on different channels apart; null on USB and the fake watches)."""
+        the screen's state and ``ch``, the radio's ESP-NOW channel (6 on USB,
+        the access point's on Wi-Fi, null with no radio, as on the fake
+        watches), so the page can tell two watches on different channels apart."""
         p = rt.params
         on = rt.screen_is_on
         if p is None or not self._rp_due(now, p, on):
             return
         sk = self.sink
+        r = rt.radio
         s = _fit(json.dumps({"t": now, "ev": "rp", "dev": self.dev, "mac": self.mac,
                              "on": on, "bl": _pct(rt.bl_level),
-                             "ch": sk.channel, "p": to_dict(p)}, separators=SEP))
+                             "ch": None if r is None else r.channel,
+                             "p": to_dict(p)}, separators=SEP))
         if s is not None and sk.send(s):
             self._rp_t = now
             self._rp_scr, self._rp_sub, self._rp_on = p.screen, p.sub, on

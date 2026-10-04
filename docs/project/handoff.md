@@ -20,7 +20,7 @@ in one message with the current default marked. Don't build on an assumption.
    (`boot.py` kept them until `44880ab`, so `0db0f98` has them too; checked
    2026-10-04: no later commit on any branch does). Have they been changed?
    On the laptop with the saved Wi-Fi file, `python3 tests/runner.py
-   test_secrets_guard` fails if the saved values are anywhere in history. The
+   test_secrets_guard` fails if the saved password is anywhere in history. The
    other option is scrubbing them from history, which needs a force-push.
    Default: no scrub. Changing the passwords is the fix that matters.
 4. **Trend target not met.** ui-spec §5.5 wants fewer than 5 % false
@@ -53,17 +53,18 @@ in one message with the current default marked. Don't build on an assumption.
 
   It runs unchanged on CPython, on MicroPython 1.29 (WebAssembly) and in the
   web simulator.
-- **Tests:** `python3 tests/runner.py` gives 663 passed; `node tools/mpy/run.mjs
-  tests/runner.py` gives 643 passed. The held-out bake-off (seeds 100-129)
+- **Tests:** `python3 tests/runner.py` gives 711 passed; `node tools/mpy/run.mjs
+  tests/runner.py` gives 691 passed. The held-out bake-off (seeds 100-129)
   still ranks kalman2 first, at 0.660.
 - **Review:** four whole-repo review rounds ran on 2026-10-02/03. Every finding
   was verified by an independent skeptic before it was fixed. Confirmed
   findings per round: 282, 175, 95, 21. Round 4 covered only the files round
   3 had changed, and only medium-or-worse problems.
-- **Real watches:** nothing has run on a real watch yet. On 2026-10-03 the owner
-  flashed one watch with stock MicroPython 1.29 (`tools/flash.sh`). Next is
-  `python3 tools/deploy.py --port <port> --noapp` and the checklist in
-  docs/hardware-setup.md.
+- **Real watches:** first bring-up on both watches, 3-4 Oct 2026: the display
+  timings, the gc time, the IMU z sign (flipped on both) and the soft-bump
+  levels were measured, and with the HOT heartbeat muted a knock reached
+  FOUND. Still to do: the rest of the checklist in docs/hardware-setup.md
+  (radio ping-pong, path loss) and debug mode on real watches.
 - **Beacon format is version 3.** Both watches must run the same code; a watch
   on older code ignores the other.
 
@@ -101,8 +102,9 @@ in one message with the current default marked. Don't build on an assumption.
 4. **Real-watch bring-up**, with the owner at the watches. Turn what they report
    from docs/hardware-setup.md into fixes. A cloud thread cannot reach USB or
    the watches.
-5. **Calibrate on real data.** Record sessions with debug mode (logs/), add a
-   replay input to `tools/bakeoff.py`, and retune thresholds in
+5. **Calibrate on real data.** Record sessions with debug mode (logs/; they
+   keep the last RSSI 5 times a second, not every beacon), add a replay input
+   to `tools/bakeoff.py`, and retune thresholds in
    `docs/design/tokens.json`. That answers questions 4 and 5.
 6. **Field test** with two players, following docs/research/user-research.md.
 

@@ -387,7 +387,7 @@ def test_serial_frames_each_record_as_one_line():
     assert port.data() == want
     assert link.stats() == {"dev": "B", "link": "usb", "tx": 3, "drop": 0, "queued": 0,
                             "tx_err": 0, "err": None}
-    assert (link.sta, link.channel, link.rp_ms) == (None, None, 1000)
+    assert (link.sta, link.rp_ms) == (None, 1000)
     assert dl.SerialLink().out is sys.stdout.buffer       # the REPL's UART on the watch
 
 
@@ -441,10 +441,14 @@ def test_serial_pieces_fill_whole_fifo_loads():
 def test_serial_pump_never_writes_more_than_the_fifo_has_room_for():
     """A 4 KB backlog pumped at even and uneven passes: no write ever
     overfills the 115200-baud line's FIFO (128 bytes, 11.52 bytes per ms),
-    and pumped every ms the backlog drains at about that rate."""
+    and pumped every ms the backlog drains at about that rate. The port
+    stamps real time, the link gets ``ticks_ms`` (floored): a write late in
+    one tick and a pass early in a later one see a whole ms more than really
+    passed (the last two step lists)."""
     sizes = (411, 664, 70, 411, 63, 411)
-    for steps in ((1,), (1, 5, 3, 17, 2, 9, 30, 4, 12)):
-        clock = [1000]
+    for steps in ((1,), (1, 5, 3, 17, 2, 9, 30, 4, 12),
+                  (0.0625, 0.9375), (11.0625, 0.9375, 1)):
+        clock = [1000.9375]
         port = _port(clock)
         link = dl.SerialLink("A", port)
         n = 0
@@ -454,7 +458,7 @@ def test_serial_pump_never_writes_more_than_the_fifo_has_room_for():
         assert link.drop == 1 and total > dl.SERIAL_QMAX - 664
         j = 0
         while link.queued:
-            link.pump(clock[0])
+            link.pump(int(clock[0]))
             clock[0] += steps[j % len(steps)]
             j += 1
         assert port.overfill() is None, steps
@@ -463,7 +467,7 @@ def test_serial_pump_never_writes_more_than_the_fifo_has_room_for():
             t0 = port.writes[0][1]
             first = sum([len(w[0]) for w in port.writes if w[1] == t0])
             rate = (total - first) / (port.writes[-1][1] - t0)
-            assert 10.0 <= rate <= LINE_RATE, rate
+            assert 9.5 <= rate <= LINE_RATE, rate
 
 
 def test_serial_pump_runs_across_the_tick_wrap():

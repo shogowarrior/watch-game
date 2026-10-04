@@ -37,13 +37,18 @@ point's, so the two cannot find each other until both have joined (restart
 the missing one). A mesh or extender network with one name can also put
 them on different channels.
 
-Both links offer what app/telemetry.py and app/runtime.py use: ``dev``,
-``sta`` and ``channel`` (None on USB), ``rp_ms`` (how often the screen
-record goes out), ``send(data)`` (one record, from the 5 Hz path, never
-from the render loop), ``pump(now)`` (once per loop pass and after every
-strip of a frame), ``drain()`` (loop exit), ``stats()`` and ``close()``.
-Send errors are counted in ``tx_err`` and never raised. ``network`` and
-``socket`` are imported only when used, so this file also loads on CPython
+Both links offer what app/telemetry.py, app/runtime.py and ``Board`` use:
+``dev``, ``sta`` (None on USB), ``rp_ms`` (how often the screen record goes
+out), ``send(data)`` (one record, from the 5 Hz path, never from the render
+loop), ``log(text)`` (the runtime's fps line: queued as a plain text line
+between records on USB, printed on Wi-Fi), ``pump(now)`` (once per loop
+pass and after every strip of a frame), ``drain()`` (loop exit) and
+``stats()``; ``close()`` is for ``start()`` when a link fails to open and
+for tools/fake_watches.py. The ``rp`` record's channel is the radio's
+(app/telemetry.py), not the link's: ``DebugLink.channel`` only names the
+access point's in ``start``'s message and ``stats()``. Send errors are
+counted in ``tx_err`` and never raised. ``network`` and ``socket`` are
+imported only when used, so this file also loads on CPython
 (tools/fake_watches.py sends through both links) and in the tests.
 """
 
@@ -67,7 +72,8 @@ SERIAL_FIFO = 128        # bytes: the UART's transmit FIFO, and the largest piec
 SERIAL_RATE = 11         # bytes per ms the FIFO empties (115200 baud: 11.52)
 SERIAL_QMAX = 4096       # bytes that may wait; a record that would pass it is dropped
 SERIAL_SLOTS = 160       # pieces that may wait: records of 32+ bytes reach SERIAL_QMAX first
-_EMPTY_MS = SERIAL_FIFO // SERIAL_RATE + 1   # the FIFO is empty this long after a write
+# the FIFO is empty this long after the tick that follows a write
+_EMPTY_MS = SERIAL_FIFO // SERIAL_RATE + 1
 
 
 def read_config(path):
@@ -124,17 +130,19 @@ class SerialLink:
     most ``SERIAL_FIFO`` bytes; a record that would leave more than
     ``SERIAL_QMAX`` bytes waiting is dropped whole (``drop``). ``pump(now)``
     writes whole pieces only while the modelled FIFO has room: it refills at
-    ``SERIAL_RATE`` bytes per ms since the last write, up to ``SERIAL_FIFO``.
-    So a write never waits (``print`` would, while the FIFO is full), and
-    ``pump`` allocates nothing. The cuts fall every ``SERIAL_FIFO`` bytes of
-    the queued stream, not of each record, so a pump that finds the FIFO
-    empty fills all of it. The runtime pumps once per loop pass and after
-    each ~4 ms strip of a frame, so the FIFO refills about 3 times per ~40 ms
-    frame: well over the ~2.7 KB/s the records need, and the queue fills only
-    in a burst."""
+    ``SERIAL_RATE`` bytes per ms counted from the tick after the last write
+    (one ms less than ``ticks_ms`` shows, since a tick step can be almost no
+    real time), up to ``SERIAL_FIFO``. So a write never waits (``print``
+    would, while the FIFO is full), and ``pump`` allocates nothing. The cuts
+    fall every ``SERIAL_FIFO`` bytes of the queued stream, not of each
+    record, so a pump that finds the FIFO empty fills all of it. The runtime
+    pumps once per loop pass and after each strip of a frame (~8-9 ms of a
+    ~80 ms frame on the watch), so a full FIFO load goes out at least every
+    second strip, about 5 per frame (~7-8 KB/s): well over the ~2.7 KB/s
+    the records need, and the queue fills only in a burst. ``tx`` in
+    ``stats()`` counts the lines written out: records and fps lines."""
 
     sta = None               # no Wi-Fi: the radio stays as in normal play
-    channel = None
     rp_ms = 1000             # the screen once a second (and at once when it changes)
 
     def __init__(self, dev="A", out=None):
@@ -192,7 +200,7 @@ class SerialLink:
         room = SERIAL_FIFO
         t = self._t
         if t is not None:
-            dt = ticks_diff(now, t)
+            dt = ticks_diff(now, t) - 1   # ticks_ms floors: N ticks can be just over N-1 real ms
             if dt < _EMPTY_MS:
                 room = self._room + (SERIAL_RATE * dt if dt > 0 else 0)
                 if room > SERIAL_FIFO:
