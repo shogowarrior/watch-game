@@ -16,12 +16,18 @@ choice and ``RenderParams.theme`` come with the renderer hook (ui-spec §4A
 Status).
 
 ``overlays=False`` draws the field layer only (tests, previews).
+On CPython (no framebuf) ``ThemedRenderer`` is None; ``NAMES``, ``make`` and
+the theme modules still import, for their maths.
 """
 
 from finder import tuning as T
 from finder.compat import ticks_ms
-from ui.renderer import (BH, CORE_V, G_GLOW, NB, PROX, S_FAR, S_HOT, S_SCANNING, SAVER_VMAX,
-                         SUN_LIFT, V7, WARN, WARN_TOP, Renderer)
+
+try:
+    from ui.renderer import (BH, CORE_V, G_GLOW, NB, PROX, S_FAR, S_HOT, S_SCANNING,
+                             SAVER_VMAX, SUN_LIFT, V7, WARN, WARN_TOP, Renderer)
+except ImportError:  # CPython: no framebuf, so no renderer; NAMES and make() still work
+    Renderer = None
 
 NAMES = T.THEME_NAMES
 
@@ -44,7 +50,7 @@ def make(name, r):
     return C(r)
 
 
-class ThemedRenderer(Renderer):
+class _ThemedRenderer(Renderer or object):
     """Renderer whose field is drawn by a theme (see the module docstring)."""
 
     def __init__(self, theme=None, overlays=True):
@@ -110,3 +116,6 @@ class ThemedRenderer(Renderer):
         for k in range(NB):
             display.push_strip(k * BH, BH, bands[k])
         return ev
+
+
+ThemedRenderer = _ThemedRenderer if Renderer is not None else None
