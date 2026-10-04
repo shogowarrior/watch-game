@@ -336,32 +336,26 @@ def build_map(rows):
 
 
 # ---- strip blit kernel --------------------------------------------------------
-# Map rows off/240.. through the palette into ``top``, and the same rows in
-# reverse order into ``bot`` (its mirror strip), in one pass. Compiled with
+# Map bytes off..off+n-1 (whole rows) through the palette into ``dst``, four
+# pixels per pass: one 32-bit load of map bytes, two 32-bit stores of pixel
+# pairs (little-endian, as framebuf stores RGB565). Compiled with
 # @micropython.viper where the port supports it (the ESP32 build; RingMap
 # checks it against the framebuf path before use); elsewhere RingMap uses the
-# framebuf palette blit plus a row copy.
+# framebuf palette blit.
 _BSRC = """
-def blit_kernel(top, bot, idx, pal, off: int, h: int):
-    tp = ptr16(top)
-    bp = ptr16(bot)
-    ip = ptr8(idx)
+def blit_kernel(dst, idx, pal, off: int, n: int):
+    dp = ptr32(dst)
+    ip = ptr32(idx)
     pp = ptr16(pal)
+    i = off >> 2
+    e = i + (n >> 2)
     d = 0
-    e = (h - 1) * 240
-    s = off
-    r = 0
-    while r < h:
-        x = 0
-        while x < 240:
-            c = pp[ip[s + x]]
-            tp[d + x] = c
-            bp[e + x] = c
-            x += 1
-        s += 240
-        d += 240
-        e -= 240
-        r += 1
+    while i < e:
+        w = ip[i]
+        dp[d] = pp[w & 0xFF] | (pp[(w >> 8) & 0xFF] << 16)
+        dp[d + 1] = pp[(w >> 16) & 0xFF] | (pp[(w >> 24) & 0xFF] << 16)
+        d += 2
+        i += 1
 """
 
 
@@ -377,73 +371,75 @@ def _compile_blit():
 blit_kernel = _compile_blit()
 
 
-class RingMap:
-    """Ring-index map blitted into RGB565 strips through a palette.
+def _aligned(b):
+    """True if ``b``'s bytes start on a 4-byte boundary (32-bit loads and
+    stores on the ESP32 fault otherwise); True where there is no uctypes."""
+    try:
+        import uctypes
+    except ImportError:
+        return True
+    return uctypes.addressof(b) & 3 == 0
 
-    The map is mirror-symmetric about y = 119.5, so only its top half (28.8 KB)
-    is kept. ``blit`` palette-blits a top strip into ``top`` and its rows in
-    reverse order into ``bottom``, the strip that mirrors it: with the viper
-    ``blit_kernel`` (``kind`` "viper") once it matches the framebuf path,
-    else a framebuf blit and a row copy (``kind`` "framebuf").
+
+class RingMap:
+    """Ring-index map (240x240 GS8, 57.6 KB) blitted into RGB565 strips
+    through a palette, top to bottom: with the viper ``blit_kernel`` (``kind``
+    "viper") once it matches the framebuf path on ``bufs`` (the strip
+    buffers it will write), else a framebuf palette blit (``kind``
+    "framebuf").
     """
 
-    def __init__(self, top, bottom, strip_h, kernel=None):
-        self.idx = build_map(120)
+    def __init__(self, strip_h, bufs, kernel=None):
+        self.idx = build_map(W)
         self.h = strip_h
-        self.top = top
-        self.bottom = bottom
+        self.n = W * strip_h
         self.kern = None
         self.kind = "framebuf"
         if framebuf is None:
             self.kind = None
             return
-        self.map_fb = framebuf.FrameBuffer(self.idx, W, 120, framebuf.GS8)
-        self.top_fb = framebuf.FrameBuffer(top, W, strip_h, framebuf.RGB565)
-        n = W * 2
-        a = memoryview(top)
-        b = memoryview(bottom)
-        self.rows = [a[k * n:(k + 1) * n] for k in range(strip_h)]
-        self.mirror = [b[k * n:(k + 1) * n] for k in range(strip_h - 1, -1, -1)]
+        self.map_fb = framebuf.FrameBuffer(self.idx, W, W, framebuf.GS8)
         k = blit_kernel if kernel is None else kernel
         if k is not None:
-            if self.agrees(k):
+            ok = _aligned(self.idx)
+            for b in bufs:
+                ok = ok and _aligned(b)
+            if ok and self.agrees(k, bufs[0]):
                 self.kern = k
                 self.kind = "viper" if kernel is None else "kernel"
             else:
                 self.kind = "framebuf (kernel self-check failed)"
 
-    def agrees(self, kern):
-        """True if ``kern`` writes the same strips as the framebuf path for
-        the first and the centre pair, through a palette of distinct colours.
-        Leaves the strips dirty (the next frame redraws them)."""
+    def agrees(self, kern, buf):
+        """True if ``kern`` writes the same strips into ``buf`` as the
+        framebuf path, at the top, the centre and the bottom, through a
+        palette of distinct colours. Leaves ``buf`` dirty (the next frame
+        redraws it)."""
         arr = array.array("H", [(i * 4099 + 0x1235) & 0xFFFF for i in range(256)])
         pal = framebuf.FrameBuffer(arr, 256, 1, framebuf.RGB565)
-        top = self.top
-        bottom = self.bottom
+        fb = framebuf.FrameBuffer(buf, W, self.h, framebuf.RGB565)
         k = self.kern
-        for y0 in (0, 120 - self.h):
-            self.kern = None
-            self.blit(y0, pal, arr)
-            want = bytes(top) + bytes(bottom)
-            kern(top, bottom, self.idx, arr, y0 * W, self.h)
-            if bytes(top) + bytes(bottom) != want:
-                self.kern = k
-                return False
-        self.kern = k
-        return True
+        try:
+            for y0 in (0, 120 - self.h // 2, W - self.h):
+                self.kern = None
+                self.blit(y0, pal, arr, buf, fb)
+                want = bytes(buf)
+                fb.fill(0x5A5A)               # so a pixel the kernel skips shows
+                kern(buf, self.idx, arr, y0 * W, self.n)
+                if bytes(buf) != want:
+                    return False
+            return True
+        finally:
+            self.kern = k
 
-    def blit(self, y0, pal, arr):
-        """Field rows y0..y0+h-1 (top half) into ``top``, mirrored into
-        ``bottom``. ``pal``: the palette as a framebuf, ``arr``: its array."""
+    def blit(self, y0, pal, arr, buf, fb):
+        """Field rows y0..y0+h-1 into the strip ``buf`` (``fb`` its
+        FrameBuffer). ``pal``: the palette as a framebuf, ``arr``: its array."""
         k = self.kern
         if k is not None:
-            k(self.top, self.bottom, self.idx, arr, y0 * W, self.h)
+            k(buf, self.idx, arr, y0 * W, self.n)
             return
-        self.top_fb.blit(self.map_fb, 0, -y0, -1, pal)
-        rows = self.rows
-        mirror = self.mirror
-        for k in range(self.h):
-            mirror[k][:] = rows[k]
+        fb.blit(self.map_fb, 0, -y0, -1, pal)
 
 
 # ---- screen tables ----------------------------------------------------------

@@ -156,21 +156,59 @@ def test_push_strip_window_and_framing():
     del log[:]
     buf = bytearray(240 * 24 * 2)
     buf[0] = 0xAB
+    b2 = bytearray(240 * 24 * 2)
+    b2[1] = 0xCD
+    b3 = bytearray(240 * 24 * 2)
+    b3[2] = 0xEF
     d.push_strip(48, 24, buf)
-    cmds, frames = _decode(log)
+    assert d._cs.v == 0                       # window left open for the next strip
+    d.push_strip(72, 24, b2)                  # continues it: one write, no command
+    d.push_strip(216, 24, b3)                 # not contiguous: a new window; the
+    cmds, frames = _decode(log)               # bottom row closes it
     assert frames == 1
     assert cmds == [
         (0x2A, b"\x00\x00\x00\xef"),
-        (0x2B, bytes([0, 128, 0, 151])),      # rows 48..71 + 80
-        (0x2C, bytes(buf)),
+        (0x2B, bytes([0, 128, 1, 63])),       # rows 48..239 + 80
+        (0x2C, bytes(buf) + bytes(b2)),
+        (0x2A, b"\x00\x00\x00\xef"),
+        (0x2B, bytes([1, 40, 1, 63])),        # rows 216..239 + 80
+        (0x2C, bytes(b3)),
     ]
+    assert len([e for e in log if e[0] == "spi"]) == 6 + 1 + 6
     dc = [v for (n, v) in log if n == "dc"]
-    assert dc == [0, 1, 0, 1, 0, 1]
+    assert dc == [0, 1, 0, 1, 0, 1] * 2
     try:
         d.push_strip(0, 24, bytearray(10))
         assert False
     except ValueError:
         pass
+
+
+def test_strips_top_to_bottom_are_one_window():
+    d, log, _, _, _ = _rig()
+    strips = [bytes([k]) * (240 * 24 * 2) for k in range(10)]
+    for _ in range(2):                        # the next frame opens a new window
+        del log[:]
+        for k in range(10):
+            d.push_strip(24 * k, 24, strips[k])
+        cmds, frames = _decode(log)
+        assert frames == 1 and len(cmds) == 3
+        assert cmds[1] == (0x2B, b"\x00\x50\x01\x3f")
+        assert cmds[2] == (0x2C, b"".join(strips))
+        assert len([e for e in log if e[0] == "spi"]) == 5 + 10
+
+
+def test_a_command_closes_an_open_window():
+    d, log, _, _, _ = _rig()
+    strip = bytes(240 * 24 * 2)
+    del log[:]
+    d.push_strip(0, 24, strip)
+    d.sleep()                                 # DISPOFF ends the RAMWR
+    d.push_strip(24, 24, strip)               # so this one opens a new window
+    d.push_strip(48, 216 - 24, bytes(240 * 192 * 2))
+    cmds, _ = _decode(log)
+    assert [c for c, _ in cmds] == [0x2A, 0x2B, 0x2C, 0x28, 0x10, 0x2A, 0x2B, 0x2C]
+    assert cmds[6] == (0x2B, bytes([0, 104, 1, 63]))
 
 
 def test_push_frame_strips_under_one_cs():
@@ -190,6 +228,115 @@ def test_push_frame_strips_under_one_cs():
     sl = d._pf_slices
     d.push_frame(fb)
     assert d._pf_slices is sl               # cached, no re-slicing
+
+
+def _bg(d):
+    if not d.start_background():
+        raise Skip("no _thread on this port")
+    return d
+
+
+def _thread_mod():
+    try:
+        import _thread
+    except ImportError:
+        raise Skip("no _thread on this port")
+    return _thread
+
+
+class _GateSPI(_SPI):
+    """Recording SPI whose pixel writes wait for ``gate`` (a _thread lock)."""
+
+    def __init__(self, log, gate, fail_at=-1):
+        _SPI.__init__(self, log)
+        self.gate = gate
+        self.fail_at = fail_at
+        self.n = 0
+
+    def write(self, buf):
+        if len(buf) > 100:
+            self.gate.acquire()
+            self.gate.release()
+            self.n += 1
+            if self.n == self.fail_at:
+                raise OSError(5)
+        _SPI.write(self, buf)
+
+
+def _frame(d, a, b):
+    """10 strips from two buffers in turn, each refilled only after the push
+    that followed its last use returned (the background contract)."""
+    for k in range(10):
+        buf = a if k % 2 == 0 else b
+        for i in range(0, len(buf), 509):
+            buf[i] = (k * 7 + i) & 0xFF
+        d.push_strip(24 * k, 24, buf)
+
+
+def test_background_push_sends_the_same_bytes():
+    d, ref, _, _, _ = _rig()
+    a = bytearray(240 * 24 * 2)
+    b = bytearray(240 * 24 * 2)
+    del ref[:]
+    _frame(d, a, b)
+    d2, log, _, _, _ = _rig()
+    _bg(d2)
+    for _ in range(3):
+        del log[:]
+        _frame(d2, a, b)                      # the bottom strip is out on return
+        assert log == ref
+    d2.stop_background()
+    assert not d2.background
+    del log[:]
+    _frame(d2, a, b)                          # in the caller again
+    assert log == ref
+
+
+def test_background_push_returns_while_the_strip_is_sent():
+    _thread = _thread_mod()
+    fakes.install()
+    gate = _thread.allocate_lock()
+    gate.acquire()
+    log = []
+    st._sleep_ms = lambda ms: None
+    d = st.ST7789(spi=_GateSPI(log, gate), dc=_Pin(log, "dc", 0), cs=_Pin(log, "cs", 1),
+                  backlight=None, init=False)
+    _bg(d)
+    a = bytearray(240 * 24 * 2)
+    d.push_strip(0, 24, a)                    # the worker blocks inside spi.write
+    assert d._busy and not any(e[0] == "spi" and len(e[1]) > 100 for e in log)
+    gate.release()
+    d.sleep()                                 # waits for the strip, then the command
+    cmds, _ = _decode(log)
+    assert [c for c, _ in cmds] == [0x2A, 0x2B, 0x2C, 0x28, 0x10]
+    assert cmds[2][1] == bytes(a)
+
+
+def test_background_error_is_raised_by_the_next_push():
+    _thread = _thread_mod()
+    fakes.install()
+    gate = _thread.allocate_lock()
+    log = []
+    st._sleep_ms = lambda ms: None
+    spi = _GateSPI(log, gate, fail_at=3)
+    d = st.ST7789(spi=spi, dc=_Pin(log, "dc", 0), cs=_Pin(log, "cs", 1),
+                  backlight=None, init=False)
+    _bg(d)
+    a = bytearray(240 * 24 * 2)
+    b = bytearray(240 * 24 * 2)
+    raised = []
+    for k in range(10):
+        try:
+            d.push_strip(24 * k, 24, a if k % 2 == 0 else b)
+        except OSError:
+            raised.append(k)
+    assert raised == [3], raised              # strip 2 failed: the push of 3 says so
+    assert not d._busy and d._next == -1
+    spi.fail_at = -1
+    del log[:]
+    _frame(d, a, b)                           # the next frame opens a fresh window
+    cmds, frames = _decode(log)
+    assert frames == 1 and len(cmds) == 3
 
 
 def test_fill_and_fill_rect():
@@ -299,6 +446,24 @@ def test_hot_paths_allocation_free_on_micropython():
         used = gc.mem_alloc() - a0
     finally:
         gc.enable()
+    assert used == 0, used
+    if not d.start_background():
+        return                                # no _thread (the wasm port)
+    other = bytearray(240 * 24 * 2)
+    for y in range(0, 240, 24):               # warm-up
+        d.push_strip(y, 24, strip if y % 48 else other)
+    gc.collect()
+    gc.disable()
+    try:
+        a0 = gc.mem_alloc()
+        for _ in range(5):
+            for y in range(0, 240, 24):
+                d.push_strip(y, 24, strip if y % 48 else other)
+            d.fill(0x1234)
+        used = gc.mem_alloc() - a0
+    finally:
+        gc.enable()
+        d.stop_background()
     assert used == 0, used
 
 

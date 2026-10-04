@@ -24,7 +24,20 @@ SWRESET; otherwise turn LDO2 on yourself before constructing the driver.
 This driver only ever calls ``bl_power(True)``; backlight off is PWM duty
 0. If LDO2 is ever cut on purpose, the panel loses its registers and GRAM:
 call ``init()`` (full SWRESET sequence) after restoring it, not ``wake()``.
+
+Strips: ``push_strip`` keeps the window open (CS low, no new command) after
+a strip that does not reach the bottom row, so strips pushed top to bottom
+cost one SPI write each (a windowed strip costs five more small writes:
+50.8 vs 41.4 ms a frame on the watch). Any other SPI use closes it.
+``start_background()`` moves the strip writes to a second thread: SPI DMA
+sends one strip while the caller draws the next (machine.SPI releases the
+GIL while each DMA chunk is on the wire).
 """
+
+try:
+    import _thread
+except ImportError:     # no threads (some ports): strips go out in the caller
+    _thread = None
 
 import machine
 from hal import pins
@@ -69,12 +82,14 @@ class ST7789:
     ``spi``/``dc``/``cs`` may be injected (tests, shared bus); otherwise they
     are created from ``hal.pins`` with ``miso=None``. Pass ``init=False`` to
     skip the reset/init sequence (e.g. the panel is already running).
+    ``background=True`` calls ``start_background()``.
     """
 
     def __init__(self, spi=None, dc=None, cs=None, baudrate=None, fast=False,
                  madctl=MADCTL_ROT2, xoff=0, yoff=ROW_OFFSET_ROT2,
                  width=WIDTH, height=HEIGHT, strip_rows=24,
-                 backlight=pins.TFT_BL, bl_power=None, bl_freq=1000, init=True):
+                 backlight=pins.TFT_BL, bl_power=None, bl_freq=1000, init=True,
+                 background=False):
         if baudrate is None:
             baudrate = FAST_BAUD if fast else MAX_STOCK_BAUD
         if baudrate > MAX_STOCK_BAUD and not fast:
@@ -114,12 +129,24 @@ class ST7789:
             self._pwm = machine.PWM(machine.Pin(backlight, machine.Pin.OUT), freq=bl_freq, duty_u16=0)
         self.asleep = False
         self._slpin_t = None      # ticks_ms of the last SLPIN
+        self._next = -1           # row an open full-width window continues at
+        self.background = False   # strips sent by the worker thread
+        self._busy = False        # the worker has a strip
+        self._stop = False
+        self._job_y = self._job_h = 0
+        self._job_buf = None
+        self._err = None
+        self._go = self._done = None
         if init:
             self.init()
+        if background:
+            self.start_background()
 
     # --- low level -------------------------------------------------------
     def _cmd(self, c, data=None):
         """One command (+ optional data) framed by its own CS pulse."""
+        self._sync()
+        self._next = -1           # a command ends any open window
         cs = self._cs
         dc = self._dc
         cs(0)
@@ -152,6 +179,7 @@ class ST7789:
 
     def _begin(self, x0, y0, x1, y1):
         """CS low, CASET/RASET (+offsets), RAMWR, DC high: ready for pixels."""
+        self._next = -1
         self._cs(0)
         self._addr(CASET, x0 + self.xoff, x1 + self.xoff)
         self._addr(RASET, y0 + self.yoff, y1 + self.yoff)
@@ -191,12 +219,107 @@ class ST7789:
 
     # --- pixels ----------------------------------------------------------
     def push_strip(self, y0, h, buf):
-        """Push a full-width strip of ``h`` rows starting at row ``y0``."""
+        """Push a full-width strip of ``h`` rows starting at row ``y0``.
+
+        A strip that starts where the last one ended continues its window;
+        otherwise a window from ``y0`` to the bottom row opens. CS stays low
+        until a strip reaches the bottom row or another command is sent.
+        In background mode this returns once the strip is handed to the
+        worker (after the previous strip is out), and ``buf`` must stay
+        untouched until the next ``push_strip`` returns: alternate two
+        buffers. A strip that reaches the bottom row is out on return, and
+        a worker error is raised by the next call that waits for it.
+        """
         if len(buf) != self.width * h * 2:
             raise ValueError("strip buf must be width*h*2 bytes")
-        self._begin(0, y0, self.width - 1, y0 + h - 1)
+        if not self.background:
+            self._send(y0, h, buf)
+            return
+        self._sync()
+        self._job_y = y0
+        self._job_h = h
+        self._job_buf = buf
+        self._busy = True
+        self._go.release()
+        if y0 + h >= self.height:
+            self._sync()
+
+    def _send(self, y0, h, buf):
+        n = self._next
+        self._next = -1           # until this strip is out
+        if y0 != n:
+            self._begin(0, y0, self.width - 1, self.height - 1)
         self.spi.write(buf)
-        self._cs(1)
+        y = y0 + h
+        if y >= self.height:
+            self._cs(1)
+            self._next = -1
+        else:
+            self._next = y
+
+    # --- background push ---------------------------------------------------
+    def start_background(self, stack=8192):
+        """Send strips from a worker thread (see ``push_strip``); True if on.
+
+        False, and strips keep going out in the caller, without ``_thread``.
+        """
+        if self.background or _thread is None:
+            return self.background
+        self._go = _thread.allocate_lock()
+        self._done = _thread.allocate_lock()
+        self._go.acquire()        # the worker waits on go, the caller on done
+        self._done.acquire()
+        self._stop = False
+        old = None
+        try:
+            old = _thread.stack_size(stack)
+        except (AttributeError, ValueError):   # CPython wants >= 32 KiB
+            pass
+        try:
+            _thread.start_new_thread(self._worker, ())
+        finally:
+            if old is not None:
+                _thread.stack_size(old)
+        self.background = True
+        return True
+
+    def stop_background(self):
+        """Wait for the last strip, end the worker; strips go out in the caller."""
+        if not self.background:
+            return
+        try:
+            self._sync()
+        finally:
+            self._stop = True
+            self._go.release()
+            self._done.acquire()
+            self.background = False
+
+    def _worker(self):
+        go = self._go
+        done = self._done
+        while True:
+            go.acquire()
+            if self._stop:
+                done.release()
+                return
+            try:
+                self._send(self._job_y, self._job_h, self._job_buf)
+            except Exception as e:  # noqa: BLE001 - raised in the caller by _sync
+                self._err = e
+            done.release()
+
+    def _sync(self):
+        """Wait until the worker's strip is out; raise its error, if any."""
+        if not self._busy:
+            return
+        self._done.acquire()
+        self._busy = False
+        self._job_buf = None
+        e = self._err
+        if e is not None:
+            self._err = None
+            raise e
 
     def _slice_frame(self, fb):
         # Kept out of push_frame: a comprehension there would turn its locals
@@ -215,6 +338,7 @@ class ST7789:
         """
         if fb is not self._pf_src:
             self._slice_frame(fb)
+        self._sync()
         self._begin(0, 0, self.width - 1, self.height - 1)
         spi = self.spi       # not spi.write: a stored bound method is a heap alloc
         sl = self._pf_slices
@@ -226,6 +350,7 @@ class ST7789:
         """Solid rectangle straight to the panel (byte-swapped colour)."""
         if w <= 0 or h <= 0:
             return
+        self._sync()
         buf = self._fill
         if buf is None:
             buf = self._fill = bytearray(self.width * 2 * 8)  # 8 rows, < one DMA chunk
@@ -312,6 +437,7 @@ class ST7789:
         self.brightness(self._last_level if level is None else level)
 
     def deinit(self):
+        self.stop_background()
         if self._pwm is not None:
             self._pwm.deinit()
         self.spi.deinit()

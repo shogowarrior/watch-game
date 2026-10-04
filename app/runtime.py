@@ -11,9 +11,10 @@ One ``step(now)`` does, in order:
   radio   drain ESP-NOW -> LinkMonitor (partner lock = ``game.pair.peer_mac``,
           seq dedup) -> valid beacons -> ``game.on_packet``
   touch   FT6336 -> GestureRecognizer (multi-touch ignored, §8). Also sampled
-          after every 2nd strip, so a 60 ms tap measures right while a frame
-          renders; what those samples find waits for this stage (the game
-          changes only between frames): ``game.on_gesture``, and
+          after a strip once TOUCH_GAP_MS (15) have passed, so a 60 ms tap
+          measures right while a frame renders; what those samples find
+          waits for this stage (the game changes only between frames):
+          ``game.on_gesture``, and
           ``game.on_touch_down`` when a finger lands (bump guard, ui-spec §6;
           before the imu stage, so the finger's own spike is guarded), in
           time order: a press lands before its gesture; on one sample the
@@ -87,6 +88,7 @@ PARTS = ("pmu", "display", "imu", "touch", "haptics", "radio")
 GAME_ID = 1
 TICK_MS = T.LOGIC_MS       # game logic rate (10 Hz)
 INPUT_MS = 20              # touch/button/imu poll when nothing else is due
+TOUCH_GAP_MS = 15          # touch samples between strips at least this far apart
 HAPTIC_SLICE_MS = 1        # ``idle`` motor tick while a pattern plays
 BATTERY_MS = 10000
 BATT_LOW_READS = 3         # falling readings <= 20 % in a row before the game sees one
@@ -119,20 +121,19 @@ _NO_EVENTS = ()
 class _HapticDisplay:
     """Display proxy for the renderer: services the motor after each strip,
     so pulse edges stay within one strip of schedule mid-frame, and samples
-    touch after every 2nd strip pushed."""
+    touch after a strip once TOUCH_GAP_MS have passed since the last sample
+    (a background display sends the strip meanwhile)."""
 
     def __init__(self, rt, display):
         self.rt = rt
         self.d = display
-        self.odd = False
 
     def push_strip(self, y0, h, buf):
         self.d.push_strip(y0, h, buf)
         rt = self.rt
         t = rt.clock()
         rt._stage_haptic(t)
-        self.odd = not self.odd
-        if not self.odd and rt.touch is not None:
+        if rt.touch is not None and ticks_diff(t, rt._touch_t) >= TOUCH_GAP_MS:
             rt._sample_touch(t)
 
 
@@ -225,6 +226,7 @@ class Runtime:
             self._chip_start()
         self._rx_cb = self._on_rx
         self._td_t = None                     # touch-down sampled, not yet dispatched
+        self._touch_t = now                   # last touch sample
         self._g_code = 0                      # gesture sampled, not yet dispatched
         self._g_t = self._g_t0 = self._g_x = self._g_y = 0
         self._buzz = -1
@@ -494,6 +496,7 @@ class Runtime:
     def _sample_touch(self, t):
         """FT6336 -> GestureRecognizer at ``t``; a landing finger and a gesture
         wait for ``_stage_touch`` (at most one of each per frame)."""
+        self._touch_t = t
         try:
             r = self.touch.read()           # [touching, x, y, contacts]
         except OSError:

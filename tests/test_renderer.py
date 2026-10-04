@@ -263,8 +263,8 @@ def test_core_dot_level_in_frame():
     assert r.field.iris == 0
 
 
-def test_mirrored_strips_match_the_full_map():
-    """Bottom strips are the top ones' field rows mirrored: a field-only frame
+def test_field_strips_match_the_full_map():
+    """A field-only frame, drawn strip by strip from both buffers in turn,
     equals the full ring map palette-blitted in one go."""
     _need_fb()
     r = Renderer()
@@ -275,8 +275,22 @@ def test_mirrored_strips_match_the_full_map():
     framebuf.FrameBuffer(ref, 240, 240, framebuf.RGB565).blit(full, 0, 0, -1, r.field.pal)
     assert cap.buf == ref
     # The overlays are not in this frame: the snapshot CRCs
-    # (test_fixtures_match_snapshots) catch overlays drawn into the wrong
-    # strip of a pair, or before the mirror copy.
+    # (test_fixtures_match_snapshots) catch overlays drawn into the wrong strip.
+
+
+def test_strips_go_top_to_bottom_from_two_buffers():
+    """In order (one panel window), alternating buffers (a background display
+    may still be reading the last one)."""
+    _need_fb()
+    r = Renderer()
+    seen = []
+
+    class D:
+        def push_strip(self, y0, h, buf):
+            seen.append((y0, h, buf is r.buf, buf is r.buf2))
+
+    _run(r, D(), rs.hunt(2, status=None), 0)
+    assert seen == [(24 * k, 24, k % 2 == 0, k % 2 == 1) for k in range(10)], seen
 
 
 class _P16:
@@ -293,22 +307,43 @@ class _P16:
         self.b[2 * i + 1] = (v >> 8) & 255
 
 
+class _P32:
+    """ptr32 stand-in over a bytearray (little-endian, as on the ESP32)."""
+
+    def __init__(self, b):
+        self.b = b
+
+    def __getitem__(self, i):
+        b = self.b
+        j = 4 * i
+        return b[j] | b[j + 1] << 8 | b[j + 2] << 16 | b[j + 3] << 24
+
+    def __setitem__(self, i, v):
+        b = self.b
+        j = 4 * i
+        b[j] = v & 255
+        b[j + 1] = (v >> 8) & 255
+        b[j + 2] = (v >> 16) & 255
+        b[j + 3] = (v >> 24) & 255
+
+
 def _py_blit_kernel():
     """ui.field's blit kernel source as plain Python (viper is device-only)."""
-    ns = {"ptr8": lambda b: b,
-          "ptr16": lambda b: b if isinstance(b, array.array) else _P16(b)}
+    ns = {"ptr16": lambda b: b if isinstance(b, array.array) else _P16(b),
+          "ptr32": _P32}
     exec(fld._BSRC, ns)
     return ns["blit_kernel"]
 
 
 def test_blit_kernel_matches_the_framebuf_path():
-    """The viper strip blit, run as Python, passes RingMap's self-check, draws
-    the same frame, and a kernel that mixes up the pair is refused."""
+    """The viper strip blit, run as Python, passes RingMap's self-check and
+    draws the same frame; kernels that read the wrong rows, swap a pixel
+    pair or skip pixels are refused."""
     _need_fb()
     k = _py_blit_kernel()
     r = Renderer()
     assert r.map.kind in ("framebuf", "viper"), r.map.kind
-    r.map = fld.RingMap(r.buf, r.buf2, 24, kernel=k)
+    r.map = fld.RingMap(24, (r.buf, r.buf2), kernel=k)
     assert r.map.kind == "kernel" and r.map.kern is k
     cap = FrameCapture()
     _run(r, cap, rs.hunt(2, status=None), 300)
@@ -317,15 +352,22 @@ def test_blit_kernel_matches_the_framebuf_path():
     framebuf.FrameBuffer(ref, 240, 240, framebuf.RGB565).blit(full, 0, 0, -1, r.field.pal)
     assert cap.buf == ref
 
-    def swapped(top, bot, idx, pal, off, h):
-        k(bot, top, idx, pal, off, h)
+    def mirrored(dst, idx, pal, off, n):     # a bottom strip from its top mirror, not reversed
+        y0 = off // 240
+        k(dst, idx, pal, (y0 if y0 < 120 else 216 - y0) * 240, n)
 
-    def unmirrored(top, bot, idx, pal, off, h):
-        k(top, bot, idx, pal, off, h)
-        bot[:] = top
+    def swapped(dst, idx, pal, off, n):
+        k(dst, idx, pal, off, n)
+        for i in range(0, len(dst), 4):
+            a = dst[i:i + 2]
+            dst[i:i + 2] = dst[i + 2:i + 4]
+            dst[i + 2:i + 4] = a
 
-    for bad in (swapped, unmirrored):
-        m = fld.RingMap(r.buf, r.buf2, 24, kernel=bad)
+    def short(dst, idx, pal, off, n):
+        k(dst, idx, pal, off, n - 4)
+
+    for bad in (mirrored, swapped, short):
+        m = fld.RingMap(24, (r.buf, r.buf2), kernel=bad)
         assert m.kern is None and "failed" in m.kind, m.kind
 
 

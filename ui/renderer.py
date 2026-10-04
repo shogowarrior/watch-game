@@ -6,9 +6,10 @@ open/close, arrow smoothing, the wedge glide between 10 Hz params, toast
 motion and phase timers. Each strip is composed off-screen (field blit
 through the palette, then overlays whose bounding boxes intersect the strip)
 and pushed whole with ``display.push_strip(y0, h, buf)`` (hal/st7789.py API).
-The field is mirror-symmetric top to bottom, so strips go out in mirrored
-pairs (0 and 9, 1 and 8, ... 4 and 5): each pair costs one palette blit,
-and the bottom strip gets the top one's field rows copied in reverse.
+Strips go out top to bottom, so the panel takes them as one window, and
+alternate between two buffers: a display that sends in the background may
+keep reading a strip's buffer until its next ``push_strip`` returns, and
+must have sent the bottom strip when that call returns.
 
     r = Renderer()
     beats = r.frame(params, display, ticks_ms())    # display=None: state only
@@ -163,7 +164,7 @@ class FrameCapture:
 
 
 class Renderer:
-    """RenderParams -> strips, pushed in mirrored pairs (top ``buf``, bottom ``buf2``)."""
+    """RenderParams -> strips, pushed top to bottom from ``buf`` and ``buf2`` in turn."""
 
     def __init__(self):
         self.buf = bytearray(W * SH * 2)
@@ -171,7 +172,7 @@ class Renderer:
         self.fb = framebuf.FrameBuffer(self.buf, W, SH, framebuf.RGB565)
         self.fb2 = framebuf.FrameBuffer(self.buf2, W, SH, framebuf.RGB565)
         self.field = RippleField()
-        self.map = RingMap(self.buf, self.buf2, SH)
+        self.map = RingMap(SH, (self.buf, self.buf2))
         self.tc = tx.TextCache()
         self._last = {}
         self._ev1 = {}
@@ -777,12 +778,16 @@ class Renderer:
         self._palette(p, t)
         pal = self.field.pal
         arr = self.field.pal_arr
-        for s in range(NS // 2):
+        m = self.map
+        for s in range(NS):
             y0 = s * SH
-            y1 = W - SH - y0                # its mirror strip
-            self.map.blit(y0, pal, arr)     # field into buf, mirrored into buf2
-            self._strip(p, t, y0, self.fb)
-            display.push_strip(y0, SH, self.buf)
-            self._strip(p, t, y1, self.fb2)
-            display.push_strip(y1, SH, self.buf2)
+            if s & 1:
+                buf = self.buf2
+                fb = self.fb2
+            else:
+                buf = self.buf
+                fb = self.fb
+            m.blit(y0, pal, arr, buf, fb)
+            self._strip(p, t, y0, fb)
+            display.push_strip(y0, SH, buf)
         return ev

@@ -6,10 +6,12 @@ game's app/, finder/, hal/ and ui/ deployed, e.g. ``tools/deploy.py --noapp``).
 Prints where the time goes:
   * kernels: which hot loops run as viper on this build (palette, field
     blit, IMU decode, IMU feed) and the CPU clock
-  * render: per screen fixture, ms per frame split into step (state),
-    plan, palette, field (ring-map blit), overlays and push (SPI)
+  * render: per screen fixture, with the display's background push off and
+    on, ms per frame split into step (state), plan, palette, field (ring-map
+    blit), overlays and push (SPI; in background mode the wait for the
+    strip before)
   * push: one frame sent as 10 windowed strips, as one window of 10 writes,
-    and as one window of one write
+    the same from the background thread, and as one window of one write
   * imu: per BMA423 rate, the I2C read, decode and ImuFeed cost per sample
     and the share of each second they take at that rate
   * loop: 10 s of the real game loop (app/runtime.py), ``print_stats()``,
@@ -58,7 +60,8 @@ def bench_kernels(r):
 
 def _frame_parts(r, p, display, t, acc):
     """Renderer.frame(p, display, t), timed part by part into ``acc``
-    (step, plan, palette, field, overlays, push; us)."""
+    (step, plan, palette, field, overlays, push; us). With the display in
+    background mode, push is the wait for the strip before plus the hand-off."""
     a = _us()
     r._step(p, t)
     b = _us()
@@ -74,25 +77,30 @@ def _frame_parts(r, p, display, t, acc):
     acc[2] += _d(b, a)
     pal = r.field.pal
     arr = r.field.pal_arr
-    for s in range(NS // 2):
+    m = r.map
+    for s in range(NS):
         y0 = s * SH
-        y1 = W - SH - y0
+        if s & 1:
+            buf = r.buf2
+            fb = r.fb2
+        else:
+            buf = r.buf
+            fb = r.fb
         a = _us()
-        r.map.blit(y0, pal, arr)
+        m.blit(y0, pal, arr, buf, fb)
         b = _us()
         acc[3] += _d(b, a)
-        r._strip(p, t, y0, r.fb)
-        r._strip(p, t, y1, r.fb2)
+        r._strip(p, t, y0, fb)
         a = _us()
         acc[4] += _d(a, b)
-        display.push_strip(y0, SH, r.buf)
-        display.push_strip(y1, SH, r.buf2)
+        display.push_strip(y0, SH, buf)
         acc[5] += _d(_us(), a)
 
 
 def bench_render(display):
-    print("render       total ms  step  plan  pal  field  overlays  push    fps")
+    print("render       bg  total ms  step  plan  pal  field  overlays  push    fps")
     r = None
+    bg = display.background
     for name, kw in FIXTURES:
         d = dict(_FIELD)
         d.update(kw)
@@ -102,43 +110,61 @@ def bench_render(display):
         for _ in range(10):                 # rings in flight, crossfades settled
             r.frame(p, display, t)
             t += 50
-        gc.collect()
-        acc = [0] * 6
-        t0 = _us()
-        for _ in range(N):
-            _frame_parts(r, p, display, t, acc)
-            t += 50
-        tot = _d(_us(), t0) / N / 1000
-        ms = [x / N / 1000 for x in acc]
-        print("%-14s %6.1f  %5.1f %5.1f %5.1f %5.1f    %5.1f  %5.1f  %5.1f" % (
-            name, tot, ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], 1000 / tot))
+        for on in (False, True):
+            if on and not display.start_background():
+                print("%-14s on  (no _thread)" % name)
+                continue
+            if not on:
+                display.stop_background()
+            gc.collect()
+            acc = [0] * 6
+            t0 = _us()
+            for _ in range(N):
+                _frame_parts(r, p, display, t, acc)
+                t += 50
+            tot = _d(_us(), t0) / N / 1000
+            ms = [x / N / 1000 for x in acc]
+            print("%-14s %-3s %6.1f  %5.1f %5.1f %5.1f %5.1f    %5.1f  %5.1f  %5.1f" % (
+                name, "on" if on else "off", tot, ms[0], ms[1], ms[2], ms[3], ms[4],
+                ms[5], 1000 / tot))
+    if not bg:
+        display.stop_background()
     return r
 
 
 def bench_push(display, r):
-    """One frame (the last fixture's strips) three ways."""
+    """One frame (the last fixture's strips) four ways."""
     frame = bytearray(W * W * 2)
     for s in range(NS):
         frame[s * W * SH * 2:(s + 1) * W * SH * 2] = r.buf
     mv = memoryview(frame)
     n = W * SH * 2
     spi = display.spi
-    t0 = _us()
-    for _ in range(10):
-        for s in range(NS):
-            display.push_strip(s * SH, SH, mv[s * n:(s + 1) * n])
-    a = _d(_us(), t0) / 10000
-    t0 = _us()
-    for _ in range(10):
-        display.push_frame(frame)
-    b = _d(_us(), t0) / 10000
+    bg = display.background
+    display.stop_background()
+    out = []
+    for mode in range(3):                   # windowed strips, one window, background
+        if mode == 2 and not display.start_background():
+            out.append(-1)
+            continue
+        t0 = _us()
+        for _ in range(10):
+            for s in range(NS):
+                if mode == 0:
+                    display._next = -1      # as before: a window per strip
+                display.push_strip(s * SH, SH, mv[s * n:(s + 1) * n])
+        out.append(_d(_us(), t0) / 10000)
+    display.stop_background()
     t0 = _us()
     for _ in range(10):
         display._begin(0, 0, W - 1, W - 1)
         spi.write(frame)
         display._cs(1)
-    c = _d(_us(), t0) / 10000
-    print("push ms: 10 strips %.1f, 1 window x 10 writes %.1f, 1 window 1 write %.1f" % (a, b, c))
+    out.append(_d(_us(), t0) / 10000)
+    if bg:
+        display.start_background()
+    print("push ms: 10 windows %.1f, 1 window x 10 writes %.1f, background %.1f, "
+          "1 window 1 write %.1f" % tuple(out))
 
 
 class _Batch:

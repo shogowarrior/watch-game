@@ -646,7 +646,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 | Modal on every glance at low battery (PINPOINT) | 10 % interstitial shown once |
 | Glyph clashes: pause-like "steady", mirrored chevrons (PINPOINT) | No steady glyph; colder chevrons are hollow, blue and move down |
 | Weak simulator radio model (PINPOINT, BLIP HUNT) | The simulator uses `sim/radio.py` and shows a truth overlay |
-| Frame budget assumes PSRAM or 80 MHz (BLIP HUNT) | 20 fps target, 15 floor; strip rendering (10 × 240×24) to bound heap and GC pauses, even on the SPIRAM build; the half ring map is palette-blitted into each top strip, and the mirrored bottom strip copies its rows |
+| Frame budget assumes PSRAM or 80 MHz (BLIP HUNT) | 20 fps target, 15 floor; strip rendering (10 × 240×24) to bound heap and GC pauses, even on the SPIRAM build; the ring map is palette-blitted into each strip, top to bottom, and the SPI sends one strip while the next is drawn |
 | Trend thresholds below correlated noise (BLIP HUNT) | Gated by `trend_conf`, ≥ 3 dB over 8 s, 2 evaluations and a 5 s flip limit. The < 5 % false-verdict target on tangential walks is not met yet (§5.5) |
 | Scan assumes a perfect turn; partner not asked to stop (BLIP HUNT) | 20° pacing floor, turn error, `HOLD` pattern + peer_motion check |
 | Motor trips the shake guard (BLIP HUNT) | 150 ms blanking |

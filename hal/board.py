@@ -41,6 +41,9 @@ class Board:
     """Lazy owner of the watch hardware. ``errors`` maps part -> exception
     for parts that failed during ``init(strict=False)``."""
 
+    bg_push = True    # the display sends strips from a worker thread while the
+                      # next one is drawn (hal/st7789.py start_background)
+
     # touch_rotation 0: raw FT6336 coords already match MADCTL 0xC0 (LilyGO
     # TTGO.h getTouch, TFT rotation 2 -> x = __x, y = __y on the 2020 V1).
     def __init__(self, cpu_hz=pins.CPU_HZ, fast_spi=False, touch_rotation=0,
@@ -130,7 +133,7 @@ class Board:
 
     def _make_display(self):
         from hal.st7789 import ST7789
-        return ST7789(fast=self.fast_spi, bl_power=self._bl_power())
+        return ST7789(fast=self.fast_spi, bl_power=self._bl_power(), background=self.bg_push)
 
     def _make_backlight(self):
         d = self.display

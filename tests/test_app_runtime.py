@@ -1136,10 +1136,12 @@ def _touch_downs(rt):
 
 def test_short_taps_count_while_frames_render():
     """ui-spec §8: a 60-400 ms touch is a TAP. A frame takes 40 ms, so touch
-    is also sampled between strips: 70 ms taps at every phase all count."""
+    is also sampled between strips, TOUCH_GAP_MS apart: 70 ms taps at every
+    phase all count, and each touch-down is seen within a gap and a strip."""
     fakes.install()
     from hal.radio import SimRadio
     from app.telemetry import Telemetry
+    from app import runtime as rtm
     import json
     clock = Clock(0)
     taps = [(5000 + 507 * i, 5070 + 507 * i, 120, 120) for i in range(40)]
@@ -1148,10 +1150,17 @@ def test_short_taps_count_while_frames_render():
     rt.tele = Telemetry(cap=400, hz=0)
     rt.begin(0)
     downs = _touch_downs(rt)
+    reads = []
+    rd = rt.touch.read
+    rt.touch.read = lambda: (reads.append(clock.now), rd())[1]
     _run(rt, clock, 26000)
     ev = [json.loads(s) for s in rt.tele.lines()]
     assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"] * 40, ev
-    assert len(downs) == 40 and all(0 <= d - t[0] <= 10 for d, t in zip(downs, taps)), downs
+    late = rtm.TOUCH_GAP_MS + 4
+    assert len(downs) == 40 and all(0 <= d - t[0] <= late for d, t in zip(downs, taps)), downs
+    gaps = [b - a for a, b in zip(reads, reads[1:])]
+    assert min(gaps) >= 0 and max(gaps) <= late, (min(gaps), max(gaps))
+    assert len(reads) <= 26000 // 12, len(reads)   # not after every 2nd 4 ms strip
 
 
 def test_finger_spike_after_a_mid_frame_touch_down():

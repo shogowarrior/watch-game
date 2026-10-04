@@ -32,6 +32,7 @@ N = 20            # repetitions per measurement
 # (DCDC3 kept). In a notebook that already has a Board ``b``: board = b
 board = Board(fast_spi=FAST)
 disp = board.display
+disp.stop_background()    # times the plain driver (tools/bench_frame.py: the background push)
 STRIP = disp.strip_rows   # 24 rows per strip -> 10 strips, 11,520 B each
 disp.fill(0)
 disp.brightness(0.6)
@@ -71,7 +72,7 @@ a1 = gc.mem_alloc()
 T_push = report("push_frame", len(frame))
 print("  heap alloc per push_frame: %d B" % ((a1 - a0) // N))
 
-# %% [3] T_push: 10 x push_strip (window per strip) ---------------------------
+# %% [3] T_push: 10 x push_strip (top to bottom: one window) -------------------
 strip = bytearray(240 * STRIP * 2)
 sfb = framebuf.FrameBuffer(strip, 240, STRIP, framebuf.RGB565)
 sfb.fill(rgb565(80, 0, 0))

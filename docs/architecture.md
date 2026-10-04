@@ -99,8 +99,8 @@ stages in order:
    feeds pairing/calibration, calls `est.update(t, rssi, peer_rssi, my_motion,
    peer_motion)` and, while scanning, `scan.on_packet` with the raw RSSI.
 2. **touch**: `FT6336.read()` -> `GestureRecognizer` (multi-touch ignored).
-   Touch is also sampled after every 2nd strip pushed while a frame renders
-   (so a 60 ms tap measures right); what those samples find waits
+   Touch is also sampled after a strip, at least 15 ms apart, while a frame
+   renders (so a 60 ms tap measures right); what those samples find waits
    for this stage: `game.on_touch_down` when a finger landed
    (`GestureRecognizer.began`) and `game.on_gesture`, in time order: a press
    lands before its gesture; when a gesture ends on the sample where a new
@@ -139,11 +139,13 @@ stages in order:
    composes each 240x24 strip off-screen (a map of each pixel's ring number,
    coloured through a 256-entry palette of byte-swapped RGB565, then glyph and
    text overlays) and
-   pushes it with `display.push_strip`. Strips go in mirrored pairs (0 and 9,
-   1 and 8, ...): one pass colours the top strip and the bottom strip's rows
-   in reverse (a viper kernel on the watch, checked against the framebuf
-   path when the renderer starts; elsewhere a framebuf palette blit and a row
-   copy). With the screen off it runs with
+   pushes it with `display.push_strip`. Strips go top to bottom, so the panel
+   takes them as one window, from two buffers in turn: the watch's display
+   sends each strip from a background thread (the SPI DMA runs while the
+   next strip is drawn) and has sent the bottom one when its call returns.
+   The field is coloured four pixels a pass (a viper kernel on the watch,
+   checked against the framebuf path when the renderer starts; elsewhere a
+   framebuf palette blit). With the screen off it runs with
    `display=None`, so ring and heartbeat timing continue. It returns only the
    heartbeat names, locked to ring spawns.
 7. **tx**: when due, `game.fill_beacon` fills the 16-byte beacon (seq, own and
@@ -199,7 +201,7 @@ fallback is both short presses within 3 s in HOT.
 | BMA423 FIFO | 100 Hz (holds 1.7 s), 800 Hz while a bump can count (holds 212 ms); drained every loop | `app.imu_feed` |
 | Motion tracker | 25 Hz | `app.runtime.IMU_OUT_HZ` |
 | Feature engine poll | 1 Hz | `app.runtime.CHIP_MS` |
-| Touch / button poll | touch: every loop and after every 2nd display strip pushed while a frame renders; button: every loop, at least every 20 ms | `app.runtime.INPUT_MS` |
+| Touch / button poll | touch: every loop and, while a frame renders, after a strip once 15 ms have passed since the last sample; button: every loop, at least every 20 ms | `app.runtime.INPUT_MS`, `TOUCH_GAP_MS` |
 | Battery | every 10 s; a falling reading at or under 20 % must repeat 3 times, 1 s apart; on USB a shutdown-level reading never reaches the game | `BATTERY_MS`, `BATT_LOW_READS` |
 | Haptics | pulses and gaps >= 60 ms; motor serviced every strip and every 1 ms while a pattern plays | `finder.haptic_patterns` |
 | Link loss | 5 s with no packet after a fix -> LINK_LOST | `finder.game`, ui-spec §6 |
