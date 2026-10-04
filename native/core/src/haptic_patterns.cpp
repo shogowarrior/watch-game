@@ -150,6 +150,15 @@ bool HapticPlayer::heartbeat(Haptic name, OptTicks t_ms) {
   return true;
 }
 
+bool HapticPlayer::cancel_heartbeat() {
+  Track& h = hb();
+  if (h.waiting(now_)) {
+    h.pat = NONE;
+    return true;
+  }
+  return false;
+}
+
 void HapticPlayer::set_metronome(int32_t period_ms, OptTicks t_ms, Haptic name) {
   if (period_ms <= 0) {
     period_ = 0;

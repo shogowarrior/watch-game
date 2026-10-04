@@ -7,12 +7,15 @@ A scenario is a list of ops on one player; each op's line carries its inputs
 and what the player returned and reported after it:
 
     new <mode>
-    play <name> <t|n> -> <accepted> <busy> <active>
-    hb <name> <t|n> -> <started> <busy> <active>
+    play <name> <t|n> -> <accepted> <state>
+    hb <name> <t|n> -> <started> <state>
+    cancel -> <dropped> <state>
     allowed <t|n> -> <hb_allowed>
     metro <period> <t|n> <name|n> -> <period_ms>
-    mode <m> -> <busy> <active>
-    run <t0> <t1> <step> -> <busy> <active> <level at t0> <t>:<level> ...   (only where it changes)
+    mode <m> -> <state>
+    run <t0> <t1> <step> -> <state> <level at t0> <t>:<level> ...   (only where it changes)
+
+<state> is <busy> <active> <beat_due|n> <beat_playing>.
 
 Times stay below 2**29, so the Python's 2**30 tick wrap never matters.
 """
@@ -45,7 +48,8 @@ class Script:
         self.out.append("new %d" % mode)
 
     def _state(self):
-        return "%s %s" % (_b(self.pl.busy), _b(self.pl.active))
+        pl = self.pl
+        return "%s %s %s %s" % (_b(pl.busy), _b(pl.active), _t(pl.beat_due), _b(pl.beat_playing))
 
     def play(self, name, t=None):
         r = self.pl.play_named(name, t)
@@ -56,6 +60,10 @@ class Script:
         r = self.pl.heartbeat(name, t)
         self.out.append("hb %s %s -> %s %s" % (name, _t(t), _b(r), self._state()))
         return r
+
+    def cancel(self):
+        r = self.pl.cancel_heartbeat()
+        self.out.append("cancel -> %s %s" % (_b(r), self._state()))
 
     def allowed(self, t):
         self.out.append("allowed %s -> %s" % (_t(t), _b(self.pl.hb_allowed(t))))
@@ -201,6 +209,29 @@ def scenarios():
     s.play("NOPE", 0)
     s.hb("TICK", 0)
     s.run(0, 1000)
+    # a heartbeat handed over ahead of its time waits (beat_due) and is not active
+    # until it starts; it can be cancelled until then, and an earlier event replaces it
+    s.new()
+    s.run(0, 10)
+    s.hb("TICK", 400)
+    s.run(10, 399)
+    s.run(399, 401)
+    s.cancel()                              # already on: plays out
+    s.run(401, 700)
+    s.hb("DOUBLE", 900)
+    s.cancel()                              # dropped before it starts
+    s.run(700, 1200)
+    s.hb("TICK", 1500)
+    s.play("CLOSER", 1300)
+    s.run(1200, 2600)
+    s.hb("TICK", 2800)                      # resumed 1 s after CLOSER ended
+    s.run(2600, 2750, 25)
+    s.play("FARTHER", 2790)                 # starts first: replaces the waiting beat
+    s.run(2750, 3600)
+    s.new()
+    s.hb("TICK", 100)                       # nothing ticked yet: no time, so not waiting
+    s.cancel()
+    s.run(0, 300)
     # the metronome: grid, duty cap, tempo change keeps phase, overdue speed-up, stop
     s.new()
     s.metro(500, 0)

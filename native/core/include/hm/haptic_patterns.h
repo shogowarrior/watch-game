@@ -143,6 +143,10 @@ struct Track {
   OptTicks end;        // when the last pattern ended
 
   void start(Haptic p, OptTicks t);
+  // True while the pattern is scheduled after t and nothing of it has been output yet.
+  bool waiting(OptTicks t) const {
+    return pat != NONE && on && !shown && i == 0 && t && ph && ticks_diff(*ph, *t) > 0;
+  }
   // End of the pulse being output now (None if no pulse is on).
   OptTicks pulse_end() const;
   double advance(ticks_t t);
@@ -162,16 +166,26 @@ class HapticPlayer {
   void set_mode(int m);
   // True while an event (or its queued successor) plays.
   bool busy() const { return ev().pat != NONE || pend_ != NONE; }
-  // True while any pattern (event, queued event or heartbeat) plays.
-  bool active() const { return busy() || hb().pat != NONE; }
+  // True while any pattern (event, queued event or heartbeat) plays; a
+  // heartbeat scheduled for later is not playing yet (beat_due).
+  bool active() const { return busy() || (hb().pat != NONE && !hb().waiting(now_)); }
+  // Start time of a heartbeat scheduled after the last tick, or None.
+  OptTicks beat_due() const { return hb().waiting(now_) ? hb().ph : std::nullopt; }
+  // True while a heartbeat is being output (not just scheduled).
+  bool beat_playing() const { return hb().pat != NONE && !hb().waiting(now_); }
 
   // Start event `name` at t_ms (None: the next tick); returns accepted. NONE
   // (an unknown name) returns false.
   bool play_named(Haptic name, OptTicks t_ms = std::nullopt);
   // True if a heartbeat may start at t (FULL, no event, resumed).
   bool hb_allowed(OptTicks t) const;
-  // Start heartbeat `name` if allowed; returns started.
+  // Start heartbeat `name` at t_ms (None: the next tick) if allowed; returns
+  // started. t_ms may be ahead of the last tick: the beat then waits
+  // (beat_due), and an event that starts first replaces it.
   bool heartbeat(Haptic name, OptTicks t_ms = std::nullopt);
+  // Drop a heartbeat that is scheduled but has not started; returns whether
+  // one was dropped (a beat already on plays out).
+  bool cancel_heartbeat();
 
   // Beat pattern `name` (NONE: keep the last, TICK at first) every period_ms;
   // <= 0 stops it. The period is raised to min_period so duty stays <=

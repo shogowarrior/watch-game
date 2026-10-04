@@ -21,8 +21,11 @@ hp::OptTicks opt_t(const std::string& s) {
 
 hp::Haptic haptic(const std::string& s) { return none(s) ? hp::NONE : hp::from_name(s.c_str()); }
 
+// <busy> <active> <beat_due|n> <beat_playing>, as the generator prints it.
 std::string state(const hp::HapticPlayer& pl) {
-  return std::string(pl.busy() ? "1" : "0") + " " + (pl.active() ? "1" : "0");
+  const hp::OptTicks due = pl.beat_due();
+  return std::string(pl.busy() ? "1" : "0") + " " + (pl.active() ? "1" : "0") + " " +
+         (due ? std::to_string(*due) : std::string("n")) + " " + (pl.beat_playing() ? "1" : "0");
 }
 
 // Tokens [from, end) joined by single spaces.
@@ -108,6 +111,10 @@ TEST(test_haptic_patterns_player_like_python) {
       CHECK(num(t[4]) == r);
       CHECK(rest(t, 5) == state(*pl));
       ops++;
+    } else if (op == "cancel") {
+      CHECK(num(t[2]) == pl->cancel_heartbeat());
+      CHECK(rest(t, 3) == state(*pl));
+      ops++;
     } else if (op == "allowed") {
       CHECK(num(t[3]) == pl->hb_allowed(opt_t(t[1])));
       ops++;
@@ -138,7 +145,7 @@ TEST(test_haptic_patterns_player_like_python) {
       runs++;
     }
   }
-  CHECK(news == 103 && ops == 179 && runs == 159);
+  CHECK(news == 105 && ops == 189 && runs == 168);
 }
 
 // The Python's own wrap test, on the C++ 2^32 ticks (the golden file stays below 2^29).
