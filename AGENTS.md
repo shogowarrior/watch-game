@@ -103,6 +103,7 @@ sets it as CPython would.
 | `node tools/mpy/run.mjs tools/bench_webhost.py` | Cost of one browser-sim step. |
 | `python3 tools/drift_demo.py` | Why accelerometer double integration fails. |
 | `python3 tools/build_sim.py` | Build the web simulator into `dist/sim/` (needs `tools/mpy` npm install). |
+| `python3 native/tools/qemu_run.py native/idf` | Check a native build's flash layout and boot it in Espressif's QEMU (`--install` once). Checks boot and crashes, not speed (`native/README.md`). |
 | `mpremote run tools/bench_display.py` | **On the watch**: real SPI clock, push/blit timings, fps. |
 | `mpremote run tools/bench_frame.py` | **On the watch**: where each frame's ms go (step, plan, palette, field, overlays, push) and the overlays of each strip, push variants, whether a send thread could overlap the drawing, IMU cost per rate, which kernels run as viper, and 10 s of the game loop (with its serial `fps` lines: frame lock, misses, jitter) with bump sensing off then on. |
 | `mpremote run tools/bench_spi_clock.py` | **On the watch**: MicroPython's full-frame push at 26.67, 40 and 80 MHz (pokes the SPI clock register, then puts 26.67 back), with a test card held 5 s per clock to check by eye. |
