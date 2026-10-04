@@ -62,18 +62,18 @@ def test_fake_watches_send_what_real_watches_send():
 
 def test_fake_watches_over_serial_write_paced_lines():
     """``serial``: each watch writes its records as 0x1E + compact JSON + \\n
-    lines into its own file through SerialLink, pumped every 50 ms step of
-    the sim clock as on the watch (one FIFO's worth a pass at most)."""
+    lines into its own file through SerialLink, pumped on the sim clock as
+    on the watch (mid-frame too), so none is dropped and ``rp`` goes about
+    once a second."""
     if sys.implementation.name != "cpython":
         raise Skip("tools/fake_watches.py: CPython only")
     import json
-    from tests.fakes.serial_port import Port
+    from tests.fakes.serial_port import LINE_FIFO, Port
     from tools import fake_watches as fw
-    from hal.debuglink import SERIAL_FIFO
     ports = (Port(), Port())
     st = fw.run(seconds=40, speed=1000, serial=ports)
     for dev, port in zip(("A", "B"), ports):
-        assert max(len(w[0]) for w in port.writes) <= SERIAL_FIFO
+        assert max(len(w[0]) for w in port.writes) <= LINE_FIFO
         lines = port.data().split(b"\n")
         assert lines[-1] == b""
         recs = []
@@ -85,8 +85,9 @@ def test_fake_watches_over_serial_write_paced_lines():
             recs.append(r)
         s = st[dev]
         assert s["link"] == "usb" and s["tx"] == len(recs) and s["queued"] == 0, s
+        assert s["drop"] == 0, s
         kinds = [r["ev"] for r in recs]
-        assert kinds.count("s") == 200 and 20 <= kinds.count("rp") <= 60, (dev, s)
+        assert kinds.count("s") == 200 and 38 <= kinds.count("rp") <= 60, (dev, s)
         rp = [r for r in recs if r["ev"] == "rp"]
         assert rp[0]["ch"] is None and "p" in rp[0]
 

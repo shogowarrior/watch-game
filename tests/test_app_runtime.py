@@ -1473,7 +1473,8 @@ def test_debug_sink_sends_state_and_screen_at_5hz():
             assert kinds[i - 1] == "s" and recs[i - 1]["t"] == recs[i]["t"]
             assert recs[i]["on"] is True and recs[i]["bl"] == recs[i - 1]["bl"] > 0
     assert set(sink.at) == set(d["t"] for d in recs if d["ev"] == "s")   # the 5 Hz path only
-    assert sink.pumps == rt.loops and sink.drains == 1    # once per pass; once at loop exit
+    assert sink.pumps == rt.loops + rt.display.pushes     # once per pass and after every strip
+    assert sink.drains == 1                               # once at loop exit
     tl.record(clock.now + tl.period_ms, rt)     # the next state record
     _same_params(json.loads(sink.sent[-1])["p"], rt.params)
     ring = [json.loads(s) for s in tl.lines()]
@@ -1647,29 +1648,84 @@ def test_debug_rp_rate_follows_the_link():
     assert rp_times(1000, late, change) == [1000, 1400, 1800, 2200, 3203]
 
 
-def test_debug_usb_link_writes_paced_lines_from_the_loop():
-    """The USB link in the loop: each pass's telemetry stage pumps it, no
-    write overfills the UART's FIFO, and the laptop gets whole lines: the
-    5 Hz state records and ``rp`` about once a second. Loop exit writes out
-    what still waits."""
+def test_debug_dropped_rp_goes_with_the_next_record():
+    """A screen change's ``rp`` that the full USB queue dropped goes with the
+    next state record once there is room, not ``rp_ms`` later."""
     fakes.install()
     import json
     from tests.fakes.serial_port import Port
-    from hal.radio import SimRadio
-    from hal.debuglink import SerialLink, SERIAL_FIFO, SERIAL_RATE
+    from hal.debuglink import SerialLink, SERIAL_QMAX
+    from app.runtime import Runtime
     from app.telemetry import Telemetry
+    from finder.render_params import make_params, replace
     clock = Clock(0)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None)
+    rt.begin(0)
+    rt._stage_logic(1000)
+    rt.params = make_params(t_ms=1000, screen="FAR")
+    port = Port()
+    link = SerialLink("A", port)
+    tl = Telemetry(dev="A", sink=link)
+    tl.record(1000, rt)
+    link.drain()
+    assert link.send('{"ev":"pad","x":"%s"}' % ("y" * (SERIAL_QMAX - 620)))
+    assert link.queued == SERIAL_QMAX - 599     # room for s (416 bytes), not for rp (635)
+    rt.params = replace(rt.params, screen="MENU")
+    tl.record(1200, rt)
+    assert link.drop == 1                       # the rp of the new screen
+    link.drain()
+    tl.record(1400, rt)
+    link.drain()
+    recs = [json.loads(ln[1:]) for ln in port.data().split(b"\n")[:-1]]
+    assert [d["t"] for d in recs if d["ev"] == "s"] == [1000, 1200, 1400]
+    rp = [d for d in recs if d["ev"] == "rp"]
+    assert [d["t"] for d in rp] == [1000, 1400] and rp[1]["p"]["screen"] == "MENU", rp
+
+
+def _usb_watch(clock, display=None):
+    """A watch whose telemetry goes through a ``SerialLink`` to a fake USB
+    port stamped by ``clock`` -> (runtime, link, port)."""
+    fakes.install()
+    from tests.fakes.serial_port import Port
+    from hal.radio import SimRadio
+    from hal.debuglink import SerialLink
+    from app.telemetry import Telemetry
     port = Port(clock)
     rt = _watch(clock, SimRadio(MAC_A).begin())
+    if display is not None:
+        rt.board.display = display
     link = SerialLink("A", port)
     rt.tele = Telemetry(dev="A", sink=link)
     rt.begin(0)
-    while clock.now < 5000:                     # Runtime.run's loop, without its exit flush
+    return rt, link, port
+
+
+def _usb_run(rt, end):
+    """``Runtime.run``'s loop until ``end`` ms, without its exit flush;
+    returns the most bytes the link had waiting after a pass."""
+    link = rt.tele.sink
+    top = 0
+    while rt.clock() < end:
         w = rt.step()
+        if link.queued > top:
+            top = link.queued
         if w > 0:
             rt.idle(w)
-    assert port.overfill(SERIAL_FIFO, SERIAL_RATE) is None
-    assert link.drop == 0 and link.queued < 1000
+    return top
+
+
+def test_debug_usb_link_writes_paced_lines_from_the_loop():
+    """The USB link in the loop: the telemetry stage pumps it, no write
+    overfills the UART's FIFO, and the laptop gets whole lines: the 5 Hz
+    state records and ``rp`` about once a second. Loop exit writes out what
+    still waits."""
+    import json
+    clock = Clock(0)
+    rt, link, port = _usb_watch(clock)
+    top = _usb_run(rt, 5000)
+    assert port.overfill() is None
+    assert link.drop == 0 and top < 1000, top
     rt.tele.flush(force=True)
     assert link.queued == 0
     lines = port.data().split(b"\n")
@@ -1681,6 +1737,34 @@ def test_debug_usb_link_writes_paced_lines_from_the_loop():
     kinds = [d["ev"] for d in recs]
     assert 24 <= kinds.count("s") <= 26 and 5 <= kinds.count("rp") <= 7, kinds
     assert link.n_tx == len(recs) and rt.stats()["debug_stats"]["tx"] == len(recs)
+
+
+def test_debug_usb_link_keeps_up_while_frames_render():
+    """On the watch a frame takes ~40 ms (10 strips of 4 ms), so one pump a
+    pass would carry too little. The link is also pumped after every strip:
+    nothing is dropped, the queue stays short, and no write overfills."""
+    clock = Clock(0)
+    rt, link, port = _usb_watch(clock, SlowDisplay(clock, 4))
+    top = _usb_run(rt, 60000)
+    assert rt.frames > 1000 and link.n_tx > 300, (rt.frames, link.n_tx)
+    assert link.drop == 0 and top < 1500, (link.drop, top)
+    assert port.overfill() is None
+
+
+def test_debug_usb_pump_reads_the_clock_after_the_record():
+    """Building and queueing the 5 Hz records takes a few ms on the watch:
+    the pump after them reads the clock again, so the FIFO model never
+    counts that time as drained and no write overfills."""
+    clock = Clock(0)
+    rt, link, port = _usb_watch(clock)
+    record = rt.tele.record
+
+    def slow_record(now, r):
+        record(now, r)
+        clock.now += 6
+    rt.tele.record = slow_record
+    _usb_run(rt, 30000)
+    assert link.n_tx > 150 and port.overfill() is None, port.overfill()
 
 
 def test_debug_send_errors_never_stop_the_loop():

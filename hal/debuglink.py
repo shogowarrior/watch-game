@@ -38,11 +38,11 @@ them on different channels.
 Both links offer what app/telemetry.py and app/runtime.py use: ``dev``,
 ``sta`` and ``channel`` (None on USB), ``rp_ms`` (how often the screen
 record goes out), ``send(data)`` (one record, from the 5 Hz path, never
-from the render loop), ``pump(now)`` (once per loop pass), ``drain()``
-(loop exit), ``stats()`` and ``close()``. Send errors are counted in
-``tx_err`` and never raised. ``network`` and ``socket`` are imported only
-when used, so this file also loads on CPython (tools/fake_watches.py sends
-through both links) and in the tests.
+from the render loop), ``pump(now)`` (once per loop pass and after every
+strip of a frame), ``drain()`` (loop exit), ``stats()`` and ``close()``.
+Send errors are counted in ``tx_err`` and never raised. ``network`` and
+``socket`` are imported only when used, so this file also loads on CPython
+(tools/fake_watches.py sends through both links) and in the tests.
 """
 
 import json
@@ -121,15 +121,15 @@ class SerialLink:
     ``send`` (5 Hz) frames a record and queues it, cut once into pieces of at
     most ``SERIAL_FIFO`` bytes; a record that would leave more than
     ``SERIAL_QMAX`` bytes waiting is dropped whole (``drop``). ``pump(now)``
-    (once per loop pass) writes whole pieces only while the modelled FIFO has
-    room: it refills at ``SERIAL_RATE`` bytes per ms since the last write, up
-    to ``SERIAL_FIFO``. So a write never waits (``print`` would, while the
-    FIFO is full), and ``pump`` allocates nothing. The cuts fall every
-    ``SERIAL_FIFO`` bytes of the queued stream, not of each record, so a pass
-    that finds the FIFO empty fills all of it. A pass carries at most
-    ``SERIAL_FIFO`` bytes: at ~20 passes a second (one ~40 ms frame each)
-    that is ~2.5 KB/s, just under the ~2.7 KB/s the records need, so a few
-    are dropped while the screen renders (``drop``)."""
+    writes whole pieces only while the modelled FIFO has room: it refills at
+    ``SERIAL_RATE`` bytes per ms since the last write, up to ``SERIAL_FIFO``.
+    So a write never waits (``print`` would, while the FIFO is full), and
+    ``pump`` allocates nothing. The cuts fall every ``SERIAL_FIFO`` bytes of
+    the queued stream, not of each record, so a pump that finds the FIFO
+    empty fills all of it. The runtime pumps once per loop pass and after
+    each ~4 ms strip of a frame, so the FIFO refills about 3 times per ~40 ms
+    frame: well over the ~2.7 KB/s the records need, and the queue fills only
+    in a burst."""
 
     sta = None               # no Wi-Fi: the radio stays as in normal play
     channel = None

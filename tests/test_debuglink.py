@@ -6,7 +6,7 @@ Wi-Fi or a real serial port; the Wi-Fi name and password here are made up."""
 import sys
 
 from tests import Skip, fakes
-from tests.fakes.serial_port import Port
+from tests.fakes.serial_port import LINE_FIFO, LINE_RATE, Port
 
 fakes.install()
 from hal import debuglink as dl  # noqa: E402  (import failure must FAIL, not skip)
@@ -373,11 +373,6 @@ def _port(clock):
     return Port(lambda: clock[0])
 
 
-def _overfill(port):
-    """The first write the UART's FIFO had no room for, or None."""
-    return port.overfill(dl.SERIAL_FIFO, dl.SERIAL_RATE)
-
-
 def test_serial_frames_each_record_as_one_line():
     """0x1E, the JSON as UTF-8, then \\n (RFC 7464), for str and bytes alike;
     nothing is written before a pump."""
@@ -411,15 +406,15 @@ def test_serial_pieces_fill_whole_fifo_loads():
         link.pump(clock[0])
         loads.append(sum([len(w[0]) for w in port.writes[k:]]))
     assert loads == [128, 128, 128, 120], loads
-    assert max([len(w[0]) for w in port.writes]) <= dl.SERIAL_FIFO
+    assert max([len(w[0]) for w in port.writes]) <= LINE_FIFO
     assert port.data().split(b"\n") == [b"\x1e" + a.encode(), b"\x1e" + b.encode(), b""]
     assert link.n_tx == 2
 
 
 def test_serial_pump_never_writes_more_than_the_fifo_has_room_for():
     """A 4 KB backlog pumped at even and uneven passes: no write ever
-    overfills a FIFO that empties at 11 bytes per ms, and pumped every ms
-    the backlog drains at about that rate."""
+    overfills the 115200-baud line's FIFO (128 bytes, 11.52 bytes per ms),
+    and pumped every ms the backlog drains at about that rate."""
     sizes = (411, 664, 70, 411, 63, 411)
     for steps in ((1,), (1, 5, 3, 17, 2, 9, 30, 4, 12)):
         clock = [1000]
@@ -435,13 +430,13 @@ def test_serial_pump_never_writes_more_than_the_fifo_has_room_for():
             link.pump(clock[0])
             clock[0] += steps[j % len(steps)]
             j += 1
-        assert _overfill(port) is None, steps
+        assert port.overfill() is None, steps
         assert len(port.data()) == total and link.n_tx == n
         if steps == (1,):
             t0 = port.writes[0][1]
             first = sum([len(w[0]) for w in port.writes if w[1] == t0])
             rate = (total - first) / (port.writes[-1][1] - t0)
-            assert 10.0 <= rate <= dl.SERIAL_RATE, rate
+            assert 10.0 <= rate <= LINE_RATE, rate
 
 
 def test_serial_pump_runs_across_the_tick_wrap():

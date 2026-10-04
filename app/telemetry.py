@@ -38,8 +38,8 @@ record the events since the last one, the state record, and an ``rp``
 record (``{"ev": "rp", "on": screen on, "bl": backlight 0-100, "ch": the
 sink's Wi-Fi channel or null, "p": the RenderParams as JSON}``) that lets
 the page draw the watch's screen. ``rp`` goes once the sink's ``rp_ms`` has
-passed since the last one (Wi-Fi 200: with every state record; USB 1000),
-and at once when the screen, its sub-state or its power changes. ``rp``
+passed since the last one it took (Wi-Fi 200: with every state record; USB
+1000), and at once when the screen, its sub-state or its power changes. ``rp``
 records go only to the sink, never into the ring or the file. Nothing is
 sent from the render loop; a forced ``flush`` (loop exit, power off) sends
 what is left and drains the sink (USB: writes out what waits). Records are
@@ -250,24 +250,21 @@ class Telemetry:
         s = _fit(json.dumps({"t": now, "ev": "rp", "dev": self.dev, "mac": self.mac,
                              "on": on, "bl": _pct(rt.bl_level),
                              "ch": sk.channel, "p": to_dict(p)}, separators=SEP))
-        if s is not None:
-            sk.send(s)
+        if s is not None and sk.send(s):
+            self._rp_t = now
+            self._rp_scr, self._rp_sub, self._rp_on = p.screen, p.sub, on
 
     def _rp_due(self, now, p, on):
         """True when ``rp`` goes with this state record: the sink's ``rp_ms``
-        after the last one, less half a record period (so the record after
-        one a few ms late keeps its ``rp``), or at once when the screen, its
-        sub-state or its power changed."""
+        after the last one sent, less half a record period (so the record
+        after one a few ms late keeps its ``rp``), or at once when the screen,
+        its sub-state or its power differs from what that one showed. An
+        ``rp`` the sink did not take (a full USB queue) is tried again with
+        the next state record."""
         t = self._rp_t
-        if (t is not None and p.screen == self._rp_scr and p.sub == self._rp_sub
-                and on == self._rp_on
-                and ticks_diff(now, t) < self.sink.rp_ms - self.period_ms // 2):
-            return False
-        self._rp_t = now
-        self._rp_scr = p.screen
-        self._rp_sub = p.sub
-        self._rp_on = on
-        return True
+        return (t is None or p.screen != self._rp_scr or p.sub != self._rp_sub
+                or on != self._rp_on
+                or ticks_diff(now, t) >= self.sink.rp_ms - self.period_ms // 2)
 
     # ---- reading ----
     def lines(self, n=None):

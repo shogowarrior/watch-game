@@ -44,6 +44,7 @@ from sim.world import World, Walker, PI  # noqa: E402
 MACS = (b"\x24\x0a\xc4\x10\x00\x0a", b"\x24\x0a\xc4\x10\x00\x0b")
 DEVS = ("A", "B")
 STEP_MS = 50               # physics step; the logic runs every LOGIC_MS (100)
+FRAME_PUMPS = (38, 26, 14)  # mid-frame SerialLink pumps, ms before the step's end (12 apart)
 CONFIRM_MS = 800           # a player presses the side key this long after the runes show
 SPLIT_S = 5
 ROUTE = ((40.0, 0.0), (2.0, 0.0))   # A's walk, out and back (B stands at the origin)
@@ -157,8 +158,9 @@ def run(host="127.0.0.1", port=DEBUG_PORT, seconds=None, speed=1.0, stop=None, s
     time (None: until ``stop.is_set()``), ``speed`` times faster than real
     time. With ``serial``, two writable binary files (A's, B's; unbuffered,
     like the watch's UART), each watch writes its records as lines into its
-    file instead, through ``SerialLink`` pumped every step with the sim
-    clock. Returns each watch's link counters, by name."""
+    file instead, through ``SerialLink`` pumped on the sim clock as on the
+    watch: during the step's frame (``FRAME_PUMPS``, as after its strips)
+    and after the records. Returns each watch's link counters, by name."""
     a = Walker(1.0, 0.0, PI, 1.3, "A")       # held together: 1 m apart, face to face
     b = Walker(0.0, 0.0, 0.0, 1.3, "B")
     world = World(a, b)
@@ -175,6 +177,9 @@ def run(host="127.0.0.1", port=DEBUG_PORT, seconds=None, speed=1.0, stop=None, s
         pks = sim.step(STEP_MS / 1000.0)
         t += STEP_MS
         _deliver(sim, watches, pks)
+        for dt in FRAME_PUMPS:
+            for w in watches:
+                w.sink.pump(t - dt)
         if t % LOGIC_MS == 0:
             for i in (0, 1):
                 watches[i].tick(t, sim.motion(i))
