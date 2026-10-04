@@ -25,25 +25,37 @@ FLAGS = ["-std=gnu++17", "-Os", "-Wall", "-Wextra", "-Werror", "-Wdouble-promoti
          "-fno-exceptions", "-fno-rtti", "-mlongcalls"]
 
 
+INCLUDES = [os.path.join(ROOT, "native", "core", "include"), os.path.join(ROOT, "native", "esp32_shared", "include")]
+
+
 def compilers():
     return [p for p in (os.path.join(PKGS, c) for c in COMPILERS) if os.path.exists(p)]
 
 
+def plain(h):
+    """True if header h includes only the C++ library and hm/ headers (no ESP-IDF)."""
+    with open(h) as f:
+        return all(ln.split()[1].startswith(("<", '"hm/')) for ln in f if ln.startswith("#include"))
+
+
 def units(tmp):
-    """The core's sources, and one source per header that includes only it."""
-    inc = os.path.join(ROOT, "native", "core", "include")
+    """The core's sources, and one source per header that includes only it:
+    the core's, and esp32_shared's that need no ESP-IDF header (pio builds the rest)."""
     out = sorted(glob.glob(os.path.join(ROOT, "native", "core", "src", "**", "*.cpp"), recursive=True))
-    for h in sorted(glob.glob(os.path.join(inc, "hm", "**", "*.h"), recursive=True)):
-        rel = os.path.relpath(h, inc)
-        src = os.path.join(tmp, rel.replace(os.sep, "_") + ".cpp")
-        with open(src, "w") as f:
-            f.write('#include "%s"\n' % rel)
-        out.append(src)
+    for inc in INCLUDES:
+        for h in sorted(glob.glob(os.path.join(inc, "hm", "**", "*.h"), recursive=True)):
+            if not plain(h):
+                continue
+            rel = os.path.relpath(h, inc)
+            src = os.path.join(tmp, rel.replace(os.sep, "_") + ".cpp")
+            with open(src, "w") as f:
+                f.write('#include "%s"\n' % rel)
+            out.append(src)
     return out
 
 
 def compile_one(cxx, src):
-    cmd = [cxx] + FLAGS + ["-I" + os.path.join(ROOT, "native", "core", "include"), "-c", src, "-o", os.devnull]
+    cmd = [cxx] + FLAGS + ["-I" + d for d in INCLUDES] + ["-c", src, "-o", os.devnull]
     p = subprocess.run(cmd, capture_output=True, text=True)
     return p.returncode == 0, p.stdout + p.stderr
 

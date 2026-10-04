@@ -47,7 +47,8 @@ def build(out):
     the tests also compile keeps its sanitized copy."""
     code = [os.path.join(ROOT, "native", "core", "src")] + [os.path.join(ROOT, src) for src, _, _ in PORTS]
     tests = [os.path.join(ROOT, "native", "test")] + [os.path.join(ROOT, t) for _, _, t in PORTS]
-    inc = ["-I" + os.path.join(ROOT, "native", "core", "include"), "-I" + os.path.join(ROOT, "native", "test")]
+    inc = ["-I" + os.path.join(ROOT, "native", "core", "include"), "-I" + os.path.join(ROOT, "native", "test"),
+           "-I" + os.path.join(ROOT, "native", "esp32_shared", "include")]   # its plain headers (test_esp32_app.cpp)
     inc += ["-I" + os.path.join(ROOT, hdr) for _, hdr, _ in PORTS]
 
     def sources(dirs, flags):
