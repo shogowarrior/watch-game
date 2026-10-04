@@ -258,8 +258,9 @@ firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
 
 ## Web simulator
 
-`sim/webhost.py` (`TwoWatchSim`) runs two `Game` + `Renderer` pairs on one
-simulated world, stepped by the page. `web/sim/index.html` loads MicroPython
+`sim/webhost.py` (`TwoWatchSim`) runs two `Game` + `ThemedRenderer` pairs on
+one simulated world, stepped by the page (`set_theme(i, name)` sets a watch's
+theme, as its MENU THEME row does). `web/sim/index.html` loads MicroPython
 WebAssembly and a bundle of `finder/`, `ui/`, `sim/`.
 
 ```sh
