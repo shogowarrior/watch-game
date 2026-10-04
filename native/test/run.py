@@ -43,7 +43,7 @@ def build(out):
     for src, hdr, tests in PORTS:
         dirs += [os.path.join(ROOT, src), os.path.join(ROOT, tests)]
         inc.append("-I" + os.path.join(ROOT, hdr))
-    srcs = sorted(f for d in dirs for f in glob.glob(os.path.join(d, "*.cpp")))
+    srcs = sorted(f for d in dirs for f in glob.glob(os.path.join(d, "**", "*.cpp"), recursive=True))
     p = subprocess.run(["g++"] + FLAGS + inc + srcs + ["-o", out], capture_output=True, text=True)
     return p.returncode == 0, p.stdout + p.stderr
 

@@ -13,14 +13,14 @@ namespace hmt {
 using Tokens = std::vector<std::string>;
 std::vector<Tokens> golden(const char* name);
 inline long num(const std::string& s) { return strtol(s.c_str(), nullptr, 0); }
-inline float flt(const std::string& s) { return strtof(s.c_str(), nullptr); }
+inline double flt(const std::string& s) { return strtod(s.c_str(), nullptr); }
 inline bool none(const std::string& s) { return s == "n"; }
-// A C++ float against the Python double it ports, within single-precision
-// drift; "n" (None) matches NAN only.
-inline bool near(const std::string& want, float got, float rel = 1e-4f, float abs_tol = 1e-4f) {
+// A C++ double against the Python float it ports: equal unless a test passes
+// a tolerance (and says why); "n" (None) matches NAN only.
+inline bool near(const std::string& want, double got, double rel = 0, double abs_tol = 0) {
   if (none(want)) return isnan(got);
-  const float w = flt(want);
-  return !isnan(got) && fabsf(got - w) <= abs_tol + rel * fabsf(w);
+  const double w = flt(want);
+  return got == w || (!isnan(got) && fabs(got - w) <= abs_tol + rel * fabs(w));
 }
 
 }  // namespace hmt

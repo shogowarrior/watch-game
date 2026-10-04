@@ -11,8 +11,9 @@ CPython bit for bit instead of re-deriving them with another libm.
 Emission is generic: scalars become constexpr values, flat tuples arrays,
 tuples of equal-length tuples 2-D arrays, string-keyed dicts one constant per
 key (NAME_KEY), and mixed tuples one constant per element (NAME_0, NAME_1,
-...). Floats are double, as in CPython, so the game port computes what the
-Python traces record bit for bit (native/test replays them).
+...). Floats are double, so the ported game logic replays CPython's traces
+bit for bit (0.43f is not CPython's 0.43); the field and drivers use them only
+at compile time.
 Values none of these fit (RUNES) are listed in the header as skipped.
 """
 

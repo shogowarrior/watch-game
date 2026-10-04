@@ -14,7 +14,7 @@ been ported yet. MicroPython (the rest of the repo) is untouched.
 | `idf/lvgl/` | PlatformIO: LVGL 9.5 through esp_lvgl_port 2.9 on the same `esp_lcd` bus (`bench-lvgl`). The field is an LVGL image a custom decoder fills from the ring map, so its pixels are the other builds' ones; the HOT chips are LVGL labels; and a third scene has LVGL draw rings itself as arcs. |
 | `micropython/` | `hmlcd`, a C user module for a custom MicroPython 1.29 build: the screen push on core 0 from internal DMA buffers, from the shared ST7789 code and `esp32_shared`'s spi_master bus. |
 | `test/` | Host tests (g++ with address and UB sanitizers) on fake hardware, plus the golden palettes. `run.py` also builds the ports' portable code and tests (`idf/test/`), and replays the Python game's traces through the game port (`trace.h`, `test_port_*.cpp`, below). |
-| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU), `xcheck.py` (the core with the watch's compilers), `golden/` (game vectors from `finder/`), `trace_game.py` (records the Python game's calls for the trace tests). |
+| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU), `xcheck.py` (the core with the watch's compilers), `bench_report.py` (tables from bench logs), `golden/` (game vectors from `finder/`), `trace_game.py` (records the Python game's calls for the trace tests). |
 
 Both builds use pins and settings from `hal/pins.py`: SPI on HSPI with SCK 18,
 MOSI 19, CS 5, DC 27 and no MISO (GPIO12 is the backlight), MADCTL 0xC0 with
@@ -67,6 +67,14 @@ pio run -d native/arduino             # every library env -> native/arduino/.pio
 pio run -d native/idf                 # -> native/idf/.pio/build/{bench-esplcd,bench-regdma}/firmware.bin
 pio run -d native/idf/lvgl            # -> native/idf/lvgl/.pio/build/bench-lvgl/firmware.bin
 ```
+
+## Wi-Fi details
+
+The native builds don't join Wi-Fi. If one ever needs to, the name and password
+go only in a file named `wifi_secrets.h` (C/C++) or `secrets.ini` (PlatformIO
+`extra_configs`), which `native/.gitignore` ignores at any depth
+(`tests/test_native.py` checks it). They never go in `platformio.ini`, build
+flags, `sdkconfig*`, source, logs or chat.
 
 ## MicroPython with a C module (`micropython/`)
 

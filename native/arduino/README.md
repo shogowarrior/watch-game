@@ -6,6 +6,7 @@ One PlatformIO env per graphics library. Each compiles `src/bench_main.cpp`
 in one table.
 
 All envs run on Arduino-ESP32 2.0.17 (IDF 4.4), so only the library differs.
+`radio-pingpong` is not a display env: it checks the ESP-NOW radio (below).
 
 | Env | Library | How a frame goes out |
 |---|---|---|
@@ -51,3 +52,34 @@ for e in bench-lovyangfx bench-tft-espi bench-lvgl bench-arduino-gfx; do
   python3 native/tools/capture.py $PORT logs/bench-$e-A.log --seconds 150
 done
 ```
+
+## Radio check (`radio-pingpong`)
+
+Arduino-ESP32 2.0.17 is IDF 4.4, whose ESP-NOW receive callback carries no
+RSSI. `src/espnow_radio.cpp` reads it from the radio header just in front of
+the payload, as Espressif's esp-now component does for IDF < 5, and checks
+that header's channel (`hdr_bad` counts misses). `radio-pingpong` checks that
+reading on the watch: it sends 1000 pings, 50 ms apart on channel 6 at 20 dBm,
+to a MicroPython watch running the pong side of `tools/radio_pingpong.py`. It
+reports delivery, round trip and gaps, and RSSI both ways: `where=rx` is what
+this build read, `where=peer` what MicroPython measured on the same link. They
+should agree within a few dB, with `hdr_bad=0` and `sig_extra=43` (the frame's
+air length minus its payload). `test/pingpong_host.py` (also run by
+`tests/test_native_arduino.py`) runs the pinger beside the Python one and
+checks they send the same bytes and report the same numbers.
+
+QEMU has no Wi-Fi model: the env boots to `HM hello` there, and any Wi-Fi
+start crashes it, the standard `WiFi.mode(WIFI_STA)` included.
+
+Watch A takes the env; watch B keeps MicroPython with `finder/` and `hal/`
+deployed. Flash A first (it pings into the void once), then start B's pong,
+which waits up to 60 s for the first ping, then capture A, which restarts it:
+
+```sh
+A=/dev/cu.usbserial-022152D1; B=/dev/cu.usbserial-02215408
+pio run -d native/arduino -e radio-pingpong -t upload --upload-port $A
+mpremote connect $B cp tools/radio_pingpong.py :
+mpremote connect $B exec "import radio_pingpong as pp; pp.run('pong')" > logs/radio-pingpong-B.log &
+python3 native/tools/capture.py $A logs/radio-pingpong-A.log --seconds 120
+```
+
