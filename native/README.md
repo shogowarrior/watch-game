@@ -30,7 +30,7 @@ versions in `idf/lvgl/dependencies.lock`.
 python3 native/test/run.py                      # host tests (tests/test_native.py runs them too)
 python3 native/tools/gen_tuning_h.py --check    # headers match finder/tuning.py and ui/field.py
 python3 native/tools/xcheck.py                  # core/ with both xtensa g++, double promotion an error
-python3 native/tools/golden/run.py [--check]    # native/test/golden/*.txt from the Python game
+python3 native/tools/golden/run.py [--check]    # native/test/golden/*.txt (modules without a trace port)
 node tools/mpy/run.mjs native/tools/golden_field.py > native/test/golden_field.txt   # after a ui/field.py change
 python3 native/test/run.py --tests test_game,test_episode   # the trace tests on wider Python tests (minutes)
 python3 native/test/run.py --mark               # after a run where every port matched: note this Python
@@ -57,7 +57,11 @@ of the last run in which every port matched. While the Python differs from it,
 a trace test that differs skips instead of failing (the port lags; others are
 not blocked) and `tests/test_native.py` reports the lag as a skip. A porter
 ports the change until `run.py` passes, then runs `run.py --mark`. A port of a
-new module adds its Python unit tests to `TESTS` in `trace_game.py`.
+new module adds its Python unit tests to `TESTS` in `trace_game.py`, and any
+fixed inputs that reach further as `tools/scenarios/<name>.py` (a `lines()`
+generator, run as `"scenario:<name>"`). Modules checked this way have no golden
+file; `tools/golden/` keeps those still checked line by line (the estimator
+base's helpers, haptic patterns, render params, the beacon).
 
 ## Build
 
