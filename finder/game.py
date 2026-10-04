@@ -655,16 +655,14 @@ class Game:
     def _drop_stale_ignored(self):
         """An ignored-tap or hint toast still up when its screen no longer calls
         for it is dropped (§8 Ignored taps). PRESS 2X TO SCAN also goes when a
-        word takes the bottom slot (``tick`` checks the frame)."""
+        word takes the bottom slot (``tick`` checks the frame); every way out of
+        FOUND replaces or clears PRESS THE BUTTON already."""
         s = self._toast
         if s == T_SWIPE_HOWTO:
             if self.mode != M_PAIRING or self.pair.sub != P.LOOKING:
                 self._toast = None
         elif s == T_PRESS_2X:
             if self.mode != M_HUNT or self.px.zone != HOT:
-                self._toast = None
-        elif s == T_PRESS_BUTTON:
-            if self.mode != M_FOUND:
                 self._toast = None
 
     def _input(self, t_ms):
