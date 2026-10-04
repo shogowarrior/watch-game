@@ -108,6 +108,9 @@ class Runtime {
   static bool blank_cb(void* self, ticks_t t) { return static_cast<Runtime*>(self)->feed->blanked(t); }
   static void wait_cb(void* self, int32_t ms) { static_cast<Runtime*>(self)->idle(ms); }
 
+  // MicroPython's ticks_ms: a clock may count all 32 bits (hm/ticks.h), the
+  // game gets the low 30, as the Python does.
+  ticks_t now_ms() { return clock.now_ms() & (TICKS_PERIOD - 1); }
   uint32_t acc(int i, uint32_t a);
   int32_t wait(ticks_t now) const;
   void quiet();

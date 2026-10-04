@@ -18,7 +18,7 @@ void Runtime::begin() {
   app::Pmu* pmu = parts.pmu;
   // the long press (§8, AXP202 PEK); presses latched before the loop never open MENU
   if (pmu && !(pmu->set_long_press_ms(T::BUTTON_LONG_MS) && pmu->clear_irqs())) io_errors[S_BUTTON] += 1;
-  const ticks_t now = clock.now_ms();
+  const ticks_t now = now_ms();
   std::optional<Mac> mac;
   if (parts.radio) {
     mac.emplace();
@@ -44,7 +44,7 @@ void Runtime::begin() {
 
 int32_t Runtime::step() {
   if (!started) begin();
-  ticks_t now = clock.now_ms();
+  ticks_t now = now_ms();
   const ticks_t t0 = now;
   loops += 1;
   if (powered_off) return MAX_SLEEP_MS;
@@ -69,12 +69,12 @@ int32_t Runtime::step() {
     stage_logic(now);
     a = acc(S_LOGIC, a);
     if (powered_off) return MAX_SLEEP_MS;
-    now = clock.now_ms();   // a panel wake blocks ~120 ms (SLPOUT)
+    now = now_ms();   // a panel wake blocks ~120 ms (SLPOUT)
   }
   if (ticks_diff(now, pacer.t_next) >= 0) {
     stage_render(now, t0);
     a = acc(S_RENDER, a);
-    now = clock.now_ms();
+    now = now_ms();
   }
   if (parts.radio) {
     stage_tx(now);
@@ -84,7 +84,7 @@ int32_t Runtime::step() {
   acc(S_HAPTIC, a);
   t_input_ = ticks_add(now, INPUT_MS);
   if (fps_log_ms && ticks_diff(now, log_t_) >= fps_log_ms) fps_log(now);
-  const ticks_t t = clock.now_ms();
+  const ticks_t t = now_ms();
   busy_ += ticks_diff(t, t0);
   return wait(t);
 }
@@ -101,19 +101,19 @@ int32_t Runtime::wait(ticks_t now) const {
 }
 
 void Runtime::idle(int32_t ms) {
-  const ticks_t end = ticks_add(clock.now_ms(), ms);
+  const ticks_t end = ticks_add(now_ms(), ms);
   if (!hap_active()) {
     const opt_ticks d = player.beat_due();
     if (!d || ticks_diff(*d, end) > 0) {
       clock.delay_ms(ms);
       return;
     }
-    const int32_t r = ticks_diff(*d, clock.now_ms());
+    const int32_t r = ticks_diff(*d, now_ms());
     if (r > 0) clock.delay_ms(r);
   }
   for (;;) {
-    stage_haptic(clock.now_ms());
-    const int32_t r = ticks_diff(end, clock.now_ms());
+    stage_haptic(now_ms());
+    const int32_t r = ticks_diff(end, now_ms());
     if (r <= 0) return;
     clock.delay_ms(r > HAPTIC_SLICE_MS ? HAPTIC_SLICE_MS : r);
   }
@@ -305,7 +305,7 @@ void Runtime::stage_render(ticks_t now, ticks_t t0) {
     }
     d->flush();
   }
-  now = clock.now_ms();   // events start when the frame is out
+  now = now_ms();   // events start when the frame is out
   if (d) {
     pacer.shown(now);
     backlight(p.backlight);   // lit only over a fresh frame
@@ -325,7 +325,7 @@ void Runtime::stage_render(ticks_t now, ticks_t t0) {
 // After each strip: pulse edges stay within a strip of schedule mid-frame,
 // and touch is sampled once TOUCH_GAP_MS have passed since the last sample.
 void Runtime::service() {
-  const ticks_t t = clock.now_ms();
+  const ticks_t t = now_ms();
   stage_haptic(t);
   if (parts.touch && ticks_diff(t, touch_t_) >= TOUCH_GAP_MS) sample_touch(t);
 }
