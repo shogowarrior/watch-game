@@ -3,7 +3,7 @@ import json
 from finder import tuning as T
 from finder.render_params import (
     FIELDS, RenderParams, DEFAULTS, make_params, replace, validate, to_dict, from_dict,
-    arrow_style, wavelength,
+    arrow_style, wavelength, BUMP_ICONS_MAX, _W_BUMP,
 )
 
 # ui-spec §3 example: WARM, locked arrow, getting warmer.
@@ -12,7 +12,7 @@ SPEC_EXAMPLE = (
     ' "intensity": 0.55, "speed_px_s": 80, "pulse_period_ms": 1000, "wavelength_px": 80,'
     ' "glow_r_px": 42, "ring_live": true, "burst": false,'
     ' "glyph": "arrow", "arrow_deg": 0, "cone_deg": 31, "arrow_style": "solid_b",'
-    ' "trend": 1, "trend_strong": false, "countdown": null, "runes": null,'
+    ' "trend": 1, "trend_strong": false, "countdown": null, "runes": null, "bump_icons": null,'
     ' "dist_band": "~10", "dist_stale": false, "word": null, "top_text": null, "banner": null,'
     ' "status": [64, 71, 4, false, false], "menu_rows": null, "sweep": null,'
     ' "haptic": null, "heartbeat": "DOUBLE", "heartbeat_every": 1, "backlight": 0.6,'
@@ -38,7 +38,7 @@ def _has(viol, field):
 
 
 def test_fields_and_namedtuple():
-    assert len(FIELDS) == 34 and len(set(FIELDS)) == 34
+    assert len(FIELDS) == 35 and len(set(FIELDS)) == 35
     assert set(DEFAULTS) == set(FIELDS)
     rp = make_params()
     assert isinstance(rp, tuple) and len(rp) == len(FIELDS)
@@ -147,7 +147,7 @@ def test_valid_other_screens():
                      glyph="glow", top_text="PAIR", word="LOOKING")
     assert validate(rp) == [], validate(rp)
     rp = make_params(screen="PAIRING", sub="seen", ramp="green", speed_px_s=0.0,
-                     glyph="runes", runes=(0, 7, 3), top_text="SAME RUNES?", word="TAP = YES")
+                     glyph="runes", runes=(0, 7, 3), top_text="SAME RUNES?", word="BUMP = YES")
     assert validate(rp) == [], validate(rp)
     rp = make_params(screen="PAIRING", sub="split", ramp="green", glyph="countdown",
                      countdown=30, speed_px_s=40.0, pulse_period_ms=2400,
@@ -165,11 +165,12 @@ def test_valid_other_screens():
 
 
 def test_spec_copy_fits_font_and_length():
-    words = ("LOOKING", "TAP = YES", "WAITING", "HOLD STILL", "SPLIT UP", "GO", "SEARCHING",
+    words = ("LOOKING", "BUMP = YES", "WAITING", "HOLD STILL", "SPLIT UP", "GO", "SEARCHING",
              "WALK ABOUT", "BUMP!", "FOUND", "TAP=AGAIN", "TURN RIGHT", "TURN LEFT",
              "4 O'CLOCK", "12 O'CLOCK", "AHEAD", "BEHIND", "WALK", "SAVER ON", "BYE")
     labels = ("PAIR", "SAME RUNES?", "STAND 1 STEP APART", "NO PEEKING", "TAP TO SCAN",
-              "LOOK AROUND", "TAP WATCHES", "TIME 12:48", "HOLD AT CHEST", "HOLD FLAT",
+              "LOOK AROUND", "BUMP WRISTS", "FRIEND NOT READY", "ONLY YOU FELT IT",
+              "FRIEND FELT IT", "TIME 12:48", "HOLD AT CHEST", "HOLD FLAT",
               "FRIEND SCANNING", "TAP TO RESCAN", "WRONG WAY? RESCAN", "LAST ~20M",
               "CAL SKIPPED", "FRIEND BATT 20%")
     for w in words:
@@ -178,6 +179,24 @@ def test_spec_copy_fits_font_and_length():
         assert validate(_zone_frame(0, top_text=s)) == [], s
     for s in ("NO FIX, TRY AGAIN", "LOST 0:27 GO BACK", "BACK IN RANGE", "BATTERY 5%"):
         assert validate(_zone_frame(0, banner=(s, "info", False))) == [], s
+
+
+def test_bump_icons_rules():
+    from finder import game
+    assert game.W_BUMP == _W_BUMP and BUMP_ICONS_MAX == 5
+    hot = dict(glyph="bump", dist_band="<3")
+    for v in range(BUMP_ICONS_MAX + 1):
+        assert validate(_zone_frame(3, bump_icons=v, **hot)) == [], v
+    assert validate(_zone_frame(3, bump_icons=0, word="BUMP!", top_text="BUMP WRISTS",
+                                **hot)) == []
+    for v in (6, 7, -1, True, 1.0, "1"):
+        assert _has(validate(_zone_frame(3, bump_icons=v, **hot)), "bump_icons"), v
+    assert _has(validate(_zone_frame(3, glyph="bump", dist_band="<3")), "bump_icons")
+    assert _has(validate(_zone_frame(3, bump_icons=0, dist_band="<3")), "bump_icons")
+    assert _has(validate(_zone_frame(2, bump_icons=0, glyph="bump")), "glyph")
+    assert _has(validate(_zone_frame(3, bump_icons=0, sub="walk", **hot)), "glyph")
+    assert _has(validate(_zone_frame(3, bump_icons=4, word="BUMP!", **hot)), "word")
+    assert validate(_zone_frame(3, bump_icons=1, word="BUMP!", **hot)) == []
 
 
 def test_violations_detected():

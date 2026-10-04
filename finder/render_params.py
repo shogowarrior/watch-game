@@ -20,7 +20,7 @@ FIELDS = (
     "ring_live", "burst",
     # centre glyph
     "glyph", "arrow_deg", "cone_deg", "arrow_style", "trend", "trend_strong", "countdown",
-    "runes",
+    "runes", "bump_icons",
     # text slots
     "dist_band", "dist_stale", "word", "top_text", "banner", "status", "menu_rows",
     # scanning
@@ -38,7 +38,7 @@ DEFAULTS = {
     "ramp": _FS[0], "intensity": _FS[1], "speed_px_s": _FS[2], "pulse_period_ms": _FS[3],
     "wavelength_px": None, "glow_r_px": _FS[4], "ring_live": False, "burst": False,
     "glyph": "seeker", "arrow_deg": None, "cone_deg": None, "arrow_style": None,
-    "trend": 0, "trend_strong": False, "countdown": None, "runes": None,
+    "trend": 0, "trend_strong": False, "countdown": None, "runes": None, "bump_icons": None,
     "dist_band": None, "dist_stale": False, "word": None, "top_text": None, "banner": None,
     "status": (100, None, 0, False, False), "menu_rows": None,
     "sweep": None,
@@ -55,6 +55,12 @@ _RAMP_FOR = {"FOUND": "gold", "SEARCHING": "grey", "LINK_LOST": "grey",
              "PAIRING": "green", "SCANNING": "green",
              "FAR": "green", "NEAR": "green", "WARM": "green", "HOT": "green"}
 _MENU_VISIBLE = len(T.MENU_ROWS_Y)          # rows on screen
+# bump_icons bits (HOT bump view, ui-spec §6 HOT)
+BI_ME = 1                                   # your watch counted a spike in the last 1 s
+BI_FRIEND = 2                               # the friend's reported spike, in the last 1 s
+BI_FRIEND_OFF = 4                           # the friend's watch cannot count a bump (grey)
+BUMP_ICONS_MAX = BI_ME | BI_FRIEND_OFF      # 6 and 7 never occur (bits 1 and 2 exclude)
+_W_BUMP = "BUMP!"                           # finder/game.py W_BUMP (tests check)
 
 
 def wavelength(speed_px_s, pulse_period_ms):
@@ -294,6 +300,18 @@ def validate(rp):
             e("runes: only in PAIRING")
     elif g == "runes" and sub in ("seen", "confirmed"):
         e("runes: glyph 'runes' needs them in %s" % sub)
+    bi = rp.bump_icons
+    if bi is not None and (not _int(bi) or not 0 <= bi <= BUMP_ICONS_MAX):
+        e("bump_icons: must be None or int 0..%d" % BUMP_ICONS_MAX)
+    elif (g == "bump") != (bi is not None):
+        e("bump_icons: set exactly when glyph is 'bump'")
+    elif bi is not None:
+        if sc != "HOT":
+            e("glyph: 'bump' only in HOT")
+        if sub is not None:
+            e("glyph: 'bump' needs sub None")
+        if bi & BI_FRIEND_OFF and rp.word == _W_BUMP:
+            e("word: BUMP! while the friend cannot count a bump")
 
     # text slots
     band = rp.dist_band

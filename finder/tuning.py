@@ -355,7 +355,7 @@ SUBS_DIRECTION = ('reveal', 'turn', 'walk')  # FAR..HOT sub (or None)
 SUBS_FOUND = ('celebrate', 'result')
 GLYPHS = (
     'glow', 'seeker', 'chevrons', 'arrow', 'countdown', 'turn', 'check', 'runes',
-    'battery',
+    'battery', 'bump',
 )
 BANNER_SEVERITIES = ('info', 'warn', 'critical')
 HEARTBEATS = ('TICK', 'DOUBLE')

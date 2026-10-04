@@ -45,7 +45,7 @@ SPEC = (
         ("SUBS_DIRECTION", ("reveal", "turn", "walk"), "FAR..HOT sub (or None)"),
         ("SUBS_FOUND", ("celebrate", "result"), None),
         ("GLYPHS", ("glow", "seeker", "chevrons", "arrow", "countdown", "turn", "check",
-                    "runes", "battery"), None),
+                    "runes", "battery", "bump"), None),
         ("BANNER_SEVERITIES", ("info", "warn", "critical"), None),
         ("HEARTBEATS", ("TICK", "DOUBLE"), None),
         ("SPEED_MIN_PX_S", -60.0, None),

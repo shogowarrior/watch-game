@@ -10,7 +10,7 @@ from finder import tuning as T
 from finder.game import (Game, M_HUNT, M_SCANNING, M_FOUND, M_LINK_LOST, M_SEARCHING, M_PAIRING,
                          BUZZ_OFF)
 from finder.pairing import Calibrator, Pairing, rune_ids, fnv1a32, UNSTABLE_SHOW_MS
-from finder.session import (PeerView, LiveMirror, fmt_mss, screen_code, SC_PAIRING, SC_FAR,
+from finder.session import (PeerView, LiveMirror, fmt_mss, screen_code, PEER_FRESH_MS, SC_PAIRING, SC_FAR,
                             SC_NEAR, SC_WARM, SC_HOT, SC_FOUND, SC_SCANNING, SC_PAIRED, SC_BYE,
                             SC_MASK, ST_PRESS, ST_GOODBYE, ST_CONFIRMED, ST_TAP_HOT)
 from finder.gestures import GestureRecognizer, TAP as G_TAP
@@ -636,8 +636,191 @@ def test_bump_ready_word_and_double():
     r.est.fixed = 1.5
     t0 = r.t
     r.run(2500)
-    assert r.p.word == "BUMP!" and r.p.top_text == "TAP WATCHES"
+    assert r.p.word == "BUMP!" and r.p.top_text == "BUMP WRISTS"
+    assert r.p.glyph == "bump" and r.p.bump_icons == 0
     assert r.haptics(t0).count("DOUBLE") == 1
+
+
+def _bump_ready(r):
+    """Band <3 held until bump-ready (the friend's state is the test's)."""
+    r.est.fixed = 1.5
+    n = 0
+    while not r.g.bump_ready:
+        r.run(100)
+        n += 1
+        assert n < 40
+
+
+def test_bump_view_waits_for_a_ready_friend():
+    r = hot_rig(4.0)
+    r.state = SC_WARM                           # the friend's screen cannot count a bump
+    t0 = r.t
+    _bump_ready(r)
+    r.run(1000)
+    p = r.p
+    assert p.glyph == "bump" and p.bump_icons == 4 and p.word is None
+    assert p.dist_band == "<3" and p.top_text == "FRIEND NOT READY"
+    assert "DOUBLE" not in r.haptics(t0)
+    r.state = SC_HOT                            # it reaches HOT: BUMP! and the DOUBLE now
+    t1 = r.t
+    r.run(300)
+    p = r.p
+    assert p.word == "BUMP!" and p.top_text == "BUMP WRISTS" and p.bump_icons == 0
+    assert r.haptics(t1).count("DOUBLE") == 1
+    r.state = SC_WARM                           # gone and back in one stretch: no 2nd DOUBLE
+    r.run(500)
+    r.state = SC_HOT
+    r.run(500)
+    assert r.haptics(t1).count("DOUBLE") == 1 and r.p.word == "BUMP!"
+
+
+def test_friend_not_ready_when_its_beacons_go_stale():
+    r = hot_rig(4.0)
+    _bump_ready(r)
+    r.run(300)
+    assert r.p.word == "BUMP!"
+    r.run(PEER_FRESH_MS + 100, packets=False)
+    p = r.p
+    assert r.g.mode == M_HUNT and p.bump_icons & 4 and p.word != "BUMP!"
+    assert p.top_text == "FRIEND NOT READY"
+
+
+def test_bump_icons_light_for_a_second():
+    r = hot_rig(4.0)
+    _bump_ready(r)
+    r.run(500)
+    g = r.g
+    assert g.on_accel_tap(r.t)
+    r.run(100)
+    assert r.p.bump_icons == 1
+    r.run(T.BUMP_LIT_MS)
+    assert r.p.bump_icons == 0
+    r.state = SC_HOT | ST_TAP_HOT               # the friend's spike, made in its HOT
+    r.peer_tap(r.t, 1)
+    r.run(200)
+    assert r.p.bump_icons == 2
+    r.run(T.BUMP_LIT_MS)
+    assert r.p.bump_icons == 0
+    r.state = SC_HOT                            # a friend spike made outside HOT never lights
+    r.peer_tap(r.t, 2)
+    r.run(200)
+    assert r.p.bump_icons == 0
+
+
+def test_one_sided_knock_says_who_felt_it():
+    r = hot_rig(4.0)
+    _bump_ready(r)
+    r.run(500)
+    g = r.g
+    t0 = r.t
+    assert g.on_accel_tap(t0)                   # only this watch felt it
+    r.run(400)
+    assert r.p.top_text == "BUMP WRISTS"        # judged KNOCK_WAIT_MS after the spike
+    r.run(200)
+    assert r.p.top_text == "ONLY YOU FELT IT" and r.p.word == "BUMP!"
+    assert g.mode == M_HUNT and "DOUBLE" not in r.haptics(t0 + 100)
+    r.run(T.TOAST_MS)
+    assert r.p.top_text == "BUMP WRISTS"
+    r.state = SC_HOT | ST_TAP_HOT               # only the friend felt one
+    r.peer_tap(r.t, 1)
+    r.run(700)
+    assert r.p.top_text == "FRIEND FELT IT" and g.mode == M_HUNT
+    r.run(T.TOAST_MS)
+    # a matched knock (60 ms apart) gives FOUND and no felt-it message
+    assert g.on_accel_tap(r.t)
+    r.peer_tap(r.t + 60, 2)
+    r.run(200)
+    assert g.mode == M_FOUND
+    r.run(1000)
+    assert all(p.top_text not in ("ONLY YOU FELT IT", "FRIEND FELT IT")
+               for p in r.params[-10:])
+
+
+def test_only_you_felt_it_needs_a_ready_friend():
+    r = hot_rig(4.0)
+    r.state = SC_WARM
+    _bump_ready(r)
+    r.run(500)
+    assert r.g.on_accel_tap(r.t)
+    ps = r.run(T.BUMP_LIT_MS - 100)
+    assert all(p.bump_icons == 5 for p in ps)
+    ps += r.run(1000)
+    assert all(p.top_text == "FRIEND NOT READY" for p in ps)
+
+
+def test_spikes_from_before_hot_are_never_judged():
+    r = paired_rig(d=8.0)
+    r.state = SC_HOT | ST_TAP_HOT
+    r.run(1000)
+    assert r.p.screen == "WARM"
+    assert r.g.on_accel_tap(r.t)                # made in WARM
+    r.peer_tap(r.t - 900, 1)                    # and an old friend spike
+    r.est.fixed = 2.0
+    ps = r.run(4000)
+    assert r.p.screen == "HOT"
+    assert all(p.top_text not in ("ONLY YOU FELT IT", "FRIEND FELT IT") for p in ps)
+
+
+def test_walk_arrow_hides_under_the_bump_view():
+    r = hot_rig(4.0)
+    g = r.g
+    g.arrow = A.make(10.0, 20.0, r.t)
+    r.run(5000)
+    assert g.arrow.phase == A.PH_WALK and r.p.glyph == "arrow"
+    _bump_ready(r)
+    r.run(100)
+    p = r.p
+    assert p.glyph == "bump" and p.arrow_deg is None and p.sub is None and g.arrow is not None
+    r.est.fixed = 12.0                          # bump-ready ends: the arrow is back
+    r.run(300)
+    assert r.p.screen == "HOT" and not g.bump_ready
+    assert r.p.glyph == "arrow" and r.p.sub == "walk"
+
+
+def test_pairing_one_sided_bump_toasts_and_match_calibrates():
+    r = Rig()
+    r.rssi = -50
+    r.run(1500)                                 # seen, past the DOUBLE's blanking
+    g = r.g
+    assert g.pair.sub == "seen"
+    assert g.on_accel_tap(r.t)                  # only this watch
+    r.run(600)
+    assert r.p.banner == ("ONLY YOU FELT IT", "info", False) and g.pair.sub == "seen"
+    assert r.p.word == "BUMP = YES" and r.p.top_text == "SAME RUNES?"
+    r.run(T.TOAST_MS)
+    r.peer_tap(r.t, 1)                          # only the friend (its watch in PAIRING)
+    r.run(700)
+    assert r.p.banner == ("FRIEND FELT IT", "info", False)
+    assert g.on_accel_tap(r.t)                  # a matched bump: both confirmed, calibrate
+    r.peer_tap(r.t + 50, 2)
+    r.run(200)
+    assert g.pair.sub == "calibrate" and r.p.banner is None
+
+
+def test_two_watches_one_sided_knock_feedback():
+    w = Two()
+    w.run(1000)
+    w.a.on_button(w.t)
+    w.b.on_button(w.t)
+    w.run(5000)
+    w.run(35000)                                # split, then HOT at 1 m
+    while not (w.a.bump_ready and w.b.bump_ready):
+        w.run(100)
+    w.run(500)
+    assert w.a.params.word == "BUMP!" and w.b.params.word == "BUMP!"
+    assert w.a.on_accel_tap(w.t)                # A felt it, B did not
+    w.run(200)                                  # B hears it (and A's ST_TAP_HOT) a beacon later
+    assert w.a.params.bump_icons == 1 and w.b.params.bump_icons == 2
+    w.run(500)
+    assert w.a.params.top_text == "ONLY YOU FELT IT"
+    assert w.b.params.top_text == "FRIEND FELT IT"
+    w.run(T.TOAST_MS)
+    assert w.a.on_accel_tap(w.t)                # a real knock: both spike 60 ms apart
+    w.t += 60
+    assert w.b.on_accel_tap(w.t)
+    w.t -= 60
+    w.run(300)
+    assert w.a.mode == M_FOUND and w.b.mode == M_FOUND
 
 
 def test_buzz_off_does_not_blank_the_bump_tap():

@@ -74,14 +74,15 @@ G_TURN = const(5)
 G_CHECK = const(6)
 G_RUNES = const(7)
 G_BATT = const(8)
-G_DOTS = const(9)           # renderer-only: the PAIRING looking dots
+G_BUMP = const(9)
+G_DOTS = const(10)          # renderer-only: the PAIRING looking dots
 GLYPHS = {n: i for i, n in enumerate(T.GLYPHS)}
 _IR = T.IRIS_R              # iris radius per glyph id (§2; countdown, turn, battery: as scan)
 IRIS_R = (_IR["none"], _IR["seeker"], _IR["chevrons"], _IR["arrow"], _IR["scan"],
-          _IR["scan"], _IR["none"], _IR["runes"], _IR["scan"], _IR["runes"])
+          _IR["scan"], _IR["none"], _IR["runes"], _IR["scan"], _IR["bump"], _IR["runes"])
 # strip culling boxes: tests/test_renderer.py checks they cover every glyph
-G_Y0 = (0, 90, 76, 52, 96, 94, 79, 94, 103, 114)
-G_Y1 = (0, 150, 165, 190, 145, 147, 162, 147, 137, 126)
+G_Y0 = (0, 90, 76, 52, 96, 94, 79, 94, 103, 63, 114)
+G_Y1 = (0, 150, 165, 190, 145, 147, 162, 147, 137, 152, 126)
 
 T_NONE = const(0)
 T_STATUS = const(1)
@@ -645,6 +646,8 @@ class Renderer:
             elif g == G_BATT:
                 st = p.status
                 gl.draw_battery(fb, y0, st[0] if st is not None else None)
+            elif g == G_BUMP:
+                gl.draw_bump(fb, y0, y1, p.bump_icons)
             elif g == G_DOTS:
                 gl.draw_dots(fb, y0)
         # top slot (y 12..35)

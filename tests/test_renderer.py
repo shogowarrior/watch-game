@@ -226,7 +226,8 @@ def test_renderer_tables_match_tuning():
         assert R.SCREENS[name] == sid == T.SCREENS.index(name), name
     for name, gid in (("glow", R.G_GLOW), ("seeker", R.G_SEEKER), ("chevrons", R.G_CHEV),
                       ("arrow", R.G_ARROW), ("countdown", R.G_COUNT), ("turn", R.G_TURN),
-                      ("check", R.G_CHECK), ("runes", R.G_RUNES), ("battery", R.G_BATT)):
+                      ("check", R.G_CHECK), ("runes", R.G_RUNES), ("battery", R.G_BATT),
+                      ("bump", R.G_BUMP)):
         assert R.GLYPHS[name] == gid, name
     assert R.G_DOTS == len(T.GLYPHS)
     # copy the renderer keys on that lives in finder/game.py
@@ -853,7 +854,7 @@ def test_hint_chip_outranks_pinned_status():
     cap = FrameCapture()
     r = Renderer()
     _fr(r, make_params(t_ms=T0, **_warm(status=(15, 80, 4, True, False),
-                                         top_text="TAP WATCHES")), cap)
+                                         top_text="BUMP WRISTS")), cap)
     assert r.top == T_CHIP
     _fr(r, make_params(t_ms=T0 + 50, **dict(rs._lost, status=(15, 80, 0, True, False))), cap)
     assert r.top == T_STATUS                          # strip outranks LAST
@@ -1061,6 +1062,7 @@ def test_no_allocation_steady_frames():
         dict(MENU_KW, sub="2^v"),
         _warm(sub="walk", glyph="arrow", arrow_deg=0, cone_deg=31, arrow_style="solid_b",
               trend=0),
+        dict(HOT_KW, glyph="bump", bump_icons=5, top_text="FRIEND NOT READY"),
     )
     # float params are converted once per params object and heartbeat event
     # lists are reused, so a steady frame loop allocates nothing
@@ -1173,6 +1175,58 @@ def test_wake_wedge_at_current_angle():
     assert got == list(gl._wedge)
 
 
+def test_bump_view_colours_per_state():
+    # §6 HOT bump view: each icon ready / lit / grey, rays follow (ui/glyphs.draw_bump)
+    _need_fb()
+    from ui import GREY
+    ready = (PROX[6], BG_IRIS, PROX[4])
+    lit = (PROX[7], PROX[7], PROX[6])
+    off = (GREY[5], BG_IRIS, GREY[3])
+    for bits, me, friend, ray in ((0, ready, ready, PROX[6]), (1, lit, ready, PROX[7]),
+                                  (2, ready, lit, PROX[7]), (4, ready, off, GREY[5]),
+                                  (5, lit, off, PROX[7])):
+        r = Renderer()
+        cap = FrameCapture()
+        _run(r, cap, dict(HOT_KW, glyph="bump", bump_icons=bits), 400)
+        b = cap.buf
+        assert r.field.iris == T.IRIS_R["bump"], bits
+        got = ((_px(b, 82, 118), _px(b, 100, 118), _px(b, 100, 90)),
+               (_px(b, 157, 118), _px(b, 140, 118), _px(b, 140, 90)))
+        assert got == (me, friend), (bits, got)
+        assert _px(b, 120, 69) == ray and _px(b, 119, 118) == BG_IRIS, bits
+
+
+def test_bump_view_hides_a_walk_arrow_at_once():
+    # the arrow is not dropped, only covered: no expire shrink under the bump view
+    _need_fb()
+    r = Renderer()
+    cap = FrameCapture()
+    walk = dict(HOT_KW, sub="walk", glyph="arrow", arrow_deg=20, cone_deg=18,
+                arrow_style="solid_a")
+    _run(r, cap, walk, 600)
+    assert r.arrow
+    _fr(r, make_params(t_ms=T0 + 650, **dict(HOT_KW, glyph="bump", bump_icons=0)), cap)
+    from ui.renderer import G_BUMP
+    assert not r.arrow and r.g == G_BUMP
+
+
+def test_bump_view_allocates_nothing_as_icons_change():
+    _need_fb()
+    r = Renderer()
+    cap = FrameCapture()
+    ps = [make_params(t_ms=T0 + 50 * k, **dict(HOT_KW, glyph="bump",
+                                               bump_icons=(0, 1, 2, 4, 5)[(k // 4) % 5]))
+          for k in range(80)]
+    for k in range(30):
+        _fr(r, ps[k], cap)
+    gc.collect()
+    a0 = gc.mem_alloc()
+    for k in range(30, 80):
+        _fr(r, ps[k], cap)
+    grown = gc.mem_alloc() - a0
+    assert grown < 512, grown
+
+
 def test_glyph_culling_boxes_cover_glyphs():
     # G_Y0/G_Y1 are typed in, the glyph geometry comes from tokens: a box
     # that stops covering its glyph clips it at a strip edge
@@ -1187,8 +1241,8 @@ def test_glyph_culling_boxes_cover_glyphs():
     y0, y1 = R.G_Y0, R.G_Y1
     for name, phases, run_ms in cases:
         rs.render_fixture(r, a, name, phases, run_ms)
-        R.G_Y0 = (0,) * 10
-        R.G_Y1 = (240,) * 10
+        R.G_Y0 = (0,) * len(y0)
+        R.G_Y1 = (240,) * len(y1)
         try:
             rs.render_fixture(r, b, name, phases, run_ms)
         finally:

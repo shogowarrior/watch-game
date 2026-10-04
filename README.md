@@ -76,7 +76,7 @@ reboots into the game. To play:
 3. **Split up.** A 30 s countdown gives you time to hide.
 4. **Hunt.** Follow the glow. Tap the screen to run a direction scan, then turn
    slowly on the spot as the screen guides you.
-5. **Find.** When the screen says `BUMP!`, tap watches. Tap again for a new round.
+5. **Find.** When the screen says `BUMP!`, bump wrists. Press the side button for a new round.
 
 ## Controls
 

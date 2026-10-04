@@ -2,7 +2,7 @@
 
     PAIRING (looking/seen/confirmed/calibrate/split) -> SEARCHING | FAR..HOT
     FAR..HOT (+ DIRECTION arrow overlay, + trend chevrons) <-> SCANNING
-    HOT --bump--> FOUND --tap/press--> PAIRING split (new round)
+    HOT --bump--> FOUND --press--> PAIRING split (new round)
     FAR..HOT/SCANNING --5 s silence--> LINK_LOST --3 packets/2 s--> zone
     past pairing --partner in PAIRING for 2 s--> PAIRING looking
     MENU is an overlay over any screen; LOW-BATTERY is a modifier.
@@ -35,6 +35,15 @@ not, a finger made the spike and the gesture runs (ui-spec §6, §8). A touch
 in HOT never starts a scan (a knock whose spike was missed or blanked would
 disarm the bump; the button scans there). The accelerometer samples fast in FOUND too, so knocks that go on
 after FOUND never start a new round.
+
+Bump-ready in HOT shows the bump view (glyph ``bump``, ``bump_icons``): your
+watch and the friend's light for BUMP_LIT_MS after each counted spike, and the
+friend's is grey while its screen cannot count a bump (``_friend_ready``: heard
+within PEER_FRESH_MS and showing HOT or FOUND, the test ``_check_found`` runs);
+``BUMP!`` and the bump-ready DOUBLE wait for it. A spike the other watch did
+not report within BUMP_WINDOW_MS gets ONLY YOU FELT IT / FRIEND FELT IT
+KNOCK_WAIT_MS after it, in HOT (top chip) and PAIRING seen/confirmed (toast)
+(ui-spec §6 HOT).
 
 Choices where the spec is silent (all starting values):
   * the expected partner beacon rate mirrors the partner's ``beacon_hz``
@@ -75,7 +84,7 @@ from finder import tuning as T
 from finder.haptic_patterns import (BlankWindow, TOTAL_MS, stronger, MODE_FULL as BUZZ_FULL,
                                      MODE_OFF as BUZZ_OFF)
 from finder import proto
-from finder.render_params import RenderParams, wavelength
+from finder.render_params import RenderParams, wavelength, BI_ME, BI_FRIEND, BI_FRIEND_OFF
 from finder.estimators import make as _make_est
 from finder.estimators.base import ACT_STILL
 from finder.gestures import (TAP as G_TAP, LONG_PRESS as G_LONG_PRESS,
@@ -114,13 +123,17 @@ W_SEARCHING = "SEARCHING"
 W_WALK_ABOUT = "WALK ABOUT"
 W_HOLD_STILL = "HOLD STILL"
 W_BUMP = "BUMP!"
+W_BUMP_YES = "BUMP = YES"
 W_FOUND = "FOUND"
 W_AGAIN = "TAP=AGAIN"
 W_SAVER = "SAVER ON"
 W_BYE = "BYE"
 T_TAP_TO_SCAN = "TAP TO SCAN"
 T_LOOK_AROUND = "LOOK AROUND"
-T_TAP_WATCHES = "TAP WATCHES"
+T_BUMP_WRISTS = "BUMP WRISTS"
+T_FRIEND_NOT_READY = "FRIEND NOT READY"
+T_ONLY_YOU = "ONLY YOU FELT IT"
+T_FRIEND_FELT = "FRIEND FELT IT"
 T_FRIEND_SCANNING = "FRIEND SCANNING"
 T_BACK = "BACK IN RANGE"
 T_FRIEND_OFF = "FRIEND IS OFF"
@@ -244,6 +257,14 @@ class Game:
         self._br_since = None
         self.bump_ready = False
         self._br_fired = False
+        self._felt_on = False     # in a felt-it context (HOT, PAIRING seen/confirmed)
+        self._felt_t0 = t_ms      # ... since: older spikes are never judged
+        self._fm = None           # own spike waiting for its verdict
+        self._fq = None           # partner spike waiting for its verdict
+        self._fm_seen = None      # last own / partner spike already looked at
+        self._fq_seen = None
+        self._felt = None         # HOT felt-it chip text
+        self._felt_until = t_ms
         self._still_since = None
         self._still_done = False
         self._peer_sweep = False
@@ -543,6 +564,7 @@ class Game:
                 self._tick_found(t_ms)
             elif m == M_LINK_LOST:
                 self._tick_lost(t_ms)
+            self._update_felt(t_ms)
             self.menu.tick(t_ms)
             h = self._held
             if h is not None and not self.menu.is_open:
@@ -565,6 +587,8 @@ class Game:
             self._toast = None
         if self._hint is not None and ticks_diff(self._hint_until, t_ms) <= 0:
             self._hint = None
+        if self._felt is not None and ticks_diff(self._felt_until, t_ms) <= 0:
+            self._felt = None
         s = self._inter_until
         if s is not None and ticks_diff(s, t_ms) <= 0:
             self._inter_until = None
@@ -598,6 +622,7 @@ class Game:
         self._down_since = _cap(t_ms, self._down_since)
         self._still_since = _cap(t_ms, self._still_since)
         self._br_since = _cap(t_ms, self._br_since)
+        self._felt_t0 = _cap(t_ms, self._felt_t0)
         self._hold_t = _cap(t_ms, self._hold_t)
         self.peer.expire(t_ms, STALE_MS)
         self.meter.expire(t_ms)       # rolls the delivery window: its stamp never wraps either
@@ -775,8 +800,8 @@ class Game:
                 self._br_since = t_ms
             if ticks_diff(t_ms, self._br_since) >= T.BUMP_READY_HOLD_MS:
                 self.bump_ready = True
-                if not self._br_fired:
-                    self._br_fired = True
+                if not self._br_fired and self._friend_ready(t_ms):
+                    self._br_fired = True     # "bump now": once both can count it
                     self._emit(t_ms, "DOUBLE")
         else:
             self._br_since = None
@@ -832,14 +857,104 @@ class Game:
         pt = self._press_t
         return pt is not None and 0 <= ticks_diff(t_ms, pt) <= T.FALLBACK_PRESS_WINDOW_MS
 
+    def _friend_ready(self, t_ms):
+        """The partner's watch can count a bump: heard within PEER_FRESH_MS and
+        its screen in HOT or FOUND (the bump rule's own test, ui-spec §6 HOT)."""
+        pv = self.peer
+        if not pv.fresh(t_ms):
+            return False
+        ps = pv.screen
+        return ps == SC_HOT or ps == SC_FOUND
+
+    def _my_spiked(self, q):
+        """Our last counted spike is within BUMP_WINDOW_MS of the partner's ``q``."""
+        m = self.bump_t
+        return m is not None and -T.BUMP_WINDOW_MS <= ticks_diff(m, q) <= T.BUMP_WINDOW_MS
+
+    def _felt_ctx(self):
+        m = self.mode
+        if m == M_HUNT:
+            return self.px.zone == HOT
+        return m == M_PAIRING and (self.pair.sub == P.SEEN or self.pair.sub == P.CONFIRMED)
+
+    def _update_felt(self, t_ms):
+        """ONLY YOU FELT IT / FRIEND FELT IT: a spike the other watch did not
+        report within BUMP_WINDOW_MS, judged KNOCK_WAIT_MS after it, so players
+        learn how firm a bump must be (ui-spec §6 HOT). Touches play no part."""
+        if not self._felt_ctx():
+            if self._felt_on:
+                self._felt_on = False
+                self._fm = self._fq = self._felt = None
+                if self._toast == T_ONLY_YOU or self._toast == T_FRIEND_FELT:
+                    self._toast = None
+            return
+        m = self.bump_t
+        pv = self.peer
+        q = pv.tap_t
+        if not self._felt_on:
+            self._felt_on = True
+            self._felt_t0 = t_ms
+            self._fm_seen = m
+            self._fq_seen = q
+        hot = self.mode == M_HUNT
+        if m != self._fm_seen:
+            self._fm_seen = m
+            if (m is not None and ticks_diff(m, self._felt_t0) >= 0
+                    and not self._peer_spiked(m)):
+                self._fm = m
+        if q != self._fq_seen:
+            if (q is None or ticks_diff(q, self._felt_t0) < 0
+                    or ticks_diff(t_ms, q) > BUMP_FRESH_MS):
+                self._fq_seen = q     # none, or too old: never judged
+            elif pv.tap_hot or not hot:
+                self._fq_seen = q
+                if not self._my_spiked(q):
+                    self._fq = q
+            # else its ST_TAP_HOT can trail the tap count by a beacon: look again
+        fm = self._fm
+        if fm is not None:
+            if self._peer_spiked(fm):
+                self._fm = None
+            elif ticks_diff(t_ms, fm) >= T.KNOCK_WAIT_MS:
+                self._fm = None       # HOT: FRIEND NOT READY already says why
+                if not hot or self._friend_ready(t_ms):
+                    self._felt_say(t_ms, T_ONLY_YOU)
+        fq = self._fq
+        if fq is not None:
+            if self._my_spiked(fq):
+                self._fq = None
+            elif ticks_diff(t_ms, fq) >= T.KNOCK_WAIT_MS:
+                self._fq = None
+                self._felt_say(t_ms, T_FRIEND_FELT)
+
+    def _felt_say(self, t_ms, text):
+        if self.mode == M_HUNT:
+            self._felt = text
+            self._felt_until = ticks_add(t_ms, T.TOAST_MS)
+        else:
+            self._toast_set(text, "info")
+
+    def _bump_icons(self, t_ms, ready):
+        """``bump_icons`` for the bump view: who felt the last knock (lit for
+        BUMP_LIT_MS), and whether the friend's watch can count one."""
+        v = 0
+        m = self.bump_t
+        if m is not None and self._tap_hot and 0 <= ticks_diff(t_ms, m) < T.BUMP_LIT_MS:
+            v = BI_ME
+        if not ready:
+            return v | BI_FRIEND_OFF
+        pv = self.peer
+        q = pv.tap_t
+        if q is not None and pv.tap_hot and 0 <= ticks_diff(t_ms, q) < T.BUMP_LIT_MS:
+            v |= BI_FRIEND
+        return v
+
     def _check_found(self, t_ms):
         px = self.px
         pv = self.peer
-        if px.zone != HOT or not pv.fresh(t_ms):
+        if px.zone != HOT or not self._friend_ready(t_ms):
             return
         ps = pv.screen
-        if ps != SC_HOT and ps != SC_FOUND:
-            return
         if self._tap_hot and pv.tap_hot and self._bump_match(t_ms):
             self._consume_bump()
             self._enter_found(t_ms)
@@ -1245,6 +1360,7 @@ class Game:
         hb = None
         every = 1
         runes = None
+        bump = None
         if m == M_PAIRING:
             pr = self.pair
             sub = pr.sub
@@ -1258,7 +1374,7 @@ class Game:
                 word = "LOOKING"
             elif sub == P.SEEN:
                 top = "SAME RUNES?"
-                word = "TAP = YES"
+                word = W_BUMP_YES
             elif sub == P.CONFIRMED:
                 top = "WAITING"
                 word = "WAITING"
@@ -1315,7 +1431,12 @@ class Game:
                 glow = T.FIELD_SCAN_SWEEP_GLOW_R     # the live-mirror halo (§5.7)
                 if self.mirror.value is not None:
                     inten = self.mirror.value
-            if a is not None and a.glyph == "arrow":
+            arrow_on = a is not None and a.glyph == "arrow"
+            ready = self._friend_ready(t_ms)
+            if self.bump_ready and (not arrow_on or a.sub == "walk"):
+                glyph = "bump"               # a walk arrow keeps aging, hidden (§6 HOT)
+                bump = self._bump_icons(t_ms, ready)
+            elif arrow_on:
                 glyph = "arrow"
                 adeg = a.arrow_deg
                 cone = a.cone_deg
@@ -1332,11 +1453,17 @@ class Game:
                         top = T_FRIEND_SCANNING
                     if word is None:
                         word = W_HOLD_STILL
+                if top is None and self._felt is not None:
+                    top = self._felt
                 if self.bump_ready:
-                    if word is None:
-                        word = W_BUMP
-                    if top is None:
-                        top = T_TAP_WATCHES
+                    if not ready:
+                        if top is None:
+                            top = T_FRIEND_NOT_READY
+                    else:
+                        if word is None:
+                            word = W_BUMP
+                        if top is None:
+                            top = T_BUMP_WRISTS
                 if top is None and self._hint is not None and ticks_diff(self._hint_until, t_ms) > 0:
                     top = self._hint
         elif m == M_SCANNING:
@@ -1387,6 +1514,7 @@ class Game:
         if iu is not None and ticks_diff(iu, t_ms) > 0 and m != M_SCANNING:
             glyph = "battery"
             adeg = cone = style = None
+            bump = None
             if sub in ("reveal", "turn", "walk"):
                 sub = None
             sweep = None
@@ -1411,6 +1539,7 @@ class Game:
             sub = self.menu.sub
             rows = self.menu.rows
             runes = None
+            bump = None
             glyph = "glow"
             adeg = cone = style = None
             trend = 0
@@ -1431,7 +1560,7 @@ class Game:
             wavelength_px=wavelength(speed, period), glow_r_px=glow,
             ring_live=live, burst=self._burst,
             glyph=glyph, arrow_deg=adeg, cone_deg=cone, arrow_style=style,
-            trend=trend, trend_strong=strong, countdown=cd, runes=runes,
+            trend=trend, trend_strong=strong, countdown=cd, runes=runes, bump_icons=bump,
             dist_band=band, dist_stale=stale, word=word, top_text=top, banner=banner,
             status=status, menu_rows=rows, sweep=sweep,
             haptic=haptic, heartbeat=hb, heartbeat_every=every,
