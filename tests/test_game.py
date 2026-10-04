@@ -3261,6 +3261,66 @@ def test_ignored_toast_dropped_when_the_screen_changed():
     assert not any(p.banner and p.banner[0] == "PRESS 2X TO SCAN" for p in ps)
 
 
+def test_ignored_toasts_drop_once_their_screen_moves_on():
+    def press_2x_up(r):
+        _tap(r)
+        r.run(T.KNOCK_WAIT_MS + 200)
+        assert r.p.banner == ("PRESS 2X TO SCAN", "info", False)
+
+    def no_toast(ps, text):
+        assert not any(p.banner and p.banner[0] == text for p in ps), \
+            [(p.screen, p.sub, p.word, p.banner) for p in ps]
+
+    b = hot_rig(4.0)                            # BUMP! takes the slot: gone on that frame
+    b.state = SC_WARM
+    _bump_ready(b)
+    b.run(1000)
+    assert b.p.word is None and b.p.top_text == "FRIEND NOT READY"
+    press_2x_up(b)
+    b.state = SC_HOT
+    ps = b.run(400)
+    assert ps[-1].word == "BUMP!"
+    no_toast([p for p in ps if p.word is not None], "PRESS 2X TO SCAN")
+    f = hot_rig(4.0)                            # a bump or the fallback: not over FOUND
+    f.run(1000)
+    press_2x_up(f)
+    _found_by_press(f)
+    f.run(300)
+    no_toast([p for p in f.params if p.screen == "FOUND"], "PRESS 2X TO SCAN")
+    c = hot_rig(4.0)                            # following it: not over the scan's countdown
+    c.run(1000)
+    press_2x_up(c)
+    c.g.on_button(c.t)
+    c.run(100)
+    c.g.on_button(c.t)
+    c.run(300)
+    assert c.g.mode == M_SCANNING
+    no_toast([p for p in c.params if p.screen == "SCANNING"], "PRESS 2X TO SCAN")
+    s = Rig()                                   # the partner is seen under the hint
+    s.run(T.HOWTO_HINT_MS + 300, packets=False)
+    assert s.p.banner[0] == "SWIPE: HOW TO PLAY"
+    s.rssi = -50
+    ps = s.run(1500)
+    seen = [p for p in ps if p.sub == "seen"]
+    assert seen
+    no_toast(seen, "SWIPE: HOW TO PLAY")
+
+
+def test_held_celebrate_tap_stays_silent_in_result():
+    r = hot_rig()
+    _found_by_press(r)
+    r.state = SC_FOUND
+    while ticks_diff(r.t, r.g.found_t) < T.FOUND_CELEBRATE_MS - 200:
+        r.run(100)
+    t = r.t + 10                                # lands in celebrate with its own spike:
+    r.g.on_touch_down(t)                        # held past the end of celebrate
+    assert r.g.on_accel_tap(t + 20)
+    r.g.on_gesture(t + 100, G_TAP, 120, 120, t)
+    ps = r.run(T.KNOCK_WAIT_MS + 1000)
+    assert ps[-1].sub == "result"
+    assert not any(p.banner and p.banner[0] == "PRESS THE BUTTON" for p in ps)
+
+
 def test_ignored_tap_or_press_in_looking_says_swipe():
     r = _looking(500)
     _tap(r)

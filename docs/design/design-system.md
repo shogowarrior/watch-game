@@ -247,13 +247,13 @@ A slot at (120,120) that holds exactly one glyph.
 | `glow` | 0 | none, just the field glow | — | FAR–HOT with no direction and no trend |
 | `seeker` | 44 | ring r = 14 plus 4 ticks from r 20 to 28, `stroke.m` | `grey.7` | SEARCHING, LINK-LOST |
 | `arrow` | 64 | see DirectionArrow | tiered | FAR–HOT with a valid bearing |
-| `chevrons` | 44 | see TrendChevrons | `prox.7` / `accent.cold` | FAR–HOT while walking with a non-zero trend |
-| `countdown` | 64 | `type.display` digits | `text.primary` | SCANNING `ready`, PAIRING `calibrate` and `split` |
+| `chevrons` | 44 | see TrendChevrons | `prox.7` / `accent.cold` | FAR–WARM while walking with a non-zero trend; PAIRING `howto` card 3 (an example) |
+| `countdown` | 64 | `type.display` digits | `text.primary` | SCANNING `ready`, PAIRING `calibrate` and `split`, PAIRING `howto` card 2 |
 | `turn` | 64 | 240° arc r = 22 `stroke.l` with head (turn right) | `prox.6` | SCANNING `sweep` |
 | `check` | 0 | `accent.found` disc r = 40 with a `bg.base` check mark | gold / black | FOUND |
-| `runes` | 92 | PairingRunes (3 placeholder dots in `looking`) | `text.primary` | PAIRING |
+| `runes` | 92 | PairingRunes (3 placeholder dots in `looking`) | `text.primary` | PAIRING (`howto` card 1: an example row) |
 | `battery` | 64 | 64×32 battery outline in `status.warn`, fill proportional | `status.warn` | LOW-BATTERY 10 % interstitial |
-| `bump` | 64 | two watch outlines (yours left, friend's right) + 3 rays, 4 px strokes | `prox.6` / `prox.7` lit / `grey.5` friend not ready | HOT bump-ready |
+| `bump` | 64 | two watch outlines (yours left, friend's right) + 3 rays, 4 px strokes | `prox.6` / `prox.7` lit / `grey.5` friend not ready | HOT bump-ready; PAIRING `howto` card 4 (both ready, neither lit) |
 
 Priority when several apply: `check` > `arrow` in `reveal`/`turn` > `bump` > `arrow` > `chevrons` > `glow`. Changing variant animates the iris radius over 300 ms `out_cubic`; the new glyph is drawn at once (ui-spec §2).
 

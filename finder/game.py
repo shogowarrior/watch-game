@@ -624,7 +624,7 @@ class Game:
             return
         if self._ign_s is not None:
             return
-        s = self._ignored_text(t_ms)
+        s = self._ignored_text(td)    # judged where the finger landed: a held celebrate tap stays silent
         if s is not None:
             self._ign_s = s
             self._ign_td = td
@@ -651,6 +651,21 @@ class Game:
         self._toast_set(s, "info")
         if s == T_SWIPE_HOWTO:
             self._howto_hinted = True
+
+    def _drop_stale_ignored(self):
+        """An ignored-tap or hint toast still up when its screen no longer calls
+        for it is dropped (§8 Ignored taps). PRESS 2X TO SCAN also goes when a
+        word takes the bottom slot (``tick`` checks the frame)."""
+        s = self._toast
+        if s == T_SWIPE_HOWTO:
+            if self.mode != M_PAIRING or self.pair.sub != P.LOOKING:
+                self._toast = None
+        elif s == T_PRESS_2X:
+            if self.mode != M_HUNT or self.px.zone != HOT:
+                self._toast = None
+        elif s == T_PRESS_BUTTON:
+            if self.mode != M_FOUND:
+                self._toast = None
 
     def _input(self, t_ms):
         self._input_t = t_ms
@@ -763,6 +778,7 @@ class Game:
             elif m == M_LINK_LOST:
                 self._tick_lost(t_ms)
             self._update_felt(t_ms)
+            self._drop_stale_ignored()
             self.menu.tick(t_ms)
             h = self._held
             if h is not None and not self.menu.is_open:
@@ -776,6 +792,9 @@ class Game:
         self.state_byte = self._state_byte(t_ms)
         self.menu.window(self.sun, self.buzz, self.indoor)
         p = self._params(t_ms)
+        if self._toast == T_PRESS_2X and (p.word is not None or p.dist_band is None):
+            self._toast = None        # BUMP!, HOLD STILL or an arrow word took the slot (§8)
+            p = self._params(t_ms)
         self.params = p
         return p
 

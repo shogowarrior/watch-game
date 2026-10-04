@@ -82,7 +82,7 @@ reboots into the game. To play:
 
 | Input | Action |
 |---|---|
-| Tap the centre | Start a direction scan, or cancel one; confirm runes when pairing; lock the arrow while turning. Where a tap does nothing, a short message says what does (PRESS 2X TO SCAN in HOT, PRESS THE BUTTON on FOUND) |
+| Tap the centre | Start a direction scan, or cancel one; confirm runes when pairing; lock the arrow while turning. Where a tap does nothing, some screens say what does (SWIPE: HOW TO PLAY while it looks for the other watch, PRESS 2X TO SCAN in HOT, PRESS THE BUTTON on FOUND) |
 | Swipe left or right (while it looks for the other watch) | Flip through four how-to cards; swipe past the last one or press the button to close them. They close by themselves when the other watch is found |
 | Side button, short press | Same as a tap on the current screen, except in HOT: one press is your half of the fallback bump, and two presses within 1 s start a scan; on FOUND it starts the next round. When the screen is off, or lit by an event while your wrist stayed down, it only wakes it |
 | Touch and hold (0.8 s) or button hold (1.5 s) | Menu: resume, sun mode, buzz mode (full / events / off), place (outdoors / indoors, changes how signal turns into distance), end round. A short press moves to the next row (it wraps) and a swipe scrolls; tap a row, or hold again, to choose it. END ROUND asks SURE? PRESS: press again within 3 s to confirm. The menu closes by itself after 8 s without input |
