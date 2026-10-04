@@ -2342,4 +2342,3 @@ def test_fps_line_off_by_default():
     rt.log_line = lines.append
     rt.run(max_ms=12000)
     assert lines == []
-
