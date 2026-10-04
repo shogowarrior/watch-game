@@ -67,6 +67,9 @@ after their slot (avg/max ms), the sd and max of the interval between shown
 frames (ms: the frame-time jitter), the lock's frame cost (busy ms between
 frames), collects in the window and how long the previous line took to print
 (ms; under 128 bytes it fits the UART FIFO, so print never waits on the wire).
+In debug mode the line goes to the telemetry sink's ``log`` instead: on USB a
+print could land inside a record the link is still writing, so the link queues
+it between records (the bridge shows it as a text line).
 
 ``step`` returns the ms until the next deadline; ``run`` sleeps exactly that
 (never longer than ``MAX_SLEEP_MS``) with ``idle``, which ticks the motor
@@ -78,6 +81,14 @@ is recorded in ``errors`` and skipped. OSErrors that reach the loop from a
 part (I2C glitches) are counted in ``io_errors`` and never stop the loop; the
 touch and radio drivers count their own bus errors (``touch_errors``,
 ``radio_stats`` in ``stats()``).
+
+Telemetry (app/telemetry.py) runs after the haptic stage: a state record at
+5 Hz, events as they happen. In debug mode its ``sink`` sends them to the laptop,
+from that 5 Hz record only (never from the render stage), and the sink's
+``pump`` runs once per pass and at each mid-frame service (the USB link writes what
+the UART's FIFO has room for, so it never stalls the loop and keeps up while
+a frame renders); ``begin`` gives it the radio's MAC, and ``stats()`` shows
+the sink's counters (``debug_stats``).
 
 With ``watchdog_ms`` (main.py: 8000) ``run`` feeds hal/watchdog.py once per
 pass: the stoppable soft watchdog while on USB, switched once to the ESP32
@@ -111,6 +122,7 @@ BATT_LOW_READS = 3         # falling readings <= 20 % in a row before the game s
 BATT_RECHECK_MS = 1000     # ... taken this far apart
 IMU_OUT_HZ = 25            # MotionTracker rate (25-50 Hz; 25 halves its float work)
 CHIP_MS = 1000             # BMA423 feature engine (steps/activity/wrist) poll
+CHIP_TRIES = 5             # engine starts in all: at boot, then at the poll after a bus error
 MAX_SLEEP_MS = 50
 GC_PERIOD_MS = 10000       # one ~70 ms collect per period (4 MB SPIRAM heap)
 GC_FORCE_MS = 20000        # ... even with no slack before the next frame
@@ -129,6 +141,7 @@ S_TELE = 9
 CHIP_OFF = 0               # feature engine: absent / failed (software steps only)
 CHIP_PENDING = 1           # blob uploaded, engine starting
 CHIP_ON = 2
+CHIP_RETRY = 3             # a bus error stopped the start: the poll starts it again
 ACC_LIMIT_US = 0x1FFFFFFF  # stage sums halve past this (stay MicroPython small ints)
 PMU_OFF_TRIES = 3          # shared I2C0: retry a glitched AXP202 power-off write
 _NO_EVENTS = ()
@@ -137,8 +150,9 @@ _NO_EVENTS = ()
 class _HapticDisplay:
     """Display proxy for the renderer: ``service`` runs after each band the
     renderer blits, after its overlays and after each band it pushes (~5-15
-    ms apart on the watch), so pulse edges stay within one band of schedule mid-frame, and
-    samples touch there once TOUCH_GAP_MS have passed since the last sample."""
+    ms apart on the watch), so pulse edges stay within one band of schedule mid-frame,
+    samples touch there once TOUCH_GAP_MS have passed since the last sample,
+    and the debug sink is pumped there."""
 
     def __init__(self, rt, display):
         self.rt = rt
@@ -154,6 +168,9 @@ class _HapticDisplay:
         rt._stage_haptic(t)
         if rt.touch is not None and ticks_diff(t, rt._touch_t) >= TOUCH_GAP_MS:
             rt._sample_touch(t)
+        tl = rt.tele
+        if tl is not None and tl.sink is not None:
+            tl.sink.pump(rt.clock())    # USB: refill the UART's FIFO mid-frame
 
 
 class Runtime:
@@ -232,6 +249,8 @@ class Runtime:
             except (ImportError, MemoryError) as e:
                 self.errors["renderer"] = e
         mac = None if self.radio is None else self.radio.mac
+        if mac is not None and self.tele is not None:
+            self.tele.set_mac(mac)            # the datagram ``mac`` (debug mode)
         now = self.clock() if now is None else now
         if self.imu is not None and hasattr(self.imu, "fifo_read_mg"):
             from app.imu_feed import ImuFeed
@@ -244,6 +263,7 @@ class Runtime:
         self._vbus = getattr(self.pmu, "vbus_present", None)
         self._low_n = 0
         self._chip = CHIP_OFF
+        self._chip_tries = 0
         if self.feed is not None:
             self._chip_start()
         self._rx_cb = self._on_rx
@@ -266,7 +286,8 @@ class Runtime:
         self._log_us = 0                      # the last fps line's print time
         self._t_input = now
         self._t_batt = now
-        self._t_chip = now
+        # a start stopped by a bus error waits one poll period (_chip_start says why)
+        self._t_chip = ticks_add(now, CHIP_MS) if self._chip == CHIP_RETRY else now
         self._t_gc = now
         self._win_t = now
         self._motor_lvl = 0.0
@@ -416,6 +437,9 @@ class Runtime:
             if tl.due(now):
                 tl.record(now, self)
             tl.flush(now)
+            sk = tl.sink
+            if sk is not None:
+                sk.pump(self.clock())   # USB: the FIFO's room now (record and flush took time)
             a = self._acc(S_TELE, a)
         self._t_input = ticks_add(now, INPUT_MS)
         if ticks_diff(now, self._t_gc) >= GC_PERIOD_MS:
@@ -484,7 +508,9 @@ class Runtime:
             self._t_chip = ticks_add(now, CHIP_MS)
             imu = self.imu
             try:
-                if self._chip == CHIP_PENDING:
+                if self._chip == CHIP_RETRY:
+                    self._chip_start()
+                elif self._chip == CHIP_PENDING:
                     self._chip_poll()
                 elif imu.features_ok():
                     self.feed.tracker.set_chip(now, imu.steps(), imu.activity())
@@ -495,24 +521,30 @@ class Runtime:
 
     def _chip_start(self):
         """Start the BMA423 feature engine without blocking (no blob: software
-        steps only); ``_chip_poll`` finishes it (hal.bma423 start/poll_features)."""
+        steps only); ``_chip_poll`` finishes it (hal.bma423 start/poll_features).
+        A start stopped by a bus error is started again by the 1 s poll, one
+        period later, CHIP_TRIES starts in all: a lost ACK on INIT_CTRL=1 has
+        brought the engine up by then (no second upload), else the 6 KB blob
+        goes again."""
         start = getattr(self.imu, "start_features", None)   # absent on a bare FIFO imu
         if start is None:
             return
-        for _ in range(3):                    # a bus error mid-upload leaves INIT_CTRL unset
-            try:
-                ok = start()
-                break
-            except OSError as e:
-                self.errors["imu_features"] = e
-        else:
+        self._chip_tries += 1
+        try:
+            ok = start()
+        except OSError as e:
+            self.errors["imu_features"] = e
+            self._chip = CHIP_RETRY if self._chip_tries < CHIP_TRIES else CHIP_OFF
             return
-        if ok:
-            self._chip = CHIP_PENDING
-            try:
-                self._chip_poll()
-            except OSError as e:
-                self.errors["imu_features"] = e     # retried by the 1 s poll
+        self.errors.pop("imu_features", None)       # an earlier start's bus error
+        if not ok:
+            self._chip = CHIP_OFF
+            return
+        self._chip = CHIP_PENDING
+        try:
+            self._chip_poll()
+        except OSError as e:
+            self.errors["imu_features"] = e     # retried by the 1 s poll
 
     def _chip_poll(self):
         st = self.imu.poll_features()
@@ -798,10 +830,15 @@ class Runtime:
         el = ticks_diff(now, self._log_t)
         n = pc.frames
         a = self.us()
-        self.log_line("fps %.1f lock %d miss %d late %d/%d jit %.1f max %d cost %d gc %d log %.1f" % (
+        line = "fps %.1f lock %d miss %d late %d/%d jit %.1f max %d cost %d gc %d log %.1f" % (
             n * 1000.0 / el if el > 0 else 0.0, pc.fps, pc.missed,
             pc.late_sum // n if n else 0, pc.late_max, pc.jitter_ms(), pc.iv_max,
-            pc.cost, self._log_gc, self._log_us / 1000.0))
+            pc.cost, self._log_gc, self._log_us / 1000.0)
+        tl = self.tele
+        if tl is not None and tl.sink is not None:
+            tl.sink.log(line)       # debug mode: USB queues it between records
+        else:
+            self.log_line(line)
         self._log_us = ticks_diff(self.us(), a)
         self._log_t = now
         self._log_gc = 0
@@ -851,6 +888,9 @@ class Runtime:
                               round(self.st_max[i] / 1000.0, 2), n)
         if self.radio is not None:
             out["radio_stats"] = self.radio.stats()
+        tl = self.tele
+        if tl is not None and tl.sink is not None:
+            out["debug_stats"] = tl.sink.stats()
         te = 0 if self.touch is None else getattr(self.touch, "errors", 0)
         if te:
             out["touch_errors"] = te
@@ -877,7 +917,7 @@ class Runtime:
             print("%-10s %7.2f  %7.2f  %6d" % (k, v[0], v[1], v[2]))
         g = s["collect"]
         print("gc: %d collects, last %.1f ms, max %.1f ms" % g)
-        for k in ("mem_free", "io_errors", "touch_errors", "radio_stats"):
+        for k in ("mem_free", "io_errors", "touch_errors", "radio_stats", "debug_stats"):
             if k in s:
                 print(k, s[k])
         if self.errors:

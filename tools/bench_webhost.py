@@ -5,10 +5,13 @@
 Times ``step(50)`` (both watches rendering at 20 fps), ``step(16)`` (a 60 Hz
 page), ``telemetry_json()`` and the heap allocated per step, in the HUNT
 screens after the auto pairing, while A walks, and during A's active scan
-sweep. Also runs on CPython (logic only, no frames).
+sweep; then in real mode (debug-mode.md), ``show_params()`` with an ``rp``
+record's params and ``step(50)`` drawing them. Also runs on CPython (logic
+only, no frames).
 """
 
 import gc
+import json
 import sys
 
 
@@ -26,6 +29,7 @@ if _R not in sys.path:
 
 from finder.compat import ticks_diff, ticks_us  # noqa: E402
 from finder.estimators.base import ACT_STILL  # noqa: E402
+from finder.render_params import to_dict  # noqa: E402
 from sim.webhost import TwoWatchSim  # noqa: E402
 
 
@@ -82,6 +86,11 @@ def main():
     s.tap(0)                                  # scan, then wait for the sweep itself
     _step_until(s, _sweeping)
     bench("step(50) scanning", s, lambda s: s.step(50), min(n, 200))    # the sweep lasts 12 s
+    js = [json.dumps(to_dict(p)) for p in s._params]
+    s.real_mode(True)                         # real watches: the page hands in rp records
+    bench("show_params()", s, lambda s: s.show_params(0, js[0]), n)
+    s.show_params(1, js[1])
+    bench("step(50) real", s, lambda s: s.step(50), n)
     print("frames", s.frames, "sim t %.1f s" % (s.t_ms / 1000.0))
     print("step(50) = %.1f %% of a 50 ms real-time budget" % (100.0 * ms50 / 50.0))
 
