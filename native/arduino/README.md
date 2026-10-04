@@ -35,6 +35,9 @@ LVGL, in what it costs to own the frame.
   IDF driver leaves alone while its device is the bus's only one.
 - **Arduino_GFX 1.6 needs Arduino-ESP32 3.x** (`esp32-hal-periman.h`); 1.5.9 is
   the newest that builds on 2.0.17, with the same blocking DMA bus.
+- **Reset reason under QEMU.** Arduino's bootloader runs into TG0/TG1 watchdog
+  resets there, so the app's first boot reads `esp_reset_reason()` 6 (task
+  watchdog). `src/task_watchdog.cpp` also checks a marker in RTC memory.
 
 ## Check and build
 
