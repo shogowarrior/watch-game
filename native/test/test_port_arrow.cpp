@@ -13,7 +13,6 @@ namespace A = hm::arrow;
 
 namespace {
 
-Json Js(const char* s) { return s ? J(s) : J(); }   // a str or None
 
 bool word_is(const char* got, const char* want) { return strcmp(got, want) == 0; }
 
@@ -39,22 +38,22 @@ void arrow_state(const A::Arrow& a, State& s) {
   s("link_ok", J(a.link_ok));
   s("phase", J(A::name(a.phase)));
   s("pacer", J(a.pacer));
-  s("haptic", Js(haptic_patterns::name(a.haptic)));
-  s("toast", Js(a.toast));
+  s("haptic", J(haptic_patterns::name(a.haptic)));
+  s("toast", J(a.toast));
   s("sigma", J(a.sigma));
-  s("sub", Js(render_params::name(a.sub)));
-  s("glyph", Js(render_params::name(a.glyph)));
+  s("sub", J(render_params::name(a.sub)));
+  s("glyph", J(render_params::name(a.glyph)));
   s("arrow_deg", J(a.arrow_deg));
   s("cone_deg", J(a.cone_deg));
-  s("arrow_style", Js(render_params::name(a.arrow_style)));
+  s("arrow_style", J(render_params::name(a.arrow_style)));
   if (a.sweep) {
     const render_params::Sweep& w = *a.sweep;
     s("sweep", J(std::vector<Json>{J(w.wedge_deg), Jarr(w.bins, w.n_bins), J(w.active_bin), J(w.paused)}));
   } else {
     s("sweep", J());
   }
-  s("word", Js(a.word));
-  s("top_text", Js(a.top_text));
+  s("word", J(a.word));
+  s("top_text", J(a.top_text));
   s("done", J(a.done()));
 }
 

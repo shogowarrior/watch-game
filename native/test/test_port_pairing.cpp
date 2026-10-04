@@ -73,10 +73,7 @@ TEST(trace_pairing) {
     if (m == "confirm") return J(o.confirm(tick(a[0])));
     if (m == "bump") return J(o.bump(tick(a[0])));
     if (m == "set_peer_confirmed") return o.set_peer_confirmed(tick(a[0]), a[1].flag()), J();
-    if (m == "update") {
-      const char* h = haptic_patterns::name(o.update(tick(a[0])));
-      return h ? J(h) : J();
-    }
+    if (m == "update") return J(haptic_patterns::name(o.update(tick(a[0]))));
     unported(m);
   };
   p.state = [](const P::Pairing& o, State& s) {
@@ -94,7 +91,7 @@ TEST(trace_pairing) {
     s("ready", J(o.ready));
     s("peer_ready", J(o.peer_ready));
     s("t_split", J(o.t_split));
-    s("toast", o.toast ? J(o.toast) : J());
+    s("toast", J(o.toast));
     s("unstable", J(o.unstable));
     s("go", J(o.go()));
   };

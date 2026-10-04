@@ -326,10 +326,11 @@ TESTS = (
     ("scenario:gestures", ("finder.gestures.GestureRecognizer",)),
     ("test_menu", ("finder.menu.Menu",)), ("scenario:menu", ("finder.menu.Menu",)),
     ("test_haptics", ("finder.haptic_patterns.BlankWindow", "finder.haptic_patterns.HapticPlayer")),
-    ("test_proximity", None),
+    ("test_proximity", None), ("test_scan", None),
     ("test_arrow", ("finder.arrow.Arrow",)),
     ("test_episode", ("finder.arrow.Arrow",)),    # real scan values: float order
-    ("test_game", ("finder.pairing.Pairing", "finder.pairing.Calibrator")),
+    ("test_game", ("finder.pairing.Pairing", "finder.pairing.Calibrator", "finder.session.MotionSnap",
+                   "finder.session.PeerView", "finder.session.LiveMirror")),
 )
 
 

@@ -20,6 +20,9 @@ inline hm::ticks_t tick(const Json& v) { return (hm::ticks_t)v.in(); }
 inline hm::opt_ticks opt_tick(const Json& v) {
   return v.null() ? hm::opt_ticks() : hm::opt_ticks(tick(v));
 }
+inline std::optional<int32_t> opt_i32(const Json& v) {
+  return v.null() ? std::nullopt : std::optional<int32_t>((int32_t)v.in());
+}
 
 // An object as Python's deep encoding writes it: its class name and state.
 template <class T>

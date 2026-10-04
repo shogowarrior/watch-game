@@ -7,10 +7,6 @@ using namespace hm;
 using namespace hm::proximity;
 using namespace hmt;
 
-static std::optional<int32_t> opt_i32(const Json& v) {
-  return v.null() ? std::nullopt : std::optional<int32_t>((int32_t)v.in());
-}
-
 // A range estimator showing only what Proximity.update_est reads.
 struct EstStub final : est::RangeEstimator {
   void update(ticks_t, std::optional<double>, std::optional<double>, const MotionInfo*, const MotionInfo*) override {}
@@ -105,7 +101,7 @@ TEST(trace_proximity) {
     s("band_idx", J(x.band_idx));
     s("zone", J(x.zone()));
     s("zone_changed", J(x.zone_changed()));
-    s("band", x.band() ? J(x.band()) : J());
+    s("band", J(x.band()));
     s("trend", J(x.trend()));
     s("trend_strong", J(x.trend_strong()));
     s("unreliable", J(x.unreliable()));
