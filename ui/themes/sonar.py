@@ -2,45 +2,48 @@
 
 Two index maps, one per kind of moment:
 
-- **Beam moments** (*Live*, *Listening*, and the 600 ms while beams fade out
-  of a moment change) draw through a *class x angle* map: 16-bit entries
-  ``class << 7 | bin``. ``bin`` is one of 128 angle bins (2.8125 deg each,
-  clockwise from 12 o'clock); ``class`` is one of ``NC`` (46) radial bands
-  of the ring index (``EDGES``, ``BAND_STEPS``: the core dot 0..6 as one,
-  bands up to 4 px wide inside r 88, where only the centre glow varies, up
-  to 3 px over the vignette's slope, r 88-124, up to 8 px in the corners;
-  one ring index for each range ring; band edges on the lens and rim radii
-  of every glyph, so a settled lens and rim are exact). The map is built
-  once with a static 4x4 ordered dither (``build_maps``): a pixel takes one
-  of the two nearest classes and bins in proportion to where it sits
-  between their centres, so neither the bands nor the bins show as steps
-  (never across the core-dot edge, a range ring or a lens / rim radius).
-  Each frame the palette kernel (``sonar_pal``) colours all NC x 128
-  entries: per bin the trail level of the brightest beam over it, per class
-  the base at the band's centre radius, and per entry the theme ramp at
-  base + trail x fade x vignette (or the lens, rim, core or calibrate-fill
-  colour). The map is symmetric under the four quadrant mirrors with the
-  bin XOR'd (top right ``bin``, top left ``bin ^ 127``, bottom right
-  ``bin ^ 63``, bottom left ``bin ^ 64``), so on the watch the blit kernel
-  (``sonar_blit``) reads only the top-right quadrant (28.8 KB) and writes
-  four pixels per entry, one palette lookup each, like the field's quadrant
-  blit; elsewhere it is one framebuf palette blit of the full map (an
-  RGB565-format frame buffer used as 16-bit indices, a palette NC x 128
-  wide). The kernel is used only once it writes the same bands as that
-  blit (self-check on the real buffers).
-- **Quiet moments** (*Still*, *Scan*, *Found*) draw exactly as Ripple does:
-  the base ``Radial`` palette (ui/themes/base.py: floor, glow, lens, rim,
-  core dot, calibrate fill, vignette) plus the range rings and the FOUND
-  ping, through the renderer's ring map.
+- **Beam moments** (*Live*, *Listening*, and the frames while beams fade
+  out after a change of beam set) draw through a *class x angle* map:
+  16-bit entries ``class << 7 | bin``. ``bin`` is one of 128 angle bins
+  (2.8125 deg each, clockwise from 12 o'clock); ``class`` is one of ``NC``
+  (46) radial bands of the ring index (``EDGES``, ``BAND_STEPS``: the core
+  dot 0..6 as one, bands up to 4 px wide inside r 88, where only the centre
+  glow varies, up to 3 px over the vignette's slope, r 88-124, up to 8 px
+  in the corners; one ring index for each range ring; band edges on the
+  lens and rim radii of every glyph, so a settled lens and rim are exact).
+  The map is built with a static 4x4 ordered dither (``build_maps``): a
+  pixel takes one of the two nearest classes and bins in proportion to
+  where it sits between their centres, so neither the bands nor the bins
+  show as steps (never across the core-dot edge, a range ring or a lens /
+  rim radius). Each frame the palette kernel (``sonar_pal``) colours all
+  NC x 128 entries: per bin the trail level of the brightest beam over it,
+  per class the base at the band's centre radius, and per entry the theme
+  ramp at base + trail x fade x vignette (or the lens, rim, core or
+  calibrate-fill colour). The map is symmetric under the four quadrant
+  mirrors with the bin XOR'd (top right ``bin``, top left ``bin ^ 127``,
+  bottom right ``bin ^ 63``, bottom left ``bin ^ 64``), so on the watch the
+  blit kernel (``sonar_blit``) reads only the top-right quadrant (28.8 KB)
+  and writes four pixels per entry, one palette lookup each, like the
+  field's quadrant blit; elsewhere it is one framebuf palette blit of the
+  full map (an RGB565-format frame buffer used as 16-bit indices, a
+  palette NC x 128 wide). The kernel is used only once it writes the same
+  bands as that blit (self-check on the real buffers).
+- **Quiet moments** (*Still*, *Scan*, *Found*) draw as Ripple does: the
+  base ``Radial`` palette (ui/themes/base.py: floor, glow, lens, rim, core
+  dot, calibrate fill, vignette) plus the range rings and the FOUND ping,
+  through the renderer's ring map.
 
 What each moment draws (levels in ramp steps, I = intensity, z = zone):
 
 - Base: floor and centre glow from the field's crossfaded levels (so they
   keep the field's 600 ms crossfades, flash limit and per-screen values)
-  scaled to the approved mockup's, floor ``0.25 + 0.6 I`` and glow
-  ``1.2 + 3 I`` where the field has 0.3 + 1.3 I and 2 + 4 I (``SFL_*``,
-  ``SGL_*``; sun mode keeps the floor at 1.0 or more); glow radius as the
-  field. Range rings (one ring index each, r ``range_rings_px`` 40 / 80 /
+  mapped onto dimmer levels so the beams read: the field's floor
+  0.3 + 1.3 I becomes ``0.25 + 0.6 I`` and its glow 2 + 4 I becomes
+  ``1.2 + 3 I`` (``SFL_*``, ``SGL_*``; sun mode keeps the floor at 1.0 or
+  more, coming and going at the beam-set rate below); glow radius as the
+  field's. FOUND blends to floor 0.6 and glow 2.2
+  at radius 90 (``FOUND_*``, mockup) with the field's FOUND crossfade
+  weight. Range rings (one ring index each, r ``range_rings_px`` 40 / 80 /
   120) at ``range_level`` 1 + 0.8 I. The ring level moves at most at the
   flash-limit rate, so a moment change never pops them.
 - *Live:* ``beams[z]`` (2 / 3 / 4 / 6) beams, evenly spaced, turning
@@ -55,31 +58,58 @@ What each moment draws (levels in ramp steps, I = intensity, z = zone):
   (``TAIL_CUT``, at 3.5 L, so the far tail does not flicker a palette step
   every frame), peak ``trail_amp`` 3 + 4 I above the base (x the saver
   pulse scale on low battery). The trail fades in over ``FADE_PX`` (10 px,
-  mockup) outside the rim (over the iris radius while the lens opens; not
-  at all with it closed, so the trail meets the core dot instead of
-  leaving a dark ring round it). A beam that crossed 12 o'clock on a ghost
-  beat (``ring_live`` false) draws its trail grey until its next pass.
+  mockup) outside the rim (over the iris radius while that is less; not
+  at all with the lens closed, so the trail meets the core dot instead of
+  leaving a dark ring round it). While the lens opens the fade is wider by
+  what it still has to open (``H_FW``), so the trails clear out ahead of
+  the lens instead of being swallowed by it in one frame. A beam that
+  crossed 12 o'clock on a ghost beat (``ring_live`` false) draws its trail
+  grey (where it outshines the base) until its next pass.
 - *Listening:* one beam turning anticlockwise at ``listen_deg_s`` 60 deg/s
   from 12 o'clock, trail ``LISTEN_TRAIL_DEG`` 22 deg, peak ``LISTEN_AMP``
   2.2 (mockup).
 - *Still:* no beams; the range rings breathe ``STILL_RING`` 1.2 + 1.2 x
   (0.5 - 0.5 cos) over ``breathe_ms`` 2.4 s (mockup amplitudes).
-- *Scan:* the beams stop: they freeze and fade out over the 600 ms
-  crossfade; the field's live-mirror halo (glow 1 + 5 I, radius 12, scaled
-  as every Sonar level) shows.
-- *Found:* one ping ring (``BURST_AMP`` 7, lead / trail ``FOUND_LEAD_TRAIL_PX``
-  3 / 24 px, as the field's burst) runs out from the centre at
-  ``ping_px_s`` 240 px/s from the moment FOUND starts, then the range rings
-  breathe ``FOUND_RING`` 2.0 + 1.4 x (0.5 + 0.5 sin) over 2.4 s; floor 0.6,
-  glow 2.2 at radius 90 (``FOUND_*``, mockup), blended in with the field's
-  FOUND crossfade weight. A wake into FOUND shows no ping (no intro, §8)
-  unless the params carry ``burst``.
+- *Scan:* the beams stop where they are and fade out (below); the field's
+  live-mirror halo (glow 1 + 5 I, radius 12) shows, mapped as the base.
+- *Found:* one ping ring (``BURST_AMP`` 7, lead / trail
+  ``FOUND_LEAD_TRAIL_PX`` 3 / 24 px, as the field's burst) runs out from
+  the lens (the iris it is opening to, as the field's burst) at
+  ``ping_px_s`` 240 px/s from the moment FOUND starts. Like the field's
+  rings (§4 rule 3) its lead widens to ``temporal_aa_k`` 1.5 x speed /
+  fps when that is more (36 px at 10 fps), so the brightest moving thing
+  never jumps a frame behind a hard edge, and it fades in over its first
+  ``fadein_px`` 12 px. From the moment FOUND starts the range rings
+  breathe ``FOUND_RING`` 2.0 + 1.4 x (0.5 + 0.5 sin) over 2.4 s. A wake
+  into FOUND shows no ping (no intro, §8) unless the params carry
+  ``burst``.
 
-A change of beam set (moment, zone or period) crossfades: the old beams
-freeze and fade out while the new ones fade in (600 ms, ``XF_MS``). MENU
-freezes everything (the clocks advance by ``dt``, 0 in MENU, and the field
-holds the beat) and the moment, zone, intensity and ghost state hold what
-they were before MENU.
+A change of beam set (moment, zone or period) freezes the visible beams
+where they are and fades them out while the new set fades in, slower than
+the flash limit: each set's shown peak moves at most half the field's
+flash-limit step (``f.flash``: 2 levels per 333 ms, so 1 level per 333 ms;
+``XF_K``) a frame toward its target (0 for a set fading out), about 2.3 s
+for HOT's 7 levels. Half, because six HOT beams cover the whole dish and
+Sonar's dish is brighter than Ripple's, so coincident changes (the lens
+opening, the FOUND ping, the hue crossfade) still fit the flash limit. Up
+to two sets fade out at once; a third change drops the fainter. The
+saver's pulse scale goes through the same slew, its level cap and the sun
+floor move at the same rate (the sun's LUT lift is instant, as Ripple's),
+and the beams' own intensity (``bi``: trail length and peak) follows I at
+most ``f.flash / BI_K`` a frame (the mean trail level moves about BI_K = 6
+levels per unit I). So a step in I, a zone or moment change, the saver or
+sun mode never moves the dish's mean level faster than the field's floor
+may move. A wake shows the current state at its full level, with nothing
+fading.
+
+Clocks advance by the base clock's ``dt`` (ms since the last drawn frame,
+at most DT_MAX = 250, 0 in MENU), so a missed slot at the 7 / 6 / 5 fps
+locks moves the listening beam, the ping and the breathing on by up to
+250 ms instead of snapping them; only a wake (base ``clock``) restarts the
+listening beam at 12 o'clock and drops the ping. MENU freezes everything
+(the field holds the beat) and the moment, zone, intensity, ghost and sun
+state stay those of the screen under the MENU (``live``), also for a theme
+made in the MENU.
 
 Changed regions: in beam moments the palette kernel compares every entry
 with the last frame's and returns the shortest arc of bins holding every
@@ -95,21 +125,31 @@ three breathing rings change). A wake, theme switch or a switch between
 the two maps reports everything, and so does a hue crossfade step in a
 quiet moment.
 
-Cost per frame: beam moments: the palette kernel (128 bins x up to 12 beams,
-then NC x 128 entries, rows of one colour skipped when unchanged, the
-level -> colour tables rebuilt only when the cap, dim, lift or LUT change)
-and the quadrant blit; quiet moments: Ripple's own palette kernel and blit
-plus the diff kernel. Per-frame Python is a few dozen statements and loops
-over at most 12 beams. All three kernels are compiled with
+Loading (ui/themes/base.py "Loading"): the import only defines the class
+edges, layouts and kernel sources. ``load()`` builds the dither and kernel
+tables (one step each), compiles each kernel and self-checks it against
+its plain version (the palette kernel one checked frame and repeat per
+step), ``Sonar()`` only allocates, and ``prepare()`` builds the quadrant
+map ``MAP_ROWS`` rows a step, then checks the blit kernel on the real band
+buffers (where viper runs) or builds the full map for the framebuf path.
+29 steps on a 32-bit unix build with viper (fewer without it: no viper
+compiles or blit check; a few more on the framebuf path, which builds the
+full map ``FULL_ROWS`` rows a step), each about 1.2 ms or less there
+except the module import (about 8-10 ms: compiling this module), which
+cannot be split; a second load of the module skips ``load()``. Maps are
+per theme object (not kept while another theme draws).
+
+Cost per frame: beam moments: the palette kernel (128 bins x up to 18
+beams, then NC x 128 entries, rows of one colour skipped when unchanged,
+the level -> colour tables rebuilt only when the cap, dim, lift or LUT
+change) and the quadrant blit; quiet moments: Ripple's own palette kernel
+and blit plus the diff kernel. Per-frame Python is a few dozen statements
+and loops over at most 18 beams. All three kernels are compiled with
 @micropython.viper where the port has it, after a self-check against their
-plain versions (the same source); plain Python elsewhere. Nothing
-allocates per frame. Memory: the quadrant map 28.8 KB, the palette
-18.9 KB, tables about 12 KB; the full map (115 KB) only where the blit
-kernel does not run. First use is the slow part: the import compiles and
-self-checks the kernels (small synthetic frames, 12 classes), about 17 ms
-on a 32-bit unix build, and each ``Sonar()`` builds both maps in one pass
-and checks the blit kernel on 4-row bands, about 9 ms (by the ~200x rule
-roughly 5 s on the watch the first time, 2 s after).
+plain versions (the same source); plain Python elsewhere (the kinds are in
+``PAL_KIND``, ``DIFF_KIND`` and ``Sonar.bkind``). Nothing allocates per
+frame. Memory: the quadrant map 28.8 KB, the palette 18.9 KB, tables about
+12 KB; the full map (115 KB) only where the blit kernel does not run.
 """
 
 import array
@@ -117,7 +157,7 @@ import math
 
 from finder import tuning as T
 from finder.compat import const, ticks_diff
-from ui.field import COS, EASE_IOC, FL_A, GL_A, N_IDX, PROF, Q8, RIM_MIN, SIN, V7, VIG, ease, q8
+from ui.field import AA_K, COS, FL_A, GL_A, N_IDX, PROF, Q8, RIM_MIN, SIN, V7, VIG, q8
 from ui.themes.base import (BH, M_FOUND, M_LISTEN, M_LIVE, M_STILL, NS, S_MENU, SH, W, Radial,
                             Theme)
 
@@ -140,9 +180,11 @@ BREATHE_MS = _P["breathe_ms"]
 PING_PX_S = _P["ping_px_s"]
 PING_AMP = q8(T.BURST_AMP)                       # the field's burst ring: 7, lead / trail 3 / 24
 PING_LEAD, PING_TRAIL = T.FOUND_LEAD_TRAIL_PX
-XF_MS = T.ZONE_CROSSFADE_MS                      # beam-set crossfade
+PING_FADE = T.FADEIN_PX                          # fade-in over the first 12 px (§4 rule 3)
 SAVER_PU = q8(T.SAVER_PULSE_SCALE)
 SUN_FLOOR = const(256)                           # sun mode floor >= 1.0 (ui-spec §8)
+BI_K = const(6)              # mean trail level change per unit I (levels): bi slews at flash / 6
+XF_K = const(128)            # beam sets, sun floor and saver cap fade at XF_K / 256 of it
 
 # fine detail the spec does not give: the approved mockup's numbers
 HEAD_DEG = 2                 # beam head width (full level)
@@ -166,19 +208,19 @@ NBIN = const(128)            # angle bins per turn (32 per quadrant)
 ANG = const(8192)            # angle units per turn (64 per bin)
 HEAD_U = (HEAD_DEG * ANG + 180) // 360
 LEAD_U = (LEAD_DEG * ANG + 180) // 360
-MAXB = const(12)             # beams in the kernel: 6 current + 6 fading out
+NF = const(2)                # beam sets fading out at once
+MAXB = const(18)             # beams in the kernel: 6 current + 6 per fading set
+MAP_ROWS = const(12)         # quadrant map rows built per prepare() step
+FULL_ROWS = const(24)        # full-map rows (framebuf path) per prepare() step
 
 
 BAND_STEPS = ((7, 7), (88, 4), (124, 3), (N_IDX, 8))   # (zone end, widest band) px
 
 
-def _edges():
-    """Class band edges: fixed at the core dot (0..6), the vignette's knees
-    (88, 124), each range ring (one index) and every glyph's lens and rim
-    radii; the gaps split evenly into bands no wider than BAND_STEPS."""
-    fx = {0, N_IDX}
-    for z in BAND_STEPS:
-        fx.add(z[0])
+def _fixed():
+    """Radii no class band or dither may straddle: the core dot (7), each
+    range ring (one index) and every glyph's lens and rim radius."""
+    fx = {7}
     for r in RINGS:
         fx.add(r)
         fx.add(r + 1)
@@ -187,6 +229,18 @@ def _edges():
         if ir:
             fx.add(ir)
             fx.add(ir + T.IRIS_RIM_PX)
+    return fx
+
+
+def _edges():
+    """Class band edges: fixed at the core dot (0..6), the vignette's knees
+    (88, 124), each range ring (one index) and every glyph's lens and rim
+    radii; the gaps split evenly into bands no wider than BAND_STEPS."""
+    fx = _fixed()
+    fx.add(0)
+    fx.add(N_IDX)
+    for z in BAND_STEPS:
+        fx.add(z[0])
     fx = sorted(fx)
     e = set(fx)
     for k in range(len(fx) - 1):
@@ -217,19 +271,17 @@ for _c in range(NC):
 # glyph's lens and rim radii, so those stay exact.
 BAYER = (0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
 
+# built by load() (one step each): CLSD, ANG_C / ANG_S, CT
+CLSD = None
+ANG_C = None
+ANG_S = None
+CT = None
+
 
 def _cls_dither():
     """CLSD[i * 16 + j]: the class of ring index i at Bayer phase j."""
     rc = [(EDGES[c] + EDGES[c + 1] - 1) >> 1 for c in range(NC)]
-    fixed = {7}
-    for r in RINGS:
-        fixed.add(r)
-        fixed.add(r + 1)
-    for g in ("chevrons", "arrow", "scan", "runes", "seeker"):
-        ir = T.IRIS_R[g]
-        if ir:
-            fixed.add(ir)
-            fixed.add(ir + T.IRIS_RIM_PX)
+    fixed = _fixed()
     cd = bytearray(N_IDX * 16)
     for i in range(N_IDX):
         c = CLS[i]
@@ -243,9 +295,6 @@ def _cls_dither():
     return cd
 
 
-CLSD = _cls_dither()
-
-
 def _ang_dither():
     """Per Bayer phase j, the angle at which a top-right quadrant pixel
     moves into bin m, m = 0..32, at (m + 0.5 - (j + 0.5) / 16) bins, as Q16
@@ -253,8 +302,8 @@ def _ang_dither():
     90 deg). A pixel short of threshold 0 is in bin -1 (127, left of 12
     o'clock), one past threshold 32 in bin 32 (below 3 o'clock); the XOR
     mirrors keep both right."""
-    tc = array.array("i", [0] * (16 * 33))
-    ts = array.array("i", [0] * (16 * 33))
+    tc = array.array("i", bytes(4 * 16 * 33))
+    ts = array.array("i", bytes(4 * 16 * 33))
     for j in range(16):
         for m in range(33):
             a = math.radians((m + 0.5 - (j + 0.5) / 16) * 90.0 / 32)
@@ -262,8 +311,6 @@ def _ang_dither():
             ts[j * 33 + m] = int(round(65536 * math.sin(a)))
     return tc, ts
 
-
-ANG_C, ANG_S = _ang_dither()
 
 # static kernel table ct ('H'): decay exp(-k/32) | PROF | class lo | hi | vig | ring flag
 C_EXP = const(0)
@@ -292,13 +339,15 @@ H_CORE = const(13)
 H_FILLR = const(14)
 H_FILLV = const(15)
 H_PINGR = const(16)          # ping radius, Q8 px (-1 = off)
-H_PINGA = const(17)
+H_PINGA = const(17)          # ping amplitude, Q8 levels (faded in)
 H_NB = const(18)             # beams
 H_LT = const(19)             # 1: rebuild the level -> colour tables (cap, dim, lift, LUT)
 O_A0 = const(20)             # out: first bin of the changed arc
 O_AN = const(21)             # out: bins in it (0 = nothing changed)
 O_NCH = const(22)            # out: changed bins
-H_BM = const(24)             # beams: angle, dir (+1 cw / -1 acw), head, 1/L (Q16 x 32), amp, ghost
+H_PINGL = const(23)          # ping lead, Q8 px (>= 1: max(3 px, 1.5 x speed / fps))
+H_FW = const(24)             # trail fade-in width outside the rim, px (0: none)
+H_BM = const(26)             # beams: angle, dir (+1 cw / -1 acw), head, 1/L (Q16 x 32), amp, ghost
 PRM_N = H_BM + 6 * MAXB
 
 # pal ('H'): the NC x 128 palette | level -> colour (mixed LUT) | (grey LUT), levels 0..V7
@@ -328,7 +377,7 @@ def sonar_pal(pal, rt, ct, prm, tq):
         g = 0
         k = 0
         while k < nb:
-            o = 24 + k * 6
+            o = 26 + k * 6
             d = ((qp[o] - th) * qp[o + 1]) & 8191
             hd = qp[o + 2]
             if d >= %(LEAD_AT)d:
@@ -387,6 +436,7 @@ def sonar_pal(pal, rt, ct, prm, tq):
         fhi = fr + 3
     pr = qp[16]
     pa = qp[17]
+    pl = qp[23]
     c = 0
     while c < nc:
         lo = int(cp[%(C_LO)d + c])
@@ -411,7 +461,7 @@ def sonar_pal(pal, rt, ct, prm, tq):
             if pr >= 0:
                 dq = (rc << 8) - pr
                 if dq >= 0:
-                    kk = (dq << 6) // %(LEADQ)d
+                    kk = (dq << 6) // pl
                 else:
                     kk = ((0 - dq) << 6) // %(TRAILQ)d
                 if kk < 64:
@@ -428,9 +478,7 @@ def sonar_pal(pal, rt, ct, prm, tq):
                         vf = fv
                 elif fe > vf:
                     vf = fe
-            fw = iris
-            if fw > %(FADE)d:
-                fw = %(FADE)d
+            fw = qp[24]
             x = rc - rimhi
             if x >= fw:
                 w = vig
@@ -515,8 +563,7 @@ def sonar_pal(pal, rt, ct, prm, tq):
     qp[20] = (be + 1) & 127
     qp[21] = 128 - bl
 """ % {"LEAD_AT": ANG - LEAD_U, "LEAD_U": LEAD_U, "C_LO": C_LO, "C_HI": C_HI, "C_RING": C_RING,
-       "C_PROF": C_PROF, "C_VIG": C_VIG, "LEADQ": PING_LEAD * Q8, "TRAILQ": PING_TRAIL * Q8,
-       "FADE": FADE_PX, "V7": V7,
+       "C_PROF": C_PROF, "C_VIG": C_VIG, "TRAILQ": PING_TRAIL * Q8, "V7": V7,
        "P_LT": P_LT, "P_GT": P_GT, "T_LAST": 3 * NBIN}
 
 _DSRC = """
@@ -616,7 +663,7 @@ def _viper(src, name):
 
 
 def _ctab():
-    ct = array.array("H", [0] * C_N)
+    ct = array.array("H", bytes(2 * C_N))
     for k in range(256):             # exp(-k / 32), eased to 0 where it falls under TAIL_CUT
         v = (math.exp(-k / 32.0) - TAIL_CUT) / (1.0 - TAIL_CUT)
         ct[C_EXP + k] = int(256 * v + 0.5) if v > 0 else 0
@@ -632,9 +679,6 @@ def _ctab():
     return ct
 
 
-CT = _ctab()
-
-
 def _check_rtab():
     rt = array.array("H", [(i * 37 + 11) & 0xFFFF for i in range(586)])
     for i in range(458):
@@ -642,20 +686,25 @@ def _check_rtab():
     return rt
 
 
-# Self-check frames for the palette kernel: (header, beams); between them
-# every branch: lens, flat and ramp rims, core floor, fill and its edge,
-# ping inward and outward, menu dim and sun lift, ghosts, both directions,
-# the leading edge, the decay table's end, and the trail fade with the iris
-# closed, opening (narrower than FADE_PX) and open.
+# Self-check frames for the palette kernel: (header, beams, ping lead in Q8,
+# trail fade width in px). Between them they reach every branch: lens, flat
+# and ramp rims, core floor, the fill and its edge (the last frame: fill
+# radius 86 under a dim ping, so the r 88 class sits on fr + 2, the last
+# index of the 3 px edge, where the edge level beats the base), the ping
+# inward and outward with a narrow and a wide lead, menu dim and sun lift,
+# ghosts, both directions, the leading edge, the decay table's end, and the
+# trail fade with the iris closed (0), opening (6), open (10) and widened
+# while the lens opens (30).
 _CHECK = (
     ((NC, 0, 0, 300, 900, 900, 400, 1792, 256, 0, -1, 1400, 0x6200, 1536, 0, 0, 3000, 1792),
-     ((0, 1, 46, 3000, 1500, 0), (4096, 1, 46, 1500, 900, 1), (8000, -1, 46, 800, 600, 0))),
+     ((0, 1, 46, 3000, 1500, 0), (4096, 1, 46, 1500, 900, 1), (8000, -1, 46, 800, 600, 0)),
+     2304, 0),
     ((NC, 6, 9, 300, 900, 900, 400, 1792, 256, 0, -1, 1400, 0x6200, 0, 0, 0, -1, 0),
-     ((2000, 1, 46, 3000, 1500, 0), (7000, -1, 46, 1200, 1700, 1))),
+     ((2000, 1, 46, 3000, 1500, 0), (7000, -1, 46, 1200, 1700, 1)), 768, 6),
     ((NC, 64, 67, 200, 1300, 2000, 300, 1280, 128, 9, 0x1234, 1400, 0x6200, 0, 90, 1024, -1, 0),
-     ((100, 1, 200, 3000, 1800, 1), (6000, 1, 46, 400, 1200, 0))),
-    ((NC, 44, 47, 0, 0, 900, 0, 1280, 128, 9, -1, 1300, 0x6200, 0, 0, 0, 20000, 1792),
-     ()),
+     ((100, 1, 200, 3000, 1800, 1), (6000, 1, 46, 400, 1200, 0)), 768, 10),
+    ((NC, 44, 47, 0, 0, 900, 0, 1792, 128, 9, -1, 1300, 0x6200, 0, 86, 1024, 20000, 1792),
+     (), 9216, 30),
 )
 
 
@@ -673,11 +722,10 @@ def _check_ct():
     return ck
 
 
-def pal_agrees(ka, kb):
-    """True if palette kernels ``ka`` and ``kb`` leave the same palette,
-    work arrays and outputs after each _CHECK frame (synthetic tables, the
-    CK_R classes), run in sequence on the same arrays, each frame twice
-    (the second time with the beams moved and the colour tables kept)."""
+def _pal_check(ka, kb, ok):
+    """pal_agrees in steps (a generator): yields after the set-up and after
+    each kernel run pair; ``ok[0]`` is True once every run agreed."""
+    ok[0] = False
     rt = _check_rtab()
     ck = _check_ct()
     st = []
@@ -685,9 +733,10 @@ def pal_agrees(ka, kb):
         tq = array.array("i", [7] * T_N)
         for c in range(NC):
             tq[3 * NBIN + c] = -1
-        st.append((fn, array.array("H", range(PAL_N)), array.array("i", [0] * PRM_N), tq))
+        st.append((fn, array.array("H", range(PAL_N)), array.array("i", bytes(4 * PRM_N)), tq))
+    yield
     lk = None
-    for hdr, beams in _CHECK:
+    for hdr, beams, pl, fw in _CHECK:
         k = (hdr[H_VMAX], hdr[H_DIM], hdr[H_LIFT])
         lt = 1 if k != lk else 0
         lk = k
@@ -697,6 +746,8 @@ def pal_agrees(ka, kb):
             prm[H_NC] = len(CK_R)
             prm[H_NB] = len(beams)
             prm[H_LT] = lt
+            prm[H_PINGL] = pl
+            prm[H_FW] = fw
             for j in range(len(beams)):
                 for m in range(6):
                     prm[H_BM + 6 * j + m] = beams[j][m]
@@ -710,8 +761,20 @@ def pal_agrees(ka, kb):
             a = st[0]
             b = st[1]
             if a[1] != b[1] or a[2] != b[2] or a[3] != b[3]:
-                return False
-    return True
+                return
+            yield
+    ok[0] = True
+
+
+def pal_agrees(ka, kb):
+    """True if palette kernels ``ka`` and ``kb`` leave the same palette,
+    work arrays and outputs after each _CHECK frame (synthetic tables, the
+    CK_R classes), run in sequence on the same arrays, each frame twice
+    (the second time with the beams moved and the colour tables kept)."""
+    ok = [False]
+    for _ in _pal_check(ka, kb, ok):
+        pass
+    return ok[0]
 
 
 def diff_agrees(ka, kb):
@@ -742,39 +805,89 @@ def _compile(src, name, agrees):
     return vp, "viper"
 
 
-sonar_pal, PAL_KIND = _compile(_PSRC, "sonar_pal", pal_agrees)
-sonar_diff, DIFF_KIND = _compile(_DSRC, "sonar_diff", diff_agrees)
-_BLIT_V = _viper(_BSRC, "sonar_blit")
+# the kernels, set by load(): sonar_pal / sonar_diff (viper after their
+# self-check, else plain), _BLIT_V (viper, None without it; each theme object
+# checks it on its own buffers) and _BLIT_PY (its plain version, for that check)
+sonar_pal = None
+PAL_KIND = None
+sonar_diff = None
+DIFF_KIND = None
+_BLIT_V = None
+_BLIT_PY = None
+_PAL_PY = None               # palette kernel compiles waiting for the self-check
+_PAL_VP = None               # (False: no viper on this port)
+
+
+def load():
+    """One-time work in steps (a generator, ui/themes/base.py "Loading"):
+    the dither and kernel tables, each kernel's compiles and self-check.
+    Idempotent: a step already done is skipped, also after a load
+    abandoned half-way (a palette self-check cut short starts over)."""
+    global CLSD, ANG_C, ANG_S, CT, sonar_pal, PAL_KIND, sonar_diff, DIFF_KIND
+    global _BLIT_V, _BLIT_PY, _PAL_PY, _PAL_VP
+    if CLSD is None:
+        CLSD = _cls_dither()
+        yield
+    if ANG_S is None:
+        tc, ts = _ang_dither()
+        ANG_C = tc
+        ANG_S = ts
+        yield
+    if CT is None:
+        CT = _ctab()
+        yield
+    if sonar_pal is None:
+        if _PAL_PY is None:
+            _PAL_PY = _plain(_PSRC, "sonar_pal")
+            yield
+        if _PAL_VP is None:
+            vp = _viper(_PSRC, "sonar_pal")
+            _PAL_VP = False if vp is None else vp
+            yield
+        if _PAL_VP is False:
+            PAL_KIND = "python"
+            sonar_pal = _PAL_PY
+        else:
+            ok = [False]
+            for _ in _pal_check(_PAL_PY, _PAL_VP, ok):
+                yield
+            PAL_KIND = "viper" if ok[0] else "python (viper self-check failed)"
+            sonar_pal = _PAL_VP if ok[0] else _PAL_PY
+        _PAL_PY = None
+        _PAL_VP = None
+    if sonar_diff is None:
+        k, kind = _compile(_DSRC, "sonar_diff", diff_agrees)
+        DIFF_KIND = kind
+        sonar_diff = k
+        yield
+    if _BLIT_PY is None:
+        _BLIT_V = _viper(_BSRC, "sonar_blit")
+        _BLIT_PY = _plain(_BSRC, "sonar_blit")
+        yield
+
+
+def loaded():
+    """Run load() to the end (tests, tools; ``ui.themes.make`` does it too)."""
+    for _ in load():
+        pass
 
 
 # ---- maps (built per theme object) -----------------------------------------------
-def build_maps(idx):
-    """(q16, xs) from the ring-index map ``idx``.
-
-    q16: the top-right quadrant (rows 0..119, columns 120..239) of the class
-    x angle map, ``class << 7 | bin``: the class of the pixel's ring index
-    and the 2.8125 deg bin of its centre's angle clockwise from 12 o'clock
-    (0..31, or 127 / 32 just across the axes), both through the ordered
-    dither (CLSD; ANG_C / ANG_S, walked by one pointer per column phase, as
-    the angle grows along a row). xs[i * NS + k]: the first column of ring
-    index i in strip k (255 = none; the last is 239 - that, the map is
-    symmetric). Integer-only; unrolled by the 4 column phases (init time on
-    the watch)."""
-    q = array.array("H", [0] * 14400)
-    xs = bytearray(b"\xff" * (N_IDX * NS))
+def build_rows(idx, q, xs, r0, r1):
+    """Quadrant map rows r0..r1-1 into ``q`` and ``xs`` (see build_maps)."""
     tc = ANG_C
     ts = ANG_S
     cd = CLSD
-    for row in range(120):
+    for row in range(r0, r1 if r1 < 120 else 120):
         dy = 2 * (119 - row) + 1
         base = row * W + 120
         o = row * 120
         rb = (row & 3) * 4
         ab = ((row + 1) & 3) * 4
-        r0 = BAYER[rb]
-        r1 = BAYER[rb + 1]
-        r2 = BAYER[rb + 2]
-        r3 = BAYER[rb + 3]
+        r0_ = BAYER[rb]
+        r1_ = BAYER[rb + 1]
+        r2_ = BAYER[rb + 2]
+        r3_ = BAYER[rb + 3]
         a0 = BAYER[ab + 2] * 33 + 1
         a1 = BAYER[ab + 3] * 33 + 1
         a2 = BAYER[ab] * 33 + 1
@@ -796,39 +909,55 @@ def build_maps(idx):
             e = o + x
             c = 119 - x                       # the mirrored column on the left
             i = idx[b]
-            q[e] = (cd[i * 16 + r0] << 7) | (k0 & 127)
+            q[e] = (cd[i * 16 + r0_] << 7) | (k0 & 127)
             i *= NS
             if c < xs[i + st]:
                 xs[i + st] = c
                 xs[i + sb] = c
             c -= 1
             i = idx[b + 1]
-            q[e + 1] = (cd[i * 16 + r1] << 7) | (k1 & 127)
+            q[e + 1] = (cd[i * 16 + r1_] << 7) | (k1 & 127)
             i *= NS
             if c < xs[i + st]:
                 xs[i + st] = c
                 xs[i + sb] = c
             c -= 1
             i = idx[b + 2]
-            q[e + 2] = (cd[i * 16 + r2] << 7) | (k2 & 127)
+            q[e + 2] = (cd[i * 16 + r2_] << 7) | (k2 & 127)
             i *= NS
             if c < xs[i + st]:
                 xs[i + st] = c
                 xs[i + sb] = c
             c -= 1
             i = idx[b + 3]
-            q[e + 3] = (cd[i * 16 + r3] << 7) | (k3 & 127)
+            q[e + 3] = (cd[i * 16 + r3_] << 7) | (k3 & 127)
             i *= NS
             if c < xs[i + st]:
                 xs[i + st] = c
                 xs[i + sb] = c
+
+
+def build_maps(idx):
+    """(q16, xs) from the ring-index map ``idx`` (after load()).
+
+    q16: the top-right quadrant (rows 0..119, columns 120..239) of the class
+    x angle map, ``class << 7 | bin``: the class of the pixel's ring index
+    and the 2.8125 deg bin of its centre's angle clockwise from 12 o'clock
+    (0..31, or 127 / 32 just across the axes), both through the ordered
+    dither (CLSD; ANG_C / ANG_S, walked by one pointer per column phase, as
+    the angle grows along a row). xs[i * NS + k]: the first column of ring
+    index i in strip k (255 = none; the last is 239 - that, the map is
+    symmetric). Integer-only; unrolled by the 4 column phases. A theme
+    builds it MAP_ROWS rows a step (``build_rows``, Sonar.prepare)."""
+    q = array.array("H", bytes(2 * 14400))
+    xs = bytearray(b"\xff" * (N_IDX * NS))
+    build_rows(idx, q, xs, 0, 120)
     return q, xs
 
 
-def build_full16(q):
-    """The full 240x240 map from the quadrant (bins XOR'd per quadrant)."""
-    m = array.array("H", [0] * (W * W))
-    for row in range(120):
+def full_rows(q, m, r0, r1):
+    """Full-map rows r0..r1-1 and their mirrors 239-r1+1..239-r0 into ``m``."""
+    for row in range(r0, r1 if r1 < 120 else 120):
         o = row * 120
         t = row * W
         bt = (239 - row) * W
@@ -838,6 +967,12 @@ def build_full16(q):
             m[t + 119 - x] = e ^ 127
             m[bt + 120 + x] = e ^ 63
             m[bt + 119 - x] = e ^ 64
+
+
+def build_full16(q):
+    """The full 240x240 map from the quadrant (bins XOR'd per quadrant)."""
+    m = array.array("H", bytes(2 * W * W))
+    full_rows(q, m, 0, 120)
     return m
 
 
@@ -845,77 +980,104 @@ class Sonar(Theme):
     name = "sonar"
 
     def __init__(self, r):
+        # allocations only: the maps are built and the blit kernel checked
+        # in prepare(), after load() has set the module's tables and kernels
         Theme.__init__(self, r)
         self.rad = Radial("sonar")
         self.ramps = self.rad.ramps
         self.irisc = T.THEME_IRIS["sonar"]
-        self.q16, self.xs = build_maps(r.map.idx)
+        self.q16 = array.array("H", bytes(2 * 14400))
+        self.xs = bytearray(b"\xff" * (N_IDX * NS))
         # the palette starts as distinct colours for the blit self-check; the
         # first beam frame rewrites every entry (all rows marked unknown)
         self.pal2 = array.array("H", range(PAL_N))
-        self.prm = array.array("i", [0] * PRM_N)
-        self.tq = array.array("i", [0] * T_N)
-        self.prev = array.array("H", [0] * N_IDX)       # last ring palette (quiet moments)
-        self.dout = array.array("i", [0] * 12)
+        self.prm = array.array("i", bytes(4 * PRM_N))
+        self.tq = array.array("i", bytes(4 * T_N))
+        self.prev = array.array("H", bytes(2 * N_IDX))  # last ring palette (quiet moments)
+        self.dout = array.array("i", bytes(4 * 12))
         self.bk = None
         self.m16_fb = None
         self.pal2_fb = None
         self.bkind = None
         if framebuf is not None:
             self.pal2_fb = framebuf.FrameBuffer(self.pal2, NCB, 1, framebuf.RGB565)
-            k = _BLIT_V
-            if k is not None:
-                from ui.field import _aligned
-                ok = _aligned(self.q16) and _aligned(self.pal2)
-                for b in r.bands:
-                    ok = ok and _aligned(b)
-                if ok and self.blit_agrees(k, r.bands[0]):
-                    self.bk = k
-                    self.bkind = "viper"
-                else:
-                    self.bkind = "framebuf (kernel self-check failed)"
-            if self.bk is None:                 # the full map: only for the framebuf path
-                self.m16_fb = framebuf.FrameBuffer(build_full16(self.q16), W, W,
-                                                   framebuf.RGB565)
-                if self.bkind is None:
-                    self.bkind = "framebuf"
-        # beams: current set (angles per frame) and the set fading out
-        self.cang = array.array("i", [0] * 6)
+        # beams: the current set (angles per frame) and NF sets fading out
+        self.cang = array.array("i", bytes(4 * 6))
         self.gh = bytearray(6)                          # ghost flag per current beam
-        self.oang = array.array("i", [0] * 6)
-        self.ogh = bytearray(6)
+        self.fn = bytearray(NF)                         # beams in each fading set (0 = free)
+        self.fdir = array.array("i", bytes(4 * NF))
+        self.flinv = array.array("i", bytes(4 * NF))
+        self.fa = array.array("i", bytes(4 * NF))      # its shown peak, Q8 levels
+        self.fang = array.array("i", bytes(4 * 6 * NF))
+        self.fgh = bytearray(6 * NF)
         self.reset()
+
+    def prepare(self):
+        """The class x angle map MAP_ROWS rows a step, then the blit kernel's
+        check on the real band buffers, or (framebuf path) the full map."""
+        r = self.r
+        idx = r.map.idx
+        for r0 in range(0, 120, MAP_ROWS):
+            build_rows(idx, self.q16, self.xs, r0, r0 + MAP_ROWS)
+            yield
+        if framebuf is None:
+            return
+        k = _BLIT_V
+        if k is not None:
+            from ui.field import _aligned
+            ok = _aligned(self.q16) and _aligned(self.pal2)
+            for b in r.bands:
+                ok = ok and _aligned(b)
+            if ok and self.blit_agrees(k, r.bands[0]):
+                self.bk = k
+                self.bkind = "viper"
+            else:
+                self.bkind = "framebuf (kernel self-check failed)"
+            yield
+        if self.bk is None:                     # the full map: only for the framebuf path
+            m = array.array("H", bytes(2 * W * W))
+            yield
+            for r0 in range(0, 120, FULL_ROWS):
+                full_rows(self.q16, m, r0, r0 + FULL_ROWS)
+                yield
+            self.m16_fb = framebuf.FrameBuffer(m, W, W, framebuf.RGB565)
+            if self.bkind is None:
+                self.bkind = "framebuf"
 
     def reset(self):
         Theme.reset(self)
         self.ramps.snap()
         self.mom = M_LIVE
         self.cls = False             # this frame drew through the class x angle map
-        self.cb = 0                  # current set: beams, dir, period
+        self.cb = 0                  # current set: beams, dir, period, L (angle units)
         self.cdir = 0
         self.cper = 0
-        self.cage = XF_MS            # ms since the current set started (fade in)
-        self.camp = 0
         self.cl = 1
-        self.on = 0                  # fading set: beams, dir, 1/L, amp, age
-        self.odir = 1
-        self.olinv = 1
-        self.oamp = 0
-        self.oage = XF_MS
+        self.ca = 0                  # its shown peak, Q8 levels (slewed toward its target)
+        for s in range(NF):          # no set fading out
+            self.fn[s] = 0
+            self.fa[s] = 0
+        self.bi = 0                  # the beams' intensity, Q8 (slewed toward I)
         self.lms = 0                 # listening beam clock (ms into its turn)
         self.ls = 0                  # the field's last spawn we saw
         self.brth = 0                # breathing clock, ms mod breathe_ms
         self.ring = 0                # range ring level (slewed)
         self.ping = False
         self.page = 0                # ms since the ping started
+        self.pr0 = 0                 # its start radius, Q8 px
+        self.pr = -1                 # this frame's: radius (Q8 px, -1 = none), peak
+        self.pa = 0                  # (faded in, Q8 levels) and lead (Q8 px)
+        self.plq = PING_LEAD * Q8
         tq = self.tq
         for c in range(NC):          # every palette row is redrawn on the next frame
             tq[3 * NBIN + c] = -1
         self.lt = -1                 # vmax, dim, lift the colour tables were built for
-        self.iqv = 0                 # params as of the last frame outside MENU
+        self.iqv = 0                 # the screen's params (held in MENU)
         self.z = 0
         self.ghost = 0
         self.sun = False
+        self.sunf = 0                # sun floor, slewed (Q8 levels)
+        self.vmx = V7                # level cap, slewed toward the renderer's (saver)
 
     def blit_agrees(self, kern, buf):
         """True if ``kern`` writes the same rows into the band ``buf`` as its
@@ -925,13 +1087,13 @@ class Sonar(Theme):
         map through ``pal2``'s distinct start colours. Leaves ``buf`` dirty
         (the next frame redraws it)."""
         q = self.q16
-        qw = array.array("I", [0] * 7200)
+        qw = array.array("I", bytes(4 * 7200))
         for row in (0, 1, 2, 3, 118, 119):             # the quadrant rows those bands read
             o = row * 60
             for i in range(o, o + 60):
                 qw[i] = q[2 * i] | (q[2 * i + 1] << 16)
-        py = _plain(_BSRC, "sonar_blit")
-        dst = array.array("I", [0] * 480)
+        py = _BLIT_PY
+        dst = array.array("I", bytes(4 * 480))
         mv = memoryview(buf)
         junk = b"\x5a" * 1920                          # so a pixel the kernel skips shows
         for y0 in (0, 118, 236):
@@ -951,23 +1113,43 @@ class Sonar(Theme):
         pm = self.mom
         m = pm if (menu and not wake) else self.moment(p)
         self.mom = m
-        if wake or not menu:                 # MENU holds what the params said before it
-            self.iqv = self.iq()
-            self.z = self.zone(p)
-            self.ghost = 0 if p.ring_live else 1
-            self.sun = p.sun
+        if wake or not menu:                 # MENU holds the screen's params
+            if menu:                         # a wake in the MENU: those of the screen under it
+                lp = self.live(p)
+                iq = int(lp.intensity * 256)
+                self.iqv = 0 if iq < 0 else (256 if iq > 256 else iq)
+            else:
+                lp = p
+                self.iqv = self.iq()
+            self.z = self.zone(lp)
+            self.ghost = 0 if lp.ring_live else 1
+            self.sun = lp.sun
         iq = self.iqv
+        step = 0 if menu else f.flash        # the flash-limit slew per frame (0: frozen)
+        fs = (step * XF_K + 255) >> 8        # Sonar's own fades: half that
+        # the sun floor and the saver's cap come and go at that rate (the
+        # sun's LUT lift is instant, as Ripple's)
+        st = SUN_FLOOR if self.sun else 0
+        if wake:
+            self.sunf = st
+            self.vmx = vmax
+        elif fs:
+            d = st - self.sunf
+            self.sunf = st if -fs <= d <= fs else self.sunf + (fs if d > 0 else -fs)
+            d = vmax - self.vmx
+            self.vmx = vmax if -fs <= d <= fs else self.vmx + (fs if d > 0 else -fs)
+        vmax = self.vmx
         rm = self.ramps
         xf = rm.dur > 0
         rp = rm.ramp
         rm.follow(f, t)
         lut = xf or rm.dur > 0 or rm.ramp != rp
-        # base levels: the field's, scaled to the mockup's (module docstring)
+        # base levels: the field's, mapped onto Sonar's (module docstring)
         fl = SFL_A + (((f.fl - FL_A) * SFL_K) >> 8)
         if fl < 0:
             fl = 0
-        if self.sun and fl < SUN_FLOOR:
-            fl = SUN_FLOOR
+        if fl < self.sunf:
+            fl = self.sunf
         gl = SGL_A + (((f.gl - GL_A) * SGL_K) >> 8)
         if gl < 0:
             gl = 0
@@ -988,26 +1170,38 @@ class Sonar(Theme):
             rt = RL_A + ((RL_B * iq) >> 8)
         if wake:
             self.ring = rt
-        elif not menu:
-            step = f.flash
+        elif step:
             d = rt - self.ring
             self.ring = rt if -step <= d <= step else self.ring + (step if d > 0 else -step)
-        # FOUND ping
+        # FOUND ping: from the lens it opens to, as the field's burst
         if m == M_FOUND:
             if pm != M_FOUND or wake:
                 self.ping = (not wake) or p.burst
                 self.page = 0
+                self.pr0 = f.iris_to << 8
             elif self.ping:
                 self.page += dt
         else:
             self.ping = False
         pr = -1
+        pa = 0
+        plq = PING_LEAD * Q8
         if self.ping:
-            pr = (f.iris << 8) + ((PING_PX_S * self.page) << 8) // 1000
+            run = ((PING_PX_S * self.page) << 8) // 1000       # Q8 px travelled
+            pr = self.pr0 + run
             if pr > (N_IDX + PING_TRAIL) << 8:
                 self.ping = False
                 pr = -1
-        nb = self._beams(p, t, m, dt, wake, menu, iq)
+            else:
+                fade = run // PING_FADE                         # 12 px fade-in, Q8
+                pa = PING_AMP if fade >= 256 else (PING_AMP * fade) >> 8
+                aa = (AA_K * PING_PX_S * f.dt) // 1000          # 1.5 x speed / fps, Q8 px
+                if aa > plq:
+                    plq = aa
+        self.pr = pr
+        self.pa = pa
+        self.plq = plq
+        nb = self._beams(p, t, m, dt, wake, menu, iq, step, fs)
         cls = nb > 0
         sw_path = cls != self.cls
         self.cls = cls
@@ -1032,7 +1226,15 @@ class Sonar(Theme):
             q[H_FILLR] = f.fill_r if f.fill_v else 0
             q[H_FILLV] = f.fill_v
             q[H_PINGR] = pr
-            q[H_PINGA] = PING_AMP
+            q[H_PINGA] = pa
+            q[H_PINGL] = plq
+            # the trail fades in outside the rim over FADE_PX (over the iris
+            # radius while that is less), widened by what the lens still has
+            # to open, so an opening lens clears the trails ahead of it
+            fw = iris if iris < FADE_PX else FADE_PX
+            if iris > 0 and f.iris_to > iris:
+                fw += f.iris_to - iris
+            q[H_FW] = fw
             q[H_NB] = nb
             lk = (vmax << 17) | (f.dim << 8) | lift
             q[H_LT] = 1 if (lut or wake or sw_path or lk != self.lt) else 0
@@ -1051,8 +1253,8 @@ class Sonar(Theme):
         ring = self.ring
         for k in range(len(RINGS)):
             acc[RINGS[k]] += ring
-        if pr >= 0:
-            rad.add_ring(pr, PING_AMP, PING_LEAD, PING_TRAIL)
+        if pr >= 0 and pa > 0:
+            rad.add_ring(pr, pa, (plq + 128) >> 8, PING_TRAIL)
         rad.run()
         o = self.dout
         sonar_diff(rad.pal_arr, self.prev, o)
@@ -1080,9 +1282,10 @@ class Sonar(Theme):
                             sp[2 * k + 1] = 239 - x0
             self.dirty = dd
 
-    def _beams(self, p, t, m, dt, wake, menu, iq):
-        """Update both beam sets and write them into prm; returns how many
-        beams the kernel draws (0: a quiet frame)."""
+    def _beams(self, p, t, m, dt, wake, menu, iq, step, fs):
+        """Update the beam sets and write them into prm; returns how many
+        beams the kernel draws (0: a quiet frame). ``step``: the flash-limit
+        slew this frame, ``fs`` the beam sets' (both 0 in MENU)."""
         f = self.f
         z = self.z
         if m == M_LIVE:
@@ -1097,36 +1300,55 @@ class Sonar(Theme):
             nb = 0
             dr = 0
             per = 0
+        # the beams' intensity follows I no faster than the flash limit allows
+        if wake:
+            self.bi = iq
+        elif step:
+            s = step // BI_K + 1
+            d = iq - self.bi
+            self.bi = iq if -s <= d <= s else self.bi + (s if d > 0 else -s)
+        # the sets fading out drop by the slew; a set at 0 is gone
+        fn = self.fn
+        fa = self.fa
+        for s in range(NF):
+            if fn[s]:
+                if wake:
+                    fn[s] = 0
+                elif fs:
+                    a = fa[s] - fs
+                    if a > 0:
+                        fa[s] = a
+                    else:
+                        fn[s] = 0
         ghost = self.ghost
         if wake or nb != self.cb or dr != self.cdir or per != self.cper:
-            if wake:
-                self.on = 0
-            elif self.cb:
-                # the visible set freezes and fades out (from its own fade-in)
-                e = ease(EASE_IOC, self.cage, XF_MS)
+            if self.cb and self.ca > 0 and not wake:
+                # the visible set freezes where it is and fades out from its
+                # shown level (both slots busy: the fainter one is dropped)
+                if not fn[0]:
+                    s = 0
+                elif not fn[1]:
+                    s = 1
+                elif fa[0] <= fa[1]:
+                    s = 0
+                else:
+                    s = 1
+                o = s * 6
                 for j in range(self.cb):
-                    self.oang[j] = self.cang[j]
-                    self.ogh[j] = self.gh[j]
-                self.on = self.cb
-                self.odir = self.cdir
-                self.olinv = (32 << 16) // self.cl
-                self.oamp = (self.camp * e) >> 8
-                self.oage = 0
+                    self.fang[o + j] = self.cang[j]
+                    self.fgh[o + j] = self.gh[j]
+                fn[s] = self.cb
+                self.fdir[s] = self.cdir
+                self.flinv[s] = (32 << 16) // self.cl
+                fa[s] = self.ca
             self.cb = nb
             self.cdir = dr
             self.cper = per
-            self.cage = XF_MS if wake else 0
+            self.ca = 0
             self.lms = 0
             g = ghost if dr > 0 else 0
             for j in range(6):
                 self.gh[j] = g
-        else:
-            c = self.cage + dt
-            self.cage = XF_MS if c > XF_MS else c
-            c = self.oage + dt
-            self.oage = XF_MS if c > XF_MS else c
-        if self.on and self.oage >= XF_MS:
-            self.on = 0
         # the beat: rotate the ghost flags as each beam takes the next one's place
         ls = f.last_spawn
         if ls != self.ls:
@@ -1146,19 +1368,23 @@ class Sonar(Theme):
                 ph = (age * ANG) // per
                 for j in range(nb):
                     self.cang[j] = ((ph + j * ANG) // nb) & (ANG - 1)
-                lq = TRAIL_A * Q8 + TRAIL_B * iq
-                amp = AMP_A + ((AMP_B * iq) >> 8)
+                lq = TRAIL_A * Q8 + TRAIL_B * self.bi
+                ta = AMP_A + ((AMP_B * self.bi) >> 8)
             else:
                 pt = 360000 // LISTEN_DEG_S
                 self.lms = (self.lms + dt) % pt
                 self.cang[0] = (ANG - (self.lms * ANG) // pt) & (ANG - 1)
                 lq = LISTEN_TRAIL_DEG * Q8
-                amp = LISTEN_AMP
+                ta = LISTEN_AMP
             if self.r._saver:
-                amp = (amp * SAVER_PU) >> 8
+                ta = (ta * SAVER_PU) >> 8
             self.cl = (lq * ANG) // (360 * Q8)
-            self.camp = amp
-            a = (amp * ease(EASE_IOC, self.cage, XF_MS)) >> 8
+            if wake:
+                self.ca = ta
+            elif fs:
+                d = ta - self.ca
+                self.ca = ta if -fs <= d <= fs else self.ca + (fs if d > 0 else -fs)
+            a = self.ca
             linv = (32 << 16) // self.cl
             for j in range(nb):
                 o = H_BM + 6 * n
@@ -1169,17 +1395,22 @@ class Sonar(Theme):
                 q[o + 4] = a
                 q[o + 5] = self.gh[j] if dr > 0 else 0
                 n += 1
-        if self.on:
-            a = (self.oamp * (256 - ease(EASE_IOC, self.oage, XF_MS))) >> 8
-            for j in range(self.on):
-                o = H_BM + 6 * n
-                q[o] = self.oang[j]
-                q[o + 1] = self.odir
-                q[o + 2] = HEAD_U
-                q[o + 3] = self.olinv
-                q[o + 4] = a
-                q[o + 5] = self.ogh[j] if self.odir > 0 else 0
-                n += 1
+        for s in range(NF):
+            k = fn[s]
+            if k:
+                a = fa[s]
+                dr = self.fdir[s]
+                linv = self.flinv[s]
+                o6 = s * 6
+                for j in range(k):
+                    o = H_BM + 6 * n
+                    q[o] = self.fang[o6 + j]
+                    q[o + 1] = dr
+                    q[o + 2] = HEAD_U
+                    q[o + 3] = linv
+                    q[o + 4] = a
+                    q[o + 5] = self.fgh[o6 + j] if dr > 0 else 0
+                    n += 1
         return n
 
     def _wedge(self, a0, an):
