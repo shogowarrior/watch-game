@@ -6,6 +6,7 @@
 
 #include "hm/hal.h"
 #include "hm/imu_sampler.h"
+#include "hm/tuning.h"
 
 namespace hm {
 namespace esp {
@@ -30,9 +31,11 @@ class CoreImuTask : public ImuTask {
   volatile bool run_ = false, done_ = true;
 };
 
-// GPIO12 PWM at 1 kHz and BACKLIGHT_NORMAL, as hal/st7789.py does. The panel
-// supply (AXP202 LDO2) must be on: see hm::axp202::panel_power_on.
-void backlight(bool on);
+// GPIO12 PWM at 1 kHz, duty level 0..1 (clamped), as hal/st7789.py's
+// brightness. The panel supply (AXP202 LDO2) must be on: see
+// hm::axp202::panel_power_on.
+void backlight_level(double level);
+inline void backlight(bool on) { backlight_level(on ? T::BACKLIGHT_NORMAL : 0.0); }
 
 }  // namespace esp
 }  // namespace hm
