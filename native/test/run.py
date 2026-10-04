@@ -1,13 +1,14 @@
 """Build and run the native host tests (CPython, needs g++).
 
-    python3 native/test/run.py [name-filter] [--tests test_game,...] [--mark]
+    python3 native/test/run.py [name-filter] [--tests test_game,...] [--classes ...] [--mark]
 
 Compiles native/core/src/*.cpp with native/test/*.cpp, plus the portable
 code and tests a port keeps beside its drivers (PORTS), for this machine, with
 the address and undefined-behaviour sanitizers (C++ overflow is UB where the
 Python it ports has none). Meanwhile native/tools/trace_game.py records the
 Python game's calls into a temporary folder (HM_TRACES), which the game port's
-trace tests replay (--tests: other Python tests to record than its default).
+trace tests replay (--tests and --classes as trace_game.py takes them: other
+Python tests to record than its default, only these classes).
 Runs them from the repo root and prints their result line
 ``[native] N passed, S skipped, K failed``.
 
@@ -52,7 +53,7 @@ def python_hash():
     """sha256 over the Python the default traces come from."""
     sys.path.insert(0, os.path.join(ROOT, "native", "tools"))
     from trace_game import TESTS
-    files = set(os.path.join("tests", t + ".py") for t in TESTS)
+    files = set(os.path.join("tests", t + ".py") for t, _ in TESTS)
     for pat in PYTHON:
         files.update(os.path.relpath(f, ROOT) for f in glob.glob(os.path.join(ROOT, pat), recursive=True))
     h = hashlib.sha256()
@@ -76,14 +77,16 @@ def run(args=()):
         return 2, "g++ not found"
     args = list(args)
     rec_args = []
-    if "--tests" in args:
-        i = args.index("--tests")
-        rec_args, args[i:i + 2] = args[i:i + 2], []
+    for opt in ("--tests", "--classes"):
+        if opt in args:
+            i = args.index(opt)
+            rec_args += args[i:i + 2]
+            args[i:i + 2] = []
     mark = "--mark" in args
     if mark:
         args.remove("--mark")
     now = python_hash()
-    changed = not rec_args and now != marked()   # a --tests run is always strict
+    changed = not rec_args and now != marked()   # a --tests or --classes run is always strict
     with tempfile.TemporaryDirectory() as d:
         traces = os.path.join(d, "traces")
         rec = subprocess.Popen([sys.executable, os.path.join(ROOT, "native", "tools", "trace_game.py"), traces] + rec_args,

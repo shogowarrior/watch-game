@@ -84,7 +84,10 @@ Json Jarr(const T* p, size_t n) {            // a list or array
   return J(std::move(v));
 }
 Json Jbytes(const uint8_t* p, size_t n);
-Json Jobj(const char* cls, std::vector<std::pair<std::string, Json>> fields);   // {"@": cls, ...}
+// An array or bytearray field as state shows it: {"t": typecode, "n": count,
+// "crc": CRC-32 of its bytes}; item is the C++ element size ('f': float).
+Json Jarray(char typecode, const void* data, size_t n, size_t item);
+Json Jobj(const char* cls, std::vector<std::pair<std::string, Json>> fields);   // {"@": cls, ...}; no "@" if cls is null
 
 // Python's == on recorded values; *where names the first difference.
 bool same(const Json& want, const Json& got, std::string* where);

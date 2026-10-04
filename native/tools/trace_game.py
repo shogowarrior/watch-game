@@ -1,9 +1,11 @@
 """Record the Python game's calls for the C++ port to replay (CPython only).
 
     python3 native/tools/trace_game.py OUTDIR [--tests test_link,test_game,...]
+                                              [--classes finder.link.LinkMonitor,...]
 
-Runs Python tests (TESTS, or --tests) with every class in TRACED wrapped, and
-writes one JSON-lines file per class, OUTDIR/<module>.<Class>.jsonl:
+Runs Python tests (TESTS, or --tests) with the classes in TRACED wrapped (or
+only those named in --classes), and writes one JSON-lines file per class,
+OUTDIR/<module>.<Class>.jsonl:
 
     {"new": 3, "a": [...]}                     # object 3 constructed with these arguments
     {"o": 3, "m": "update", "a": [...], "r": ..., "s": {...}}   # a call, its result, then state
@@ -228,24 +230,37 @@ def _wrap(cls_key, name, fn):
     return method
 
 
+_wrappers = {}   # "module.Class" -> (class, {attr: (function, its wrapper)})
+
+
 def install(outdir):
-    """Wrap every TRACED class; their lines go to files in ``outdir``."""
+    """Open one file per TRACED class in ``outdir`` and build its wrappers."""
     for mod, name in TRACED:
         cls = getattr(importlib.import_module(mod), name)
         key = "%s.%s" % (mod, name)
         _out[key] = open(os.path.join(outdir, key + ".jsonl"), "w")
+        w = {}
         for attr, fn in inspect.getmembers(cls, inspect.isfunction):   # inherited ones too
             if attr == "__init__":
-                setattr(cls, attr, _wrap_init(key, fn))
+                w[attr] = (fn, _wrap_init(key, fn))
             elif not attr.startswith("_"):
-                setattr(cls, attr, _wrap(key, attr, fn))
+                w[attr] = (fn, _wrap(key, attr, fn))
+        _wrappers[key] = (cls, w)
 
 
-# The tests run under the recorder by default: those of the modules the C++
-# port has reached (add a module's when its port lands). Recording costs about
-# 50 us a call, so a porter runs the wider ones with --tests (test_game,
-# test_episode, test_app_runtime, test_webhost: a minute or more each).
-TESTS = ("test_proto", "test_link")
+def record(keys):
+    """Record the classes in ``keys`` (None: all) and no others."""
+    for key, (cls, w) in _wrappers.items():
+        for attr, (fn, wrapper) in w.items():
+            setattr(cls, attr, wrapper if keys is None or key in keys else fn)
+
+
+# The Python tests run under the recorder by default, each with the classes it
+# records (None: all): those of the modules the C++ port has reached. Add a
+# module's when its port lands. Recording costs about 50 us a call, so a wide
+# test (test_game, test_episode: a minute or more with every class) records
+# only the classes no unit test covers.
+TESTS = (("test_proto", None), ("test_link", None))
 
 
 def main(argv):
@@ -253,12 +268,18 @@ def main(argv):
     if not pos:
         print(__doc__.strip().splitlines()[2].strip())
         return 2
-    o = parse_args(argv[1:], {"tests": ",".join(TESTS)})
+    o = parse_args(argv[1:], {"tests": "", "classes": ""})
+    plan = [(t, None) for t in o["tests"].split(",")] if o["tests"] else TESTS
+    only = set(o["classes"].split(",")) if o["classes"] else None
     os.makedirs(pos[0], exist_ok=True)
     install(pos[0])
     sys.path.insert(0, os.path.join(ROOT, "tests"))
     import runner
-    failed = runner.run(o["tests"].split(","))
+    failed = 0
+    for test, keys in plan:
+        record(only if keys is None else set(keys) & only if only else set(keys))
+        failed += runner.run([test])
+    record(())
     for f in _out.values():
         f.close()
     print("trace_game: %d classes, %d objects in %s" % (len(_out), len(_ids), pos[0]))
