@@ -42,14 +42,16 @@ One ``step(now)`` does, in order:
           (``display=None``) so heartbeats keep their time grid (ui-spec §7).
           A frame takes ~80 ms on the watch, so the motor is serviced after
           every band the renderer blits or pushes and after its overlays
-          (~5-15 ms apart) and the frame's
-          haptic events start at the
+          (~5-15 ms apart) and the frame's haptic events start at the
           post-render time (pulses keep their 60 ms ERM floor). The backlight
           follows ``params.backlight`` after each frame, so a woken panel is
           lit only over a fresh frame (§8: no stale frame)
   radio   beacon (``game.fill_beacon``) at ``game.beacon_hz`` via ``maybe_send``
   haptic  ``params.haptic`` (``play_named``; telemetry logs only accepted ones)
-          + renderer heartbeats (``heartbeat``) -> HapticPlayer (buzz mode) -> Motor
+          + renderer heartbeats (``heartbeat``) -> HapticPlayer (buzz mode) -> Motor.
+          A renderer that announces its next heartbeat spawn gets the beat
+          handed over ahead, at the spawn time (``_beats``), so it lands on its
+          ring at any lock rate; the loop wakes for it (``player.beat_due``)
   gc      ``gc.collect()`` once per ``GC_PERIOD_MS`` (10 s) when the next frame
           is at least ``GC_BUDGET_MS`` away (forced after ``GC_FORCE_MS``). On
           the SPIRAM build a collect sweeps the whole 4 MB heap: about 70 ms
@@ -67,6 +69,9 @@ after their slot (avg/max ms), the sd and max of the interval between shown
 frames (ms: the frame-time jitter), the lock's frame cost (busy ms between
 frames), collects in the window and how long the previous line took to print
 (ms; under 128 bytes it fits the UART FIFO, so print never waits on the wire).
+In debug mode the line goes to the telemetry sink's ``log`` instead: on USB a
+print could land inside a record the link is still writing, so the link queues
+it between records (the bridge shows it as a text line).
 
 ``step`` returns the ms until the next deadline; ``run`` sleeps exactly that
 (never longer than ``MAX_SLEEP_MS``) with ``idle``, which ticks the motor
@@ -78,6 +83,14 @@ is recorded in ``errors`` and skipped. OSErrors that reach the loop from a
 part (I2C glitches) are counted in ``io_errors`` and never stop the loop; the
 touch and radio drivers count their own bus errors (``touch_errors``,
 ``radio_stats`` in ``stats()``).
+
+Telemetry (app/telemetry.py) runs after the haptic stage: a state record at
+5 Hz, events as they happen. In debug mode its ``sink`` sends them to the laptop,
+from that 5 Hz record only (never from the render stage), and the sink's
+``pump`` runs once per pass and at each mid-frame service (the USB link writes what
+the UART's FIFO has room for, so it never stalls the loop and keeps up while
+a frame renders); ``begin`` gives it the radio's MAC, and ``stats()`` shows
+the sink's counters (``debug_stats``).
 
 With ``watchdog_ms`` (main.py: 8000) ``run`` feeds hal/watchdog.py once per
 pass: the stoppable soft watchdog while on USB, switched once to the ESP32
@@ -111,6 +124,7 @@ BATT_LOW_READS = 3         # falling readings <= 20 % in a row before the game s
 BATT_RECHECK_MS = 1000     # ... taken this far apart
 IMU_OUT_HZ = 25            # MotionTracker rate (25-50 Hz; 25 halves its float work)
 CHIP_MS = 1000             # BMA423 feature engine (steps/activity/wrist) poll
+CHIP_TRIES = 5             # engine starts in all: at boot, then at the poll after a bus error
 MAX_SLEEP_MS = 50
 GC_PERIOD_MS = 10000       # one ~70 ms collect per period (4 MB SPIRAM heap)
 GC_FORCE_MS = 20000        # ... even with no slack before the next frame
@@ -129,6 +143,7 @@ S_TELE = 9
 CHIP_OFF = 0               # feature engine: absent / failed (software steps only)
 CHIP_PENDING = 1           # blob uploaded, engine starting
 CHIP_ON = 2
+CHIP_RETRY = 3             # a bus error stopped the start: the poll starts it again
 ACC_LIMIT_US = 0x1FFFFFFF  # stage sums halve past this (stay MicroPython small ints)
 PMU_OFF_TRIES = 3          # shared I2C0: retry a glitched AXP202 power-off write
 _NO_EVENTS = ()
@@ -137,8 +152,10 @@ _NO_EVENTS = ()
 class _HapticDisplay:
     """Display proxy for the renderer: ``service`` runs after each band the
     renderer blits, after its overlays and after each band it pushes (~5-15
-    ms apart on the watch), so pulse edges stay within one band of schedule mid-frame, and
-    samples touch there once TOUCH_GAP_MS have passed since the last sample."""
+    ms apart on the watch), so pulse edges stay within one band of schedule mid-frame,
+    an announced heartbeat is handed over as soon as the frame's spawns are
+    known, touch is sampled there once TOUCH_GAP_MS have passed since the
+    last sample, and the debug sink is pumped there."""
 
     def __init__(self, rt, display):
         self.rt = rt
@@ -151,9 +168,15 @@ class _HapticDisplay:
     def service(self):
         rt = self.rt
         t = rt.clock()
+        r = rt.renderer
+        if getattr(r, "hb_next_t", -1) != -1:
+            rt._sync_beat(r, t)
         rt._stage_haptic(t)
         if rt.touch is not None and ticks_diff(t, rt._touch_t) >= TOUCH_GAP_MS:
             rt._sample_touch(t)
+        tl = rt.tele
+        if tl is not None and tl.sink is not None:
+            tl.sink.pump(rt.clock())    # USB: refill the UART's FIFO mid-frame
 
 
 class Runtime:
@@ -232,6 +255,8 @@ class Runtime:
             except (ImportError, MemoryError) as e:
                 self.errors["renderer"] = e
         mac = None if self.radio is None else self.radio.mac
+        if mac is not None and self.tele is not None:
+            self.tele.set_mac(mac)            # the datagram ``mac`` (debug mode)
         now = self.clock() if now is None else now
         if self.imu is not None and hasattr(self.imu, "fifo_read_mg"):
             from app.imu_feed import ImuFeed
@@ -244,6 +269,7 @@ class Runtime:
         self._vbus = getattr(self.pmu, "vbus_present", None)
         self._low_n = 0
         self._chip = CHIP_OFF
+        self._chip_tries = 0
         if self.feed is not None:
             self._chip_start()
         self._rx_cb = self._on_rx
@@ -255,6 +281,8 @@ class Runtime:
         self._fresh = False
         self._metro = None
         self._metro_ms = 0
+        self._hb_at = None          # spawn time of the beat handed to the player ahead
+        self._hb_was = None         # ... and of the one handed before it
         self._fps_t = now
         self._fps_n = 0
         self._t_tick = now
@@ -266,7 +294,8 @@ class Runtime:
         self._log_us = 0                      # the last fps line's print time
         self._t_input = now
         self._t_batt = now
-        self._t_chip = now
+        # a start stopped by a bus error waits one poll period (_chip_start says why)
+        self._t_chip = ticks_add(now, CHIP_MS) if self._chip == CHIP_RETRY else now
         self._t_gc = now
         self._win_t = now
         self._motor_lvl = 0.0
@@ -305,6 +334,9 @@ class Runtime:
                     pass                    # e.g. MemoryError again: keep the original
             raise
         finally:
+            wd = self.wd                    # first: a second Ctrl-C in the cleanup below
+            if wd is not None and wd.stop():    # must not leave the soft watchdog armed
+                self.wd = None
             self.quiet()
             tl = self.tele
             if tl is not None:
@@ -312,9 +344,6 @@ class Runtime:
                     tl.flush(force=True)    # the last <= flush_ms of records (also on Ctrl-C)
                 except Exception:
                     pass
-            wd = self.wd
-            if wd is not None and wd.stop():
-                self.wd = None
         return self
 
     def _make_watchdog(self, usb=None):
@@ -342,12 +371,18 @@ class Runtime:
 
     def idle(self, ms):
         """Sleep ``ms``; while a pattern plays, tick the motor every
-        ``HAPTIC_SLICE_MS`` so its edges land on time (ERM 60 ms floor)."""
-        if not self.hap_active():
-            self.sleep_ms(ms)
-            return
+        ``HAPTIC_SLICE_MS`` so its edges land on time (ERM 60 ms floor). A
+        heartbeat due inside the sleep starts on time."""
         clk = self.clock
         end = ticks_add(clk(), ms)
+        if not self.hap_active():
+            d = self.player.beat_due
+            if d is None or ticks_diff(d, end) > 0:
+                self.sleep_ms(ms)
+                return
+            r = ticks_diff(d, clk())
+            if r > 0:
+                self.sleep_ms(r)
         while True:
             self._stage_haptic(clk())
             r = ticks_diff(end, clk())
@@ -416,6 +451,9 @@ class Runtime:
             if tl.due(now):
                 tl.record(now, self)
             tl.flush(now)
+            sk = tl.sink
+            if sk is not None:
+                sk.pump(self.clock())   # USB: the FIFO's room now (record and flush took time)
             a = self._acc(S_TELE, a)
         self._t_input = ticks_add(now, INPUT_MS)
         if ticks_diff(now, self._t_gc) >= GC_PERIOD_MS:
@@ -439,6 +477,9 @@ class Runtime:
             nx = t
         t = self.pacer.t_next
         if ticks_diff(t, nx) < 0:
+            nx = t
+        t = self.player.beat_due
+        if t is not None and ticks_diff(t, nx) < 0:
             nx = t
         r = self.radio
         if r is not None:
@@ -484,7 +525,9 @@ class Runtime:
             self._t_chip = ticks_add(now, CHIP_MS)
             imu = self.imu
             try:
-                if self._chip == CHIP_PENDING:
+                if self._chip == CHIP_RETRY:
+                    self._chip_start()
+                elif self._chip == CHIP_PENDING:
                     self._chip_poll()
                 elif imu.features_ok():
                     self.feed.tracker.set_chip(now, imu.steps(), imu.activity())
@@ -495,24 +538,30 @@ class Runtime:
 
     def _chip_start(self):
         """Start the BMA423 feature engine without blocking (no blob: software
-        steps only); ``_chip_poll`` finishes it (hal.bma423 start/poll_features)."""
+        steps only); ``_chip_poll`` finishes it (hal.bma423 start/poll_features).
+        A start stopped by a bus error is started again by the 1 s poll, one
+        period later, CHIP_TRIES starts in all: a lost ACK on INIT_CTRL=1 has
+        brought the engine up by then (no second upload), else the 6 KB blob
+        goes again."""
         start = getattr(self.imu, "start_features", None)   # absent on a bare FIFO imu
         if start is None:
             return
-        for _ in range(3):                    # a bus error mid-upload leaves INIT_CTRL unset
-            try:
-                ok = start()
-                break
-            except OSError as e:
-                self.errors["imu_features"] = e
-        else:
+        self._chip_tries += 1
+        try:
+            ok = start()
+        except OSError as e:
+            self.errors["imu_features"] = e
+            self._chip = CHIP_RETRY if self._chip_tries < CHIP_TRIES else CHIP_OFF
             return
-        if ok:
-            self._chip = CHIP_PENDING
-            try:
-                self._chip_poll()
-            except OSError as e:
-                self.errors["imu_features"] = e     # retried by the 1 s poll
+        self.errors.pop("imu_features", None)       # an earlier start's bus error
+        if not ok:
+            self._chip = CHIP_OFF
+            return
+        self._chip = CHIP_PENDING
+        try:
+            self._chip_poll()
+        except OSError as e:
+            self.errors["imu_features"] = e     # retried by the 1 s poll
 
     def _chip_poll(self):
         st = self.imu.poll_features()
@@ -732,8 +781,46 @@ class Runtime:
         pl = self.player
         if event is not None and pl.play_named(event, now):
             self._log_haptic(now, event)
-        for i in range(len(ev)):            # heartbeats (an event replaces one)
-            pl.heartbeat(ev[i], now)
+        if r is not None:
+            self._beats(r, ev, now)
+
+    def _beats(self, r, ev, now):
+        """Heartbeats on ring spawns (an event replaces one). A renderer that
+        announces its next heartbeat spawn (``hb_next_t``, ``hb_next``) gets
+        the beat handed to the player ahead (``_sync_beat``), so the buzz lands
+        on its ring at any frame lock rate, and the frame that spawns that
+        ring (``hb_t0``, the spawn's time) does not start it again. Otherwise
+        a beat starts when its frame is out, up to a frame late."""
+        pl = self.player
+        if getattr(r, "hb_next_t", -1) == -1:
+            if len(ev):
+                pl.heartbeat(ev[0], now)
+            return
+        if len(ev):
+            t0 = r.hb_t0
+            if t0 != self._hb_at and t0 != self._hb_was:
+                pl.heartbeat(ev[0], now)    # not handed ahead: starts now
+        self._sync_beat(r, now)
+
+    def _sync_beat(self, r, now):
+        """Hand the announced spawn's beat to the player at the spawn time
+        once it falls before the frame after next. Re-read after the
+        renderer's state step and between bands (``_HapticDisplay.service``),
+        before the motor is ticked: a spawn still ahead that moves or goes (new
+        tempo, MENU) moves or drops its beat before it can start."""
+        nt = r.hb_next_t
+        at = self._hb_at
+        pl = self.player
+        pc = self.pacer
+        if nt is not None and ticks_diff(nt, ticks_add(pc.t_next, pc.period)) <= 0:
+            if nt != at and not pl.beat_playing:
+                pl.heartbeat(r.hb_next, nt)
+                self._hb_was = at
+                self._hb_at = nt
+        elif (at is not None and ticks_diff(at, now) > 0 and pl.beat_due == at
+                and nt != at):
+            pl.cancel_heartbeat()           # its spawn moved or is gone
+            self._hb_at = None
 
     def _log_haptic(self, now, name):
         """Only events the player accepted (§7 guard drops some): the log
@@ -798,10 +885,15 @@ class Runtime:
         el = ticks_diff(now, self._log_t)
         n = pc.frames
         a = self.us()
-        self.log_line("fps %.1f lock %d miss %d late %d/%d jit %.1f max %d cost %d gc %d log %.1f" % (
+        line = "fps %.1f lock %d miss %d late %d/%d jit %.1f max %d cost %d gc %d log %.1f" % (
             n * 1000.0 / el if el > 0 else 0.0, pc.fps, pc.missed,
             pc.late_sum // n if n else 0, pc.late_max, pc.jitter_ms(), pc.iv_max,
-            pc.cost, self._log_gc, self._log_us / 1000.0))
+            pc.cost, self._log_gc, self._log_us / 1000.0)
+        tl = self.tele
+        if tl is not None and tl.sink is not None:
+            tl.sink.log(line)       # debug mode: USB queues it between records
+        else:
+            self.log_line(line)
         self._log_us = ticks_diff(self.us(), a)
         self._log_t = now
         self._log_gc = 0
@@ -851,6 +943,9 @@ class Runtime:
                               round(self.st_max[i] / 1000.0, 2), n)
         if self.radio is not None:
             out["radio_stats"] = self.radio.stats()
+        tl = self.tele
+        if tl is not None and tl.sink is not None:
+            out["debug_stats"] = tl.sink.stats()
         te = 0 if self.touch is None else getattr(self.touch, "errors", 0)
         if te:
             out["touch_errors"] = te
@@ -877,7 +972,7 @@ class Runtime:
             print("%-10s %7.2f  %7.2f  %6d" % (k, v[0], v[1], v[2]))
         g = s["collect"]
         print("gc: %d collects, last %.1f ms, max %.1f ms" % g)
-        for k in ("mem_free", "io_errors", "touch_errors", "radio_stats"):
+        for k in ("mem_free", "io_errors", "touch_errors", "radio_stats", "debug_stats"):
             if k in s:
                 print(k, s[k])
         if self.errors:

@@ -56,6 +56,15 @@ shown and how many of them have the true bearing inside the cone
 
 The watch is held flat and face-up (tilt 5 deg) unless ``set_posture`` says
 otherwise; battery reads 90 %.
+
+Real watches (docs/design/debug-mode.md): ``real_mode(True)`` stops the
+simulated world (no physics, logic or haptics) and blanks both screens;
+``show_params(i, json_text)`` then hands watch i the RenderParams of the latest
+``rp`` record from that real watch, and ``step`` only advances a render clock,
+so the renderer keeps animating the last params between records.
+``real_mode(False)`` blanks the screens again and resumes the world where it
+stopped. Each switch resets the renderers (their state belongs to the other
+clock).
 """
 
 import json
@@ -70,6 +79,7 @@ from finder.game import Game, M_PAIRING, M_HUNT, M_SCANNING
 from finder.gestures import TAP as G_TAP, LONG_PRESS as G_LONG_PRESS, SWIPE_U as G_SWIPE_U, \
     SWIPE_D as G_SWIPE_D
 from finder.arrow import PH_TURN, wrap180, wrap360
+from finder.render_params import from_dict, validate
 from sim import Sim
 from sim.link import GameLink
 from sim.world import World, Walker, WalkTo, PI, wrap
@@ -146,6 +156,9 @@ class TwoWatchSim:
         self._addr = (uctypes.addressof(self.bufs[0]), uctypes.addressof(self.bufs[1])) \
             if uctypes is not None else (None, None)
         self._proxy = World(Walker(0.0, 0.0, 0.0, name="A"), Walker(1.0, 0.0, PI, name="B"))
+        self.real = False                # real_mode: screens from show_params, world stopped
+        self.real_ms = 0                 # render clock while real
+        self._shown = [None, None]       # RenderParams from show_params, per watch
         self.reset(seed)
 
     # ---- lifecycle ---------------------------------------------------------------
@@ -180,13 +193,17 @@ class TwoWatchSim:
         self._cone_ms = [0, 0]           # logic time an arrow was shown
         self._cone_in_ms = [0, 0]        # ... with the true bearing inside its cone
         self.frames = [0, 0]
+        self._blank()
+        self._tick()
+
+    def _blank(self):
+        """Fresh renderers and black frames (in place: the buffers and their addresses stay)."""
         if self.renderers is not None:
             for r in self.renderers:
                 r.reset()
         for buf in self.bufs:
-            for k in range(0, FRAME_BYTES, 4800):   # black, in place
+            for k in range(0, FRAME_BYTES, 4800):
                 buf[k:k + 4800] = bytes(4800)
-        self._tick()
 
     def set_profile(self, name):
         """Switch the radio channel (clean/typical/harsh/indoor); indoor adds walls.
@@ -214,6 +231,10 @@ class TwoWatchSim:
             return
         if dt > MAX_STEP_MS:
             dt = MAX_STEP_MS
+        if self.real:
+            self.real_ms += dt
+            self._render_due()
+            return
         while dt > 0:
             h = TICK_MS - self.t_ms % TICK_MS
             if h > PHYS_MS:
@@ -335,17 +356,26 @@ class TwoWatchSim:
         rs = self.renderers
         if rs is None:
             return
-        t = self.t_ms
+        real = self.real
+        t = self.real_ms if real else self.t_ms
         for i in (0, 1):
             nd = self._next_due[i]
             if t < nd:
                 continue
-            p = self._params[i]
-            d = self.caps[i] if self.games[i].screen_on else None   # §8: dark, no drawing
-            pl = self.players[i]
-            for e in rs[i].frame(p, d, t):      # heartbeats on live ring spawns
-                if pl.heartbeat(e, t):
-                    self._note(i, e)
+            if real:
+                p = self._shown[i]
+                if p is None:                   # nothing heard from that watch yet
+                    continue
+                d = self.caps[i]                # the page dims it by the record's backlight
+            else:
+                p = self._params[i]
+                d = self.caps[i] if self.games[i].screen_on else None   # §8: dark, no drawing
+            beats = rs[i].frame(p, d, t)
+            if not real:                        # a real watch's motor plays its own heartbeats
+                pl = self.players[i]
+                for e in beats:                 # heartbeats on live ring spawns
+                    if pl.heartbeat(e, t):
+                        self._note(i, e)
             if d is not None:
                 self.frames[i] += 1
             per = 1000 // (p.fps_cap or T.FPS_TARGET)
@@ -415,10 +445,46 @@ class TwoWatchSim:
         self.games[i].on_button(self.t_ms, bool(long))
 
     def bump(self):
-        """Both accelerometers tap at the same instant (watches knocked together)."""
+        """Both watches knocked together at the same instant. A watch senses the
+        spike only while ``Game.bump_armed()`` (HOT, PAIRING seen/confirmed, FOUND):
+        otherwise its accelerometer samples too slowly to see a knock
+        (app/imu_feed.py, ui-spec §6)."""
         t = self.t_ms
-        self.games[0].on_accel_tap(t)
-        self.games[1].on_accel_tap(t)
+        for g in self.games:
+            if g.bump_armed():
+                g.on_accel_tap(t)
+
+    # ---- real watches ------------------------------------------------------------
+    def real_mode(self, on):
+        """On: stop the simulated world and draw only what ``show_params`` hands in (both
+        screens black until then). Off: forget those params and resume the world."""
+        on = bool(on)
+        if on == self.real:
+            return
+        self.real = on
+        self.real_ms = 0
+        self._shown = [None, None]
+        self._next_due = [0, 0]
+        self._blank()
+
+    def show_params(self, i, json_text):
+        """Draw ``json_text`` (``finder.render_params.to_dict`` as JSON: an ``rp`` record's
+        ``p``) on watch i's screen from the next frame on, until the next call. Real mode
+        only. Raises ValueError for text that is not valid RenderParams (ui-spec §3), so a
+        bad record never reaches the renderer."""
+        if not self.real:
+            raise ValueError("show_params: real_mode(True) first")
+        try:
+            d = json.loads(json_text)
+            if not isinstance(d, dict):
+                raise ValueError("not a JSON object")
+            p = from_dict(d, False)             # fields a newer watch adds are ignored
+            bad = validate(p)
+        except (ValueError, TypeError) as e:    # TypeError: a list where a number goes
+            raise ValueError("params: %s" % e)
+        if bad:
+            raise ValueError("params: %s" % bad[0])
+        self._shown[i] = p
 
     # ---- read-outs ---------------------------------------------------------------
     def frame_addr(self, i):

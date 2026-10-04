@@ -3,11 +3,13 @@
 The episode test drags A towards B, walks it the rest of the way with
 ``walk_to`` and bumps until both watches show FOUND, all within 120 s of sim
 time. Frames are only drawn under MicroPython (framebuf); on CPython the
-logic, telemetry and controls are checked.
+logic, telemetry and controls are checked. The real-mode tests feed
+``show_params`` the JSON a real watch's ``rp`` record carries.
 """
 
 import json
 import math
+import os
 import sys
 
 from sim.webhost import TwoWatchSim, heading_to_world, heading_to_page, AUTO_SPLIT_S, TILT_TILTED
@@ -16,6 +18,7 @@ from finder import arrow as A
 from finder import scan as S
 from finder import tuning as T
 from finder.haptic_patterns import TOTAL_MS, HB_RESUME_MS
+from finder.render_params import from_dict, to_dict
 from tests import Skip
 
 MPY = sys.implementation.name == "micropython"
@@ -246,6 +249,17 @@ def test_manual_pairing_without_auto_pair():
     assert max(p.countdown for p in s._params) > AUTO_SPLIT_S     # the full split, not the demo cut
 
 
+def test_bump_unarmed_is_not_sensed():
+    s = TwoWatchSim(seed=1)
+    s.auto_pair = False
+    s.set_pose(1, 1.0, 0.0, 270.0)
+    assert not s.games[0].bump_armed() and not s.games[1].bump_armed()
+    s.bump()
+    while s.t_ms < 3000:
+        s.step(50)
+    assert [g.pair.sub for g in s.games] == ["seen", "seen"]
+
+
 def test_auto_pair_starts_quickly():
     s = TwoWatchSim()
     split = [None, None]
@@ -473,3 +487,292 @@ def test_dark_screen_draws_nothing_and_a_tap_wakes_it():
         assert False
     except ValueError:
         pass
+
+
+# ---- real watches (debug mode) ------------------------------------------------------
+
+def _rp_json(s, i):
+    """Watch i's current params as an ``rp`` record's ``p`` (JSON text)."""
+    return json.dumps(to_dict(s._params[i], True))
+
+
+def _blank(buf):
+    for k in range(0, len(buf), 4800):
+        if buf[k:k + 4800] != bytes(len(buf[k:k + 4800])):
+            return False
+    return True
+
+
+def test_real_mode_stops_the_world_and_resumes_it():
+    s = TwoWatchSim()
+    assert _run_until(s, _hunting, 30000)
+    s.walk_to(0, 30.0, 8.0)
+    s.step(500)
+    t0 = s.t_ms
+    a = (s.world.a.x, s.world.a.y)
+    params = list(s._params)
+    s.real_mode(True)
+    for _ in range(40):
+        s.step(50)
+    assert s.t_ms == t0 and s.real_ms == 2000, (s.t_ms, s.real_ms)
+    assert (s.world.a.x, s.world.a.y) == a                 # no physics
+    assert s._params[0] is params[0] and s._params[1] is params[1]     # no logic ticks
+    s.real_mode(True)                                      # again: no change
+    assert s.real_ms == 2000
+    s.real_mode(False)
+    s.step(500)
+    assert s.t_ms == t0 + 500 and (s.world.a.x, s.world.a.y) != a     # resumes where it stopped
+    assert s._params[0] is not params[0]
+    assert s.games[0].mode == "HUNT"                       # no catch-up gap: the link held
+
+
+def test_show_params_takes_valid_params_only():
+    s = TwoWatchSim()
+    assert _run_until(s, _hunting, 30000)
+    js = _rp_json(s, 0)
+    try:
+        s.show_params(0, js)
+        assert False, "show_params outside real mode"
+    except ValueError:
+        pass
+    s.real_mode(True)
+    assert s._shown == [None, None]
+    s.show_params(1, js)
+    assert s._shown[1] == from_dict(json.loads(js)) and s._shown[0] is None
+    d = json.loads(js)
+    d["added_later"] = 1                   # a field from a newer watch build is ignored
+    s.show_params(0, json.dumps(d))
+    assert s._shown[0] == s._shown[1]
+    kept = s._shown[0]
+    for bad in ("{", "[1, 2]", '{"screen": "NOPE"}', '{"screen": ["WARM"]}',
+                '{"intensity": "high"}', '{"screen": "WARM"}'):
+        try:
+            s.show_params(0, bad)
+            assert False, bad
+        except ValueError as e:
+            assert str(e).startswith("params: "), (bad, e)
+        assert s._shown[0] is kept, bad    # a bad record keeps the last good screen
+    s.real_mode(False)
+    assert s._shown == [None, None]        # back in the sim: its own screens again
+
+
+def test_show_params_draws_what_the_renderer_draws():
+    if not MPY:
+        raise Skip("framebuf: frames only under MicroPython")
+    from ui.renderer import Renderer, FrameCapture
+    s = TwoWatchSim()
+    assert _run_until(s, _hunting, 30000)
+    assert not _blank(s.frame_bytes(0))
+    js = _rp_json(s, 0)
+    s.real_mode(True)
+    assert _blank(s.frame_bytes(0)) and _blank(s.frame_bytes(1))     # no sim screen left over
+    n = list(s.frames)
+    s.step(200)
+    assert s.frames == n                   # nothing to draw until a record arrives
+    s.show_params(0, js)
+    p = from_dict(json.loads(js))
+    per = 1000 // p.fps_cap                # one frame per step
+    r = Renderer()
+    cap = FrameCapture()
+    t = s.real_ms
+    for _ in range(30):
+        s.step(per)
+        t += per
+        r.frame(p, cap, t)
+    assert s.frames[0] == n[0] + 30 and s.frames[1] == n[1]
+    assert bytes(s.frame_bytes(0)) == bytes(cap.buf)      # the same frame, ring for ring
+    assert _blank(s.frame_bytes(1))
+    s.real_mode(False)
+    assert _blank(s.frame_bytes(0))
+    s.step(100)
+    assert not _blank(s.frame_bytes(0)) and not _blank(s.frame_bytes(1))
+
+
+def test_page_follows_the_debug_contract():
+    """web/sim/index.html asks the bridge's endpoints and calls the host's real-mode methods."""
+    if MPY:
+        raise Skip("reads web/sim/index.html and tools/debug_server.py (CPython)")
+    page = _page()
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "tools", "debug_server.py"), encoding="utf-8") as f:
+        server = f.read()
+    for path in ("/debug/status", "/events"):
+        assert ("'.%s'" % path) in page and ('"%s"' % path) in server, path
+    for name in ("real_mode", "show_params"):
+        assert ("call('%s'" % name in page or "SIM.%s(" % name in page), name
+        assert callable(getattr(TwoWatchSim, name)), name
+    # a line a watch printed on its USB port: {src, rx, line}
+    assert '"line": data.decode' in server and "typeof msg.line === 'string') onPrinted(msg)" in page
+
+
+def test_page_waiting_and_unavailable_name_the_usb_commands():
+    """The waiting how-to is USB first (plug in, deploy with --port and --debug, the bridge with
+    --serial, the local page), then one paragraph on Wi-Fi; the unavailable note names the
+    bridge with --serial."""
+    if MPY:
+        raise Skip("reads web/sim/index.html (CPython)")
+    page = _page()
+    k = page.index('<div class="howto" id="howto">')
+    howto = page[k:page.index("</div>", k)]
+    steps = howto[howto.index("<ol>"):howto.index("</ol>")]
+    order = [steps.index(s) for s in (
+        "Plug both watches", "python3 tools/deploy.py --port P --debug A",
+        "python3 tools/deploy.py --port P --debug B", "python3 tools/debug_server.py --serial",
+        "http://localhost:8765/local.html")]
+    assert order == sorted(order), order
+    wifi = howto[howto.index("</ol>"):]
+    for s in ("Over Wi-Fi instead", "python3 tools/wifi_setup.py", "--debug A --wifi",
+              "--debug B --wifi"):
+        assert s in wifi, s
+    assert "secrets.py" not in howto and "--demo --serial" in wifi
+    k = page.index("\nfunction markReal(")
+    mark = page[k:page.index("\n}\n", k)]
+    assert "python3 tools/debug_server.py --serial</code>" in mark and "USB ports or Wi-Fi" in mark
+
+
+def test_page_real_mode_shows_usb_ports_and_printed_text():
+    """Text a watch printed on its USB port goes to the raw log, marked with the port, and is
+    not a record; "Sent from" names the USB port or the Wi-Fi address; a silent USB watch is
+    asked about its cable, a Wi-Fi one about the Wi-Fi."""
+    stubs = "let pageError = null, printedOn = null, rawDirty = false;\n"
+    out = _run_page_js(stubs, ("rawLog", "esc", "num", "real", "realSilent", "ago", "heardAgo",
+                               "chSplit", "viaWifi", "sentFrom", "realWhy", "pushLog", "logLine",
+                               "onPrinted", "howtoLead"), """
+const out = { lead0: howtoLead(printedOn) };
+onPrinted({ src: 'cu.usbserial-022152D1', rx: 1, line: 'Traceback (most recent call last):' });
+logLine('cu.usbserial-022152D1', { dev: 'A', ev: 's' });
+logLine('192.168.1.40', { dev: 'B', ev: 's' });
+out.log = rawLog.map((l) => l.slice(10));                     // without the time
+out.printedOn = printedOn;
+out.lead1 = howtoLead(printedOn);
+out.from = [sentFrom('cu.usbserial-022152D1'), sentFrom('192.168.1.40'), sentFrom('pts/3'),
+            sentFrom(null), sentFrom('<b>')];
+out.why = [realWhy(0, { heard: 0, src: 'cu.usbserial-1', clash: null }, 5000, true),
+           realWhy(1, { heard: 0, src: '10.0.0.7', clash: null }, 5000, true)];
+for (let k = 0; k < 60; k++) onPrinted({ src: 'ttyUSB0', line: 'n' + k });
+out.kept = [rawLog.length, rawLog[0].slice(10), rawLog[rawLog.length - 1].slice(10)];
+console.log(JSON.stringify(out));
+""")
+    assert out["log"] == ["cu.usbserial-022152D1  printed: Traceback (most recent call last):",
+                          'cu.usbserial-022152D1  {"dev":"A","ev":"s"}',
+                          '192.168.1.40  {"dev":"B","ev":"s"}'], out["log"]
+    assert out["printedOn"] == "cu.usbserial-022152D1"
+    assert out["lead0"].startswith("Nothing has arrived from a watch yet."), out["lead0"]
+    assert out["lead1"].startswith("USB port cu.usbserial-022152D1 sends text but no watch "
+                                   "records yet"), out["lead1"]
+    assert out["from"] == ["USB port cu.usbserial-022152D1", "Wi-Fi 192.168.1.40", "USB port pts/3",
+                           "–", "USB port &lt;b&gt;"], out["from"]
+    assert "USB cable plugged in" in out["why"][0] and "Wi-Fi" not in out["why"][0], out["why"]
+    assert "same Wi-Fi" in out["why"][1] and "USB" not in out["why"][1], out["why"]
+    assert out["kept"] == [50, "ttyUSB0  printed: n10", "ttyUSB0  printed: n59"], out["kept"]
+
+
+def _page_js(page, names):
+    """The page's top-level ``function NAME(`` blocks (one line, or to the first ``}`` at
+    column 0) and ``const NAME = ...;`` lines, in the order given."""
+    out = []
+    for name in names:
+        k = page.find("\nfunction %s(" % name)
+        if k >= 0:
+            line = page[k + 1:page.index("\n", k + 1)]
+            one = line.count("{") == line.count("}")
+            out.append(line if one else page[k + 1:page.index("\n}\n", k) + 2])
+            continue
+        k = page.find("\nconst %s = " % name)
+        assert k >= 0, name
+        out.append(page[k + 1:page.index("\n", k + 1)])
+    return "\n".join(out)
+
+
+def _page():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
+        return f.read()
+
+
+def _run_page_js(stubs, names, body):
+    """Run the page's own NAMES in node, after STUBS and the page's LOG_N/SILENT_MS/CLASH_MS
+    line, then BODY; return the JSON that BODY prints."""
+    if MPY:
+        raise Skip("runs the page's own functions in node (CPython)")
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        raise Skip("needs node")
+    script = stubs + _page_js(_page(), ("LOG_N",) + tuple(names)) + body
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def test_page_real_mode_shows_a_failed_start():
+    """A MicroPython or bundle failure while Real watches is shown: #boot (in the Simulator
+    card) is hidden, so the watch cards must not keep saying Live or 'next message'."""
+    stubs = (
+        "let pageError = null;\n"
+        "function setStatus() {}\n"
+        "const boot = { hidden: true, innerHTML: '', appendChild() {} };\n"
+        "const document = { createElement: () => ({ appendChild() {} }) };\n")
+    out = _run_page_js(stubs, ("fail", "num", "real", "realSilent", "ago", "heardAgo", "chSplit",
+                               "viaWifi", "realWhy", "waitText"), """
+const w = { heard: 0, clash: null, bad: null, rp: null, shown: false };
+const out = { before: [realWhy(0, w, 400, true), waitText(0, w)] };
+w.shown = true; out.drawn = waitText(0, w); w.shown = false;
+fail('Could not load the watch code bundle (py/bundle.json).', 'HTTP 404');
+out.err = pageError;
+out.after = [realWhy(0, w, 400, true), waitText(0, w)];
+w.shown = true; out.drawnAfter = waitText(1, w);
+out.waiting = [realWhy(1, { heard: null }, 400, true), waitText(1, { heard: null, shown: false })];
+out.silent = realWhy(0, w, 5000, true);
+console.log(JSON.stringify(out));
+""")
+    assert "\nlet pageError = null;\n" in _page()
+    assert out["before"] == ["Live: last heard just now.", "The screen comes with its next message"], out
+    assert out["drawn"] is None
+    assert out["err"] == "Could not load the watch code bundle (py/bundle.json)."
+    why, wait = out["after"]
+    assert not why.startswith("Live") and "could not run its screen code" in why, why
+    assert out["err"] in why and "Reload the page" in why, why
+    assert wait == "This page could not run its screen code", wait
+    assert out["drawnAfter"] == wait                     # a screen drawn before no longer follows
+    assert out["waiting"][0].startswith("Waiting for watch B") and out["waiting"][1] == wait, out
+    assert out["silent"].startswith("Last heard 5.0 s ago. Is the watch on"), out["silent"]
+
+
+def test_page_real_mode_names_a_channel_split():
+    """Both watches live on different channels (rp.ch, the radio's) cannot hear each other:
+    both cards say why. Both on Wi-Fi (a mesh or an extender can do it): the access point
+    message. One on USB (channel 6) and one on Wi-Fi: the mixed-link message, with both
+    channels. Equal channels, a null ch (the fake watches, older records) or a silent watch
+    say nothing about it."""
+    stubs = "let pageError = null;\n"
+    out = _run_page_js(stubs, ("num", "real", "realSilent", "ago", "heardAgo", "chSplit",
+                               "viaWifi", "realWhy"), """
+const why = () => [realWhy(0, real[0], 400, true), realWhy(1, real[1], 400, true)];
+Object.assign(real[0], { heard: 0, src: '192.168.1.4', rp: { ev: 'rp', ch: 1 } });
+Object.assign(real[1], { heard: 100, src: '192.168.1.5', rp: { ev: 'rp', ch: 6 } });
+const out = { split: why() };
+real[1].rp.ch = 1; out.same = why();
+real[1].rp.ch = null; out.fake = why();
+delete real[1].rp.ch; out.old = why();
+real[1].rp.ch = 6; out.splitAgain = why();
+real[0].src = '/dev/ttyUSB0'; real[0].rp.ch = 6; real[1].rp.ch = 11; out.mixed = why();
+real[0].rp.ch = 11; out.mixedSame = why();
+real[0].rp.ch = 1; real[0].src = '192.168.1.4'; real[1].rp.ch = 6;
+real[0].heard = -5000; out.silent = why();
+real[0].heard = 0; real[1].rp = null; out.noRp = why();
+console.log(JSON.stringify(out));
+""")
+    msg = ("The two watches joined different parts of your Wi-Fi (different channels), so they "
+           "cannot hear each other. Use a network with one access point.")
+    assert out["split"] == [msg, msg] and out["splitAgain"] == [msg, msg], out
+    mixed = ("Watch A talks on channel 6 (USB) and watch B on your Wi-Fi's channel 11, so they "
+             "cannot hear each other. Load both watches with the same link (both on USB, or "
+             "both with --wifi).")
+    assert out["mixed"] == [mixed, mixed], out["mixed"]
+    assert [w.startswith("Live") for w in out["mixedSame"]] == [True, True], out["mixedSame"]
+    for k in ("same", "fake", "old", "noRp"):
+        assert [w.startswith("Live") for w in out[k]] == [True, True], (k, out[k])
+    assert out["silent"][0].startswith("Last heard 5.4 s ago. Is the watch on"), out["silent"]
+    assert out["silent"][1].startswith("Live"), out["silent"]

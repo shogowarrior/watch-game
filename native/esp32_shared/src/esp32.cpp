@@ -93,7 +93,7 @@ void backlight(bool on) {
     ledc_channel_config(&c);
     ready = true;
   }
-  ledc_set_duty(MODE, CH, on ? (uint32_t)(T::BACKLIGHT_NORMAL * 8191 + 0.5f) : 0);
+  ledc_set_duty(MODE, CH, on ? (uint32_t)(T::BACKLIGHT_NORMAL * 8191 + 0.5) : 0);
   ledc_update_duty(MODE, CH);
 }
 

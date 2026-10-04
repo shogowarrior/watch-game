@@ -8,6 +8,11 @@ Outputs
   dist/sim/local.html      same page wrapped in a full document for local preview
   dist/sim/py/bundle.json  {"mpy": version, "files": {path: source}} of finder/, ui/, sim/
   dist/sim/mpy/            micropython.mjs + micropython.wasm from tools/mpy/node_modules
+
+Both are the same page. Its "Real watches" mode (docs/design/debug-mode.md) turns on at
+run time only when ./debug/status answers, i.e. when tools/debug_server.py serves the page
+(open http://localhost:8765/local.html); as an artifact or from a plain http.server the page
+shows Real as unavailable, with the command to run.
 """
 
 import json

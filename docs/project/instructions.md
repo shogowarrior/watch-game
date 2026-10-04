@@ -19,7 +19,7 @@
 - If /verify or /code-review cannot be started from the thread, ask me to run it and never claim it ran.
 
 **Hardware and secrets**
-- Never open, print or commit `secrets.py` (Wi-Fi name and password). The game joins Wi-Fi only in debug mode.
+- Never open, print or commit the Wi-Fi file (`~/.config/watch-game/wifi.py`, or an old `secrets.py`: the Wi-Fi name and password). The game joins Wi-Fi only in debug mode with `--wifi`.
 
 **Proving things**
 - Prove every check works by planting a failure first; a pass on a healthy tree proves nothing.

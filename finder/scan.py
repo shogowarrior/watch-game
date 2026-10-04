@@ -27,6 +27,7 @@ from finder import tuning as T
 from finder.compat import TickRing, const, ticks_diff
 from finder.estimators.base import ACT_WALK, ACT_RUN
 from finder.haptic_patterns import stronger
+from finder.motion import FACE_OFF_DEG
 from finder.session import LiveMirror
 
 DURATION_MS = T.SCAN_DURATION_MS
@@ -52,7 +53,7 @@ TICK_EVERY_DEG = T.SCAN_TICK_DEG
 BLINK_MS = 4 * T.SCAN_BLINK_MS      # best bin blinks twice (SCAN_BLINK_MS on/off)
 MORPH_MS = T.SCAN_MORPH_MS
 # spec-silent internals
-FLAT_OFF_DEG = 30.0       # hysteresis (as finder.motion face_up)
+FLAT_OFF_DEG = FACE_OFF_DEG   # hysteresis: the one finder.motion face_up uses
 MAX_DT_MS = const(1000)   # a stalled loop never jumps the wedge further
 MIN_FIT_N = const(12)
 CAP = DURATION_MS * T.BEACON_HZ_SCAN // 500 + 160   # 2 sources at the scan rate + margin (640)

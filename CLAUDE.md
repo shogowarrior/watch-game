@@ -23,8 +23,14 @@ decisions to ask the owner about before starting and the next steps in order.
   (`python3 tools/render_snapshots.py`) and the Design canvas mockups
   (linked from `web/sim/index.html`) so they still
   match the spec. Rebuild the web sim (`python3 tools/build_sim.py`) if
-  `finder/`, `ui/` or `sim/` changed.
+  `finder/`, `ui/`, `sim/` or `web/sim/` changed.
+- The `web-sim` preview (`.claude/launch.json`) runs `tools/debug_server.py
+  --serial`, the debug-mode bridge, which serves `dist/sim/` (build it first),
+  listens for watches on UDP 47268 and holds any USB serial port it finds
+  (stop it before `deploy.py` or `mpremote`). Stop any server you start before
+  you finish.
 - Never flash, erase or deploy to a watch, and never download firmware or touch
-  `firmware/`, unless the user asks in chat. Never read out or commit the
-  contents of `secrets.py`.
+  `firmware/`, unless the user asks in chat. Never open, read out or commit the
+  saved Wi-Fi file (`~/.config/watch-game/wifi.py`, `$WATCH_GAME_WIFI`) or a
+  `secrets.py`; the owner enters the Wi-Fi with `python3 tools/wifi_setup.py`.
 - Don't run git commands that modify the index or history unless the user asks.
