@@ -349,6 +349,9 @@ def open_port(path):
     except OSError:
         os.close(fd)
         raise
+    except termios.error as e:    # not an OSError: the port hung up while being set up (EIO)
+        os.close(fd)
+        raise OSError(*e.args) from None
     return fd
 
 

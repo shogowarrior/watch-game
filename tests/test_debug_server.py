@@ -613,6 +613,34 @@ def test_open_port_is_raw_exclusive_and_quiet():
         assert ds.port_reason(e) == "not found (unplugged?)", e
 
 
+def test_open_port_shuts_out_programs_that_take_no_flock():
+    """TIOCEXCL: screen, cat or an IDE serial monitor get "busy" too."""
+    ds = _serial_ds()
+    import errno
+    import fcntl
+    import struct
+    import sys
+    import termios
+    root = os.geteuid() == 0                     # root opens a TIOCEXCL port anyway
+    if root and not sys.platform.startswith("linux"):
+        raise Skip("TIOCEXCL: run as a normal user on macOS")
+    m, path = _pty()
+    fd = ds.open_port(path)
+    try:
+        if root:                                 # so ask Linux
+            got = fcntl.ioctl(fd, getattr(termios, "TIOCGEXCL", 0x80045440), b"\0" * 4)
+            assert struct.unpack("i", got)[0] == 1, "not in TIOCEXCL mode"
+        else:
+            try:
+                os.close(os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK))
+                assert False, "opened by a program that takes no flock"
+            except OSError as e:
+                assert e.errno == errno.EBUSY, e
+    finally:
+        os.close(fd)
+        os.close(m)
+
+
 def test_serial_reader_on_a_pty():
     """Records, text, CRLF, a record split across reads, an over-long line, then
     the port going away: closed, the reason in the status, tried again."""
@@ -697,6 +725,40 @@ def test_serial_port_comes_back():
             for fd in (m, m2):
                 if fd is not None:
                     os.close(fd)
+
+
+def test_port_that_hangs_up_while_opening_is_tried_again():
+    """A watch unplugged while its port is set up (termios.error EIO, not an
+    OSError): the port is closed, the reason shown, and opened again."""
+    ds = _serial_ds()
+    import errno
+    import fcntl
+    import termios
+    m, path = _pty()
+    port = path[len("/dev/"):]
+    b = ds.Bridge(47268)
+    ports = ds.SerialPorts(b, [path])
+    set_raw, errs = ds.set_raw, []               # the status err at each set_raw
+
+    def hangs_up_once(fd):
+        errs.append(b.status()["serial"][port]["err"])
+        if len(errs) == 1:
+            fcntl.ioctl(fd, termios.TIOCNXCL)    # as a USB tty's last close does (a pty's does not)
+            raise termios.error(errno.EIO, "Input/output error")
+        set_raw(fd)
+    ds.set_raw = hangs_up_once
+    try:
+        with _Fast(ds):
+            ports.start()
+            _wait(lambda: b.status()["serial"].get(port, {}).get("open"))
+            os.write(m, b"\n" + _framed(REC_A))  # read: the first fd and its flock were closed
+            _wait(lambda: b.status()["packets"] == 1)
+        assert errs == [None, "Input/output error"], errs
+    finally:
+        ds.set_raw = set_raw
+        b.close()
+        ports.join(T)
+        os.close(m)
 
 
 def test_auto_detect_finds_ports_plugged_in_later():
