@@ -9,14 +9,14 @@ is untouched.
 
 | Path | What |
 |---|---|
-| `core/` | Portable C++17 with no hardware calls. The game (`finder/`, one `hm::<module>` per Python module, `hm::game::Game` on top, checked call for call below), the renderer (`ui/`: `hm::ui::Renderer` draws any strip of a frame; every snapshot fixture's frame matches `tests/snapshot_crc.json`), the ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h`, `field_tables.h` and `ui_tables.h` are generated. |
+| `core/` | Portable C++17 with no hardware calls. The game (`finder/`, one `hm::<module>` per Python module, `hm::game::Game` on top, checked call for call below), the renderer (`ui/`: `hm::ui::Renderer` draws any strip of a frame; every snapshot fixture's frame matches `tests/snapshot_crc.json`), the ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), the drivers the game loop drives (the PMU, panel, IMU and touch of `hm/platform.h`, checked against `hal/`'s bus traffic below), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h`, `field_tables.h` and `ui_tables.h` are generated. |
 | `esp32_shared/` | ESP32 clock, serial log, backlight PWM, the motion-sensor task on core 0, the spi_master LCD bus, the ESP-NOW radio (IDF 4.4 and 5), the motor and the interrupt lines, plus `esp32_app.h`: those as the game loop's parts (`hm/platform.h`). Plain ESP-IDF calls, so both builds share it. |
 | `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), one env per graphics library (LovyanGFX, TFT_eSPI, Arduino_GFX, LVGL): see `arduino/README.md`. |
 | `idf/` | PlatformIO: ESP-IDF 5.5, one environment per way of driving the panel: the `esp_lcd` SPI panel IO with DMA (`bench-esplcd`, which also checks a faster BMA423 I2C clock) and SPI2's registers with DMA (`bench-regdma`). `components/hm_idf/` holds the I2C0 and SPI buses they share; its `portable/` (the I2C0 check) runs in the host tests. |
 | `idf/lvgl/` | PlatformIO: LVGL 9.5 through esp_lvgl_port 2.9 on the same `esp_lcd` bus (`bench-lvgl`). The field is an LVGL image a custom decoder fills from the ring map, so its pixels are the other builds' ones; the HOT chips are LVGL labels; and a third scene has LVGL draw rings itself as arcs. |
 | `micropython/` | `hmlcd`, a C user module for a custom MicroPython 1.29 build: the screen push on core 0 from internal DMA buffers, from the shared ST7789 code and `esp32_shared`'s spi_master bus. |
-| `test/` | Host tests (g++; the code under test with address and UB sanitizers) on fake hardware, plus the golden palettes and frames. `run.py` also builds the ports' portable code and tests (`idf/test/`), and replays the Python game's traces through the game port (`trace.h`, `test_port_*.cpp`, below). |
-| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU), `xcheck.py` (the core, and esp32_shared's plain headers, with the watch's compilers), `bench_report.py` (tables from bench logs), `golden/` (game vectors from `finder/`), `scenarios/` (fixed inputs the trace tests record), `trace_game.py` (records the Python game's calls for the trace tests). |
+| `test/` | Host tests (g++; the code under test with address and UB sanitizers) on fake hardware, plus the golden palettes and frames. `run.py` also builds the ports' portable code and tests (`idf/test/`), and replays the Python game's traces through the game port (`trace.h`, `test_port_*.cpp`) and the `hal/` drivers' bus traffic through the core drivers (`hal_replay.h`, `test_hal_*.cpp`), below. |
+| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU), `xcheck.py` (the core, and esp32_shared's plain headers, with the watch's compilers), `bench_report.py` (tables from bench logs), `golden/` (game vectors from `finder/`), `scenarios/` (fixed inputs the trace tests record), `trace_game.py` (records the Python game's calls for the trace tests), `trace_hal.py` (records the `hal/` drivers' bus traffic for the driver tests). |
 
 Both builds use pins and settings from `hal/pins.py`: SPI on HSPI with SCK 18,
 MOSI 19, CS 5, DC 27 and no MISO (GPIO12 is the backlight), MADCTL 0xC0 with
@@ -68,6 +68,39 @@ fixed inputs that reach further as `tools/scenarios/<name>.py` (a `lines()`
 generator, run as `"scenario:<name>"`). Modules checked this way have no golden
 file; `tools/golden/` keeps those still checked line by line (the estimator
 base's helpers, haptic patterns, render params, the beacon).
+
+### The drivers: bus traffic replayed
+
+The parts the game loop drives (`core/include/hm/platform.h`) have core
+drivers over the buses of `hm/hal.h`, ports of the `hal/` drivers as
+`hal/board.py` makes them: `hm::Axp202Pmu` (`axp202_pmu.h`: the side key, the
+battery, USB, power-off; every write keeps DCDC3 and nothing switches LDO2
+off), `hm::St7789Display` (`st7789_display.h`, on `hm::St7789`: strips that
+continue a window, sleep and wake with the 120 ms SLPIN rule, the GPIO12
+backlight at hal's duty rounding, LDO2 switched on through the PMU),
+`hm::Bma423Imu` (`bma423_imu.h`: hal's init, the FIFO in milli-g through
+`hm::Bma423`, rate changes; no feature engine) and `hm::Ft6336` (`ft6336.h`).
+A shell brings them up in `hal/board.py`'s order, as `test/test_hal_board.cpp`
+does: `Axp202Pmu(i2c0, &irq_line).begin()`, `St7789Display(lcd, clock,
+backlight_pwm, &pmu).init(strip, rows)`, `brightness(DEFAULT_BRIGHTNESS)`,
+`Bma423Imu(i2c0, clock, BMA423_Z_SIGN).init()`, `Ft6336(i2c1).begin()`.
+
+`run.py` also runs `tools/trace_hal.py`, which drives each `hal/` driver (and
+`Board.init`) on `tests/fakes` through scripted calls (NACKs mid-sequence,
+side-key and USB events, the battery ladder, touch points and rotations, FIFO
+fills, rate changes, sleep and quick wakes, a clock wrap) and records, per
+call, the result, the state and everything the driver did in order: I2C
+transactions with their bytes, panel commands decoded from CS, DC and the SPI
+bytes, pixel CRCs, backlight duty, IRQ line reads, sleeps and waits.
+`test/test_hal_*.cpp` replay that on the C++ drivers over fakes that answer
+from the recording (`test/hal_replay.h`), so a driver must make the same
+requests in the same order and get the same results and state; the first
+difference prints with its trace line and call. Three allowances, all named
+in `hal_replay.h`: a RAMWRC right after pixels continues them (the Python
+keeps CS low instead), the BMA423's FIFO_DATA may be read in pieces
+(`hm::Bma423` reads 120 bytes at a time, Arduino Wire's buffer), and the C++
+does without the BMA423's I2C scan and its feature engine's INTERNAL_STATUS
+read. `hal/*.py` count in `test/traced.txt`'s hash like the game's Python.
 
 ## Build
 
