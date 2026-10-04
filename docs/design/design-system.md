@@ -24,23 +24,23 @@ The look borrows the feel of an ancient-tech proximity sensor: a green glow and 
 
 ```
 ring_map  GS8 index map   idx = floor(hypot(x-119.5, y-119.5))  -> 0..168
-          (top half only, 28.8 KB; the bottom strips mirror it row by row)
+          (the viper blit reads one quadrant, 14.4 KB, mirrored both ways)
 palette   RGB565 FrameBuffer 256x1  rebuilt every frame (entries 0..169; the map uses 0..168)
-strip     RGB565 FrameBuffer 240x24 (11,520 B), reused for all 10 strips
+frame     RGB565 FrameBuffer 240x240 (115,200 B), drawn whole, sent as 4 bands of 240x60
 
 per frame:
   palette[i] = LUT[ramp][ round(v(i,t) / 7 * 63) ]      # radial function -> colour
-  for each of the 10 strips:
-    strip.blit(ring_map rows, 0, 0, -1, palette)         # background, C speed
-    draw the overlays that cross the strip (poly / fill_rect / ellipse / glyph blits)
-    display.push_strip(y0, 24, strip)
+  for each of the 4 bands:
+    band.blit(ring_map rows, 0, 0, -1, palette)          # background, C (viper) speed
+  draw every overlay once over the frame (poly / fill_rect / ellipse / glyph blits)
+  for each of the 4 bands: display.push_strip(y0, 60, band)   # one window, top to bottom
 ```
 
 - **Field value**, in ramp units 0–7: `v(i,t) = clamp(0,7, vignette(i) · (floor + glow_amp·e^(-(i/glow_r)²) + pulse_amp·Σ fadein(r_k)·profile(i − r_k(t))))`. The full form, with the core dot, the halo outside an open iris, ghost rings and temporal anti-aliasing, is in ui-spec §4.
 - **Rings:** a new ring spawns every `period_ms` at the iris edge (r = 0 when no iris is open) and travels outward at `speed_px_s` (a negative speed means inward "listening" rings that spawn at r = 168 and end at the iris edge). The profile is asymmetric: a sharp leading edge (`lead_px`) and a soft trailing tail (`trail_px`), both smoothstepped. Rings fade in over their first 12 px so they don't pop into existence.
 - **Vignette:** 1.0 out to r = 88, falling to 0.4 at r = 120 and 0.15 in the corners (r = 168). This makes the square screen read as a round sensor dish and keeps the corner text zones dim.
 - **Byte order:** `framebuf` stores RGB565 little-endian, but the ST7789 expects big-endian bytes. Put the `rgb565_swapped` values from `tokens.json` into the palette (`finder/tuning.py` carries them pre-swapped, and `ui/__init__.py` takes them from there).
-- **Memory:** a full ring map would take 57,600 B and a full RGB565 frame 115,200 B. The watch runs stock MicroPython v1.29.0 `ESP32_GENERIC-SPIRAM` (`tools/flash.sh`), so RAM is not the limit, but the renderer still draws 10 strips of 240×24 to keep the heap small and GC pauses short.
+- **Memory:** a full ring map would take 57,600 B and a full RGB565 frame 115,200 B. The watch runs stock MicroPython v1.29.0 `ESP32_GENERIC-SPIRAM` (`tools/flash.sh`), so RAM is not the limit: the renderer draws the whole frame in one 115,200 B buffer, allocated once (a collect costs the same whatever is live), so each overlay is drawn once and the panel gets the frame in one ~40 ms push.
 - **Frame budget:** stock firmware caps SPI at 26.67 MHz, so sending a full frame takes about 35 ms. The target is 20 fps; frames are locked to an even grid at the fastest of 20, 10, 8, 7, 6 and 5 fps the watch holds (10 fps in saver; ui-spec §4 rule 6). Keep per-frame palette maths to about 170 LUT lookups and precompute everything else; the field works in Q8 integers, so a frame allocates nothing.
 
 ---

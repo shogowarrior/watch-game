@@ -30,8 +30,8 @@ You draw into RGB565 `framebuf` strips (usually a GS8 buffer blitted through a
 palette), then push them with `push_strip(y0, h, buf)` (a full-width strip)
 or `push_frame(fb)` (115,200 B sent as strip-sized writes in one CS-low burst;
 the slice list is cached, so it allocates nothing). A strip that starts where
-the last one ended continues its window (CS stays low, no new command), so 10
-strips top to bottom cost what `push_frame` does (44.1 ms on the watch, against
+the last one ended continues its window (CS stays low, no new command), so
+strips top to bottom (the renderer sends 4 bands of 240x60) cost what `push_frame` does (44.1 ms on the watch, against
 52.4 ms with a window per strip and 37.3 ms as one write; the wire alone takes
 34.6 ms at 26.67 MHz). Every write is copied from the PSRAM heap into an
 internal DMA buffer by ESP-IDF, so a write costs about 0.7 ms on top of the

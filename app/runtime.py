@@ -19,7 +19,7 @@ One ``step(now)`` does, in order:
           touch stage, so a knock's spike is known when its touch's gesture
           arrives (screen-to-screen knocks touch the panel, ui-spec §8)
   touch   FT6336 -> GestureRecognizer (multi-touch ignored, §8). Also sampled
-          after a strip once TOUCH_GAP_MS (15) have passed, so a 60 ms tap
+          between a frame's bands once TOUCH_GAP_MS (15) have passed, so a 60 ms tap
           measures right while a frame renders; what those samples find
           waits for this stage (the game changes only between frames):
           ``game.on_gesture``, and ``game.on_touch_down`` when a finger lands
@@ -37,11 +37,13 @@ One ``step(now)`` does, in order:
   render  on the frame lock (app/pacer.py): the fastest of 20, 10, 8, 7, 6, 5
           fps at or under ``params.fps_cap`` (20, saver 10) that the loop's
           measured cost fits; each frame is drawn at its slot time, so motion
-          steps evenly (ui-spec §4 rule 6). Strips -> ``display.push_strip``.
+          steps evenly (ui-spec §4 rule 6). Bands -> ``display.push_strip``.
           With the screen off the renderer still runs state-only
           (``display=None``) so heartbeats keep their time grid (ui-spec §7).
           A frame takes ~80 ms on the watch, so the motor is serviced after
-          every strip (~9 ms) and the frame's haptic events start at the
+          every band the renderer blits or pushes and after its overlays
+          (~5-15 ms apart) and the frame's
+          haptic events start at the
           post-render time (pulses keep their 60 ms ERM floor). The backlight
           follows ``params.backlight`` after each frame, so a woken panel is
           lit only over a fresh frame (§8: no stale frame)
@@ -102,7 +104,7 @@ PARTS = ("pmu", "display", "imu", "touch", "haptics", "radio")
 GAME_ID = 1
 TICK_MS = T.LOGIC_MS       # game logic rate (10 Hz)
 INPUT_MS = 20              # touch/button/imu poll when nothing else is due
-TOUCH_GAP_MS = 15          # touch samples between strips at least this far apart
+TOUCH_GAP_MS = 15          # touch samples between bands at least this far apart
 HAPTIC_SLICE_MS = 1        # ``idle`` motor tick while a pattern plays
 BATTERY_MS = 10000
 BATT_LOW_READS = 3         # falling readings <= 20 % in a row before the game sees one
@@ -133,9 +135,10 @@ _NO_EVENTS = ()
 
 
 class _HapticDisplay:
-    """Display proxy for the renderer: services the motor after each strip,
-    so pulse edges stay within one strip of schedule mid-frame, and samples
-    touch after a strip once TOUCH_GAP_MS have passed since the last sample."""
+    """Display proxy for the renderer: ``service`` runs after each band the
+    renderer blits, after its overlays and after each band it pushes (~5-15
+    ms apart on the watch), so pulse edges stay within one band of schedule mid-frame, and
+    samples touch there once TOUCH_GAP_MS have passed since the last sample."""
 
     def __init__(self, rt, display):
         self.rt = rt
@@ -143,6 +146,9 @@ class _HapticDisplay:
 
     def push_strip(self, y0, h, buf):
         self.d.push_strip(y0, h, buf)
+        self.service()
+
+    def service(self):
         rt = self.rt
         t = rt.clock()
         rt._stage_haptic(t)

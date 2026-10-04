@@ -649,7 +649,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 | Modal on every glance at low battery (PINPOINT) | 10 % interstitial shown once |
 | Glyph clashes: pause-like "steady", mirrored chevrons (PINPOINT) | No steady glyph; colder chevrons are hollow, blue and move down |
 | Weak simulator radio model (PINPOINT, BLIP HUNT) | The simulator uses `sim/radio.py` and shows a truth overlay |
-| Frame budget assumes PSRAM or 80 MHz (BLIP HUNT) | 20 fps target, locked to the fastest rate the watch holds (20, 10, 8, 7, 6, 5; §4 rule 6); strip rendering (10 × 240×24) to bound heap and GC pauses, even on the SPIRAM build; the ring map is palette-blitted into each strip from one quadrant, mirrored, top to bottom, and each strip is sent before the next is drawn (a send thread measured no faster on the watch: drawing holds the GIL it needs) |
+| Frame budget assumes PSRAM or 80 MHz (BLIP HUNT) | 20 fps target, locked to the fastest rate the watch holds (20, 10, 8, 7, 6, 5; §4 rule 6); one preallocated 240×240 frame buffer, so a frame allocates nothing; the ring map is palette-blitted into it a 240×60 band at a time from one quadrant, mirrored, the overlays are drawn once over the whole frame (drawing them per strip paid each glyph's full-height scan in every strip it touched), and the four bands are sent top to bottom in one panel window after the frame is drawn (a send thread measured no faster on the watch: drawing holds the GIL it needs) |
 | Trend thresholds below correlated noise (BLIP HUNT) | Gated by `trend_conf`, ≥ 3 dB over 8 s, 2 evaluations and a 5 s flip limit. The < 5 % false-verdict target on tangential walks is not met yet (§5.5) |
 | Scan assumes a perfect turn; partner not asked to stop (BLIP HUNT) | 20° pacing floor, turn error, `HOLD` pattern + peer_motion check |
 | Motor trips the shake guard (BLIP HUNT) | 150 ms blanking |
@@ -720,7 +720,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 - Don't use zone words (WARM, HOT) on screen. Thermal words are trend-only, and trend is a glyph.
 - Don't flash the whole screen, strobe the core, or run crests narrower than their per-frame travel.
 - Don't let RSSI alone declare FOUND, and don't use an absolute dBm gate for anything.
-- Don't draw directly to the panel (`fill` then redraw). Compose every strip off-screen and push it whole.
+- Don't draw directly to the panel (`fill` then redraw). Compose the whole frame off-screen and push it whole.
 - Don't make a haptic pulse under 60 ms, and don't invent new patterns beyond the 9.
 - Don't copy Nintendo assets: no eye emblem, no Sheikah, Hylian or Zonai script, no fonts, no UI chrome, no Nintendo names on screen.
 - Don't present the game as a child-safety or person tracker. RSSI cannot support that claim (R-13).

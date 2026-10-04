@@ -16,6 +16,7 @@ from array import array
 from tests import fakes
 from finder.tuning import WRIST_DOWN_MS
 
+BANDS = 4                  # pushes per frame (ui.renderer.NB)
 MAC_A = b"\x24\x0a\xc4\x10\x00\x0a"
 MAC_B = b"\x24\x0a\xc4\x10\x00\x0b"
 RUN_MS = 60000
@@ -201,7 +202,7 @@ class StubRenderer:
     """``ui.renderer.Renderer.frame`` contract without framebuf (CPython)."""
 
     def __init__(self):
-        self.buf = bytearray(240 * 24 * 2)
+        self.buf = bytearray(240 * 60 * 2)
         self._hb_t = None
 
     def frame(self, p, display=None, now=0):
@@ -211,9 +212,13 @@ class StubRenderer:
             if self._hb_t is None or now - self._hb_t >= per:
                 self._hb_t = now
                 hb = p.heartbeat
-        if display is not None:
-            for s in range(10):
-                display.push_strip(s * 24, 24, self.buf)
+        if display is not None:             # as ui.renderer: 4 band blits, overlays, 4 pushes
+            svc = getattr(display, "service", None)
+            for k in range(5):
+                if svc is not None:
+                    svc()
+            for k in range(4):
+                display.push_strip(k * 60, 60, self.buf)
         return [hb] if hb else ()           # heartbeats only: params.haptic is the runtime's
 
 
@@ -298,7 +303,7 @@ def test_two_watches_one_minute():
         assert rt.game.screen_on and not rt.display.asleep
         n = rt.frames
         assert 0.95 * 20 * RUN_MS / 1000 <= n <= 20 * RUN_MS / 1000 + 2, n
-        assert rt.display.pushes == 10 * n
+        assert rt.display.pushes == BANDS * n
         assert rt.ticks >= 0.98 * RUN_MS / 100, rt.ticks
         assert rt.display.level is not None and rt.display.level > 0
         assert RUN_MS // GC_PERIOD_MS - 1 <= rt.gc_count[0] <= RUN_MS // GC_PERIOD_MS, rt.gc_count
@@ -371,13 +376,13 @@ def test_missing_parts_and_screen_off():
                  gc_collect=lambda: None)
     rt.run(max_ms=1000)
     assert "touch" in rt.errors and "radio" in rt.errors and "pmu" in rt.errors
-    assert rt.frames >= 18 and d.pushes == 10 * rt.frames
+    assert rt.frames >= 18 and d.pushes == BANDS * rt.frames
     # face down (z = -1 g) for > WRIST_DOWN_MS: display sleeps, frames stop
     imu.spikes.append((clock.now, 100000, -2000))
     n0 = d.pushes
     rt.run(max_ms=WRIST_DOWN_MS + 2000)
     assert d.asleep and not rt.screen_is_on and rt.bl_level == 0.0
-    assert d.pushes < n0 + 10 * 20 * (WRIST_DOWN_MS // 1000 + 1)
+    assert d.pushes < n0 + BANDS * 20 * (WRIST_DOWN_MS // 1000 + 1)
     n1 = d.pushes
     rt.run(max_ms=1000)
     assert d.pushes == n1
@@ -706,17 +711,20 @@ def test_real_board_drivers_short_run():
 
 # ---- review fixes -------------------------------------------------------------------
 class SlowDisplay(FakeDisplay):
-    """Each strip costs ``strip_ms`` of the watch's clock (a 10-strip frame
-    ~40 ms, as on the watch; hal/README.md)."""
+    """Each 24 rows pushed cost ``strip_ms`` of the watch's clock (a frame
+    ~40 ms); ``push_ms`` is the longest push (a band)."""
 
     def __init__(self, clock, strip_ms=4):
         FakeDisplay.__init__(self)
         self.clock = clock
         self.strip_ms = strip_ms
+        self.push_ms = 0
 
     def push_strip(self, y0, h, buf):
         self.pushes += 1
-        self.clock.now += self.strip_ms
+        ms = self.strip_ms * h // 24
+        self.push_ms = max(self.push_ms, ms)
+        self.clock.now += ms
 
 
 class RecMotor:
@@ -748,7 +756,7 @@ def _pulses(log):
 
 def test_haptic_pulses_keep_floor_with_slow_frames():
     """Frames take 40 ms: renderer events start after the frame, the motor is
-    serviced between strips and while idle, so pulses keep MIN_PULSE_MS."""
+    serviced between bands and while idle, so pulses keep MIN_PULSE_MS."""
     fakes.install()
     from hal.radio import SimRadio
     from hal.axp202 import EV_SHORT
@@ -775,8 +783,9 @@ def test_haptic_pulses_keep_floor_with_slow_frames():
         w = rt.step(c.now)
         rt.idle(w if w > 0 else 1)         # own clock: the other watch is independent
         due[k] = c.now
-    strip = 4
     for rt, c in rts:
+        strip = rt.board.display.push_ms       # the longest push: a band
+        assert strip <= 10, strip
         assert rt.frames >= 0.95 * 20 * end / 1000, rt.frames
         p = _pulses(rt.motor.log)
         assert len(p) >= 6, rt.motor.log
@@ -790,11 +799,11 @@ def test_haptic_pulses_keep_floor_with_slow_frames():
 
 
 class JitterDisplay(SlowDisplay):
-    """Strips cost 3, 4 or 5 ms in turn (SPI and GC jitter)."""
+    """24 rows cost 3, 4 or 5 ms in turn (SPI and GC jitter)."""
 
     def push_strip(self, y0, h, buf):
         self.pushes += 1
-        self.clock.now += 3 + self.pushes % 3
+        self.clock.now += (3 + self.pushes % 3) * h // 24
 
 
 def test_scan_countdown_ticks_all_reach_the_motor():
@@ -1072,7 +1081,7 @@ def test_wake_lights_a_fresh_frame_and_keeps_motor_timing():
     assert drawn[0][0] == drawn[0][1], drawn[:2]     # no stale frame after the SLPOUT wait
     i = d.log.index("wake")
     lit = [k for k in range(i, len(d.log)) if d.log[k] not in ("wake", "push") and d.log[k] > 0]
-    assert lit and d.log[i + 1:lit[0]].count("push") >= 10, d.log[:20]
+    assert lit and d.log[i + 1:lit[0]].count("push") >= BANDS, d.log[:20]
     on_ms, off_ms = LOST[0][0], LOST[0][1]
     p = _pulses(m.log)
     assert len(p) == len(LOST), m.log
@@ -1166,8 +1175,8 @@ def _touch_downs(rt):
 
 def test_short_taps_count_while_frames_render():
     """ui-spec §8: a 60-400 ms touch is a TAP. A frame takes 40 ms, so touch
-    is also sampled between strips, TOUCH_GAP_MS apart: 70 ms taps at every
-    phase all count, and each touch-down is seen within a gap and a strip."""
+    is also sampled between bands, TOUCH_GAP_MS apart: 70 ms taps at every
+    phase all count, and each touch-down is seen within a gap and a band."""
     fakes.install()
     from hal.radio import SimRadio
     from app.telemetry import Telemetry
@@ -1186,15 +1195,16 @@ def test_short_taps_count_while_frames_render():
     _run(rt, clock, 26000)
     ev = [json.loads(s) for s in rt.tele.lines()]
     assert [e["g"] for e in ev if e["ev"] == "touch"] == ["TAP"] * 40, ev
-    late = rtm.TOUCH_GAP_MS + 4
+    late = rtm.TOUCH_GAP_MS + rt.board.display.push_ms     # a gap, then a band's push
+    assert late <= rtm.TOUCH_GAP_MS + 10, late
     assert len(downs) == 40 and all(0 <= d - t[0] <= late for d, t in zip(downs, taps)), downs
     gaps = [b - a for a, b in zip(reads, reads[1:])]
     assert min(gaps) >= 0 and max(gaps) <= late, (min(gaps), max(gaps))
-    assert len(reads) <= 26000 // 12, len(reads)   # not after every 2nd 4 ms strip
+    assert len(reads) <= 26000 // 12, len(reads)   # not after every band
 
 
 def test_knock_spike_after_a_mid_frame_touch_down():
-    """A touch-down sampled between strips, then the knock's spike: the spike
+    """A touch-down sampled between bands, then the knock's spike: the spike
     counts, and the imu stage runs before the touch stage, so the gesture
     finds it and waits for the partner (§8); with none it runs late."""
     from finder.tuning import KNOCK_WAIT_MS
@@ -1659,14 +1669,14 @@ def test_stage_sums_stay_small_ints():
 
 
 class CostDisplay(SlowDisplay):
-    """Strips cost ``costs[k % len]`` ms in turn (a frame ~70-90 ms)."""
+    """24 rows cost ``costs[k % len]`` ms in turn (a frame ~70-90 ms)."""
 
     def __init__(self, clock, costs=(7, 8, 9)):
         SlowDisplay.__init__(self, clock)
         self.costs = costs
 
     def push_strip(self, y0, h, buf):
-        self.clock.now += self.costs[self.pushes % len(self.costs)]
+        self.clock.now += self.costs[self.pushes % len(self.costs)] * h // 24
         self.pushes += 1
 
 
@@ -1717,7 +1727,7 @@ def test_fps_line_reports_lock_misses_and_jitter():
     v = dict(zip(w[0::2], w[1::2]))
     assert 9.0 <= float(v["fps"]) <= 10.5 and v["lock"] == "10" and v["miss"] == "0", v
     assert v["late"] == "0/0", v                    # the fake loop wakes on the slot
-    assert int(v["max"]) <= 103 and float(v["jit"]) < 3.0, v   # strips 7-9 ms
+    assert int(v["max"]) <= 106 and float(v["jit"]) < 5.0, v   # 24 rows 7-9 ms
     assert 70 <= int(v["cost"]) <= 90, v
     w0 = lines[0].split()
     assert w0[3] == "20" or w0[3] == "10", w0       # first window: the drop shows
