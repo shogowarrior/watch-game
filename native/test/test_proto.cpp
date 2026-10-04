@@ -7,7 +7,6 @@
 #include "hm/compat.h"
 #include "hm/proto.h"
 
-using hmt::flt;
 using hmt::none;
 using hmt::num;
 
@@ -16,11 +15,11 @@ TEST(test_proto_packs_and_reads_back_like_python) {
   for (const hmt::Tokens& t : hmt::golden("proto")) {
     if (t[0] == "pack") {
       hm::proto::Beacon b;
-      b.game_id = (uint8_t)num(t[1]);
-      b.seq = (uint16_t)num(t[2]);
-      b.rssi_last = none(t[3]) ? NAN : flt(t[3]);
-      b.rssi_filt = none(t[4]) ? NAN : flt(t[4]);
-      b.steps = (uint32_t)num(t[5]);
+      b.game_id = num(t[1]);
+      b.seq = num(t[2]);
+      b.rssi_last = none(t[3]) ? std::nullopt : std::optional<double>(strtod(t[3].c_str(), nullptr));
+      b.rssi_filt = none(t[4]) ? std::nullopt : std::optional<double>(strtod(t[4].c_str(), nullptr));
+      b.steps = num(t[5]);
       b.activity = num(t[6]);
       b.battery = num(t[7]);
       b.state = num(t[8]);
@@ -33,15 +32,15 @@ TEST(test_proto_packs_and_reads_back_like_python) {
       CHECK(t[15] == hex);
       hm::proto::Beacon r;
       r.unpack(buf);
-      const long want[] = {r.game_id, r.seq, (long)r.rssi_last, (long)r.rssi_filt, (long)r.steps, r.activity,
+      const long want[] = {r.game_id, r.seq, (long)*r.rssi_last, (long)*r.rssi_filt, r.steps, r.activity,
                            r.battery, r.state, r.flags, r.bump_ago_ms, r.sweeping(), r.taps(), r.walking(),
                            r.ready(), hm::proto::valid(buf, sizeof buf, r.game_id)};
       for (int i = 0; i < 15; i++) CHECK(num(t[17 + i]) == want[i]);
       CHECK(!hm::proto::valid(buf, sizeof buf, (r.game_id + 1) & 0xFF) && !hm::proto::valid(buf, 15));
       packs++;
     } else if (t[0] == "bump_ago") {
-      const bool has = !none(t[2]);
-      CHECK(hm::proto::bump_ago((hm::ticks_t)num(t[1]), has, has ? (hm::ticks_t)num(t[2]) : 0) == num(t[4]));
+      const hm::opt_ticks bump = none(t[2]) ? hm::opt_ticks() : hm::opt_ticks((hm::ticks_t)num(t[2]));
+      CHECK(hm::proto::bump_ago((hm::ticks_t)num(t[1]), bump) == num(t[4]));
       bumps++;
     } else if (t[0] == "steps_delta") {
       CHECK(hm::proto::steps_delta((uint16_t)num(t[1]), (uint16_t)num(t[2])) == num(t[4]));

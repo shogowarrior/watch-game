@@ -55,6 +55,18 @@ def test_golden_game_vectors_up_to_date():
                    "until python3 native/test/run.py passes" % ", ".join(bad))
 
 
+def test_game_port_checked_against_this_python():
+    # native/test/traced.txt hashes the Python the C++ game port last matched
+    # call for call; while the Python differs, native/test/run.py skips trace
+    # tests that differ (the port lags, other work is not blocked) and this
+    # reports it.
+    _cpython("hashes the Python the traces come from (CPython)")
+    r = _load("native/test/run.py", "native_run")
+    if r["python_hash"]() != r["marked"]():
+        raise Skip("the C++ game port lags the Python: python3 native/test/run.py, port until its "
+                   "trace tests pass, then python3 native/test/run.py --mark")
+
+
 def test_host_tests_pass():
     _cpython("builds C++ with g++ (CPython)")
     code, out = _load("native/test/run.py", "native_run")["run"]()

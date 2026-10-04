@@ -67,7 +67,7 @@ void Pinger::on_rx(const uint8_t* d, size_t len, int8_t r, hm::ticks_t t) {
   ping_.rssi_last = r;
   rssi.add(r);
   pong_.unpack(d);
-  if (pong_.rssi_last != hm::proto::RSSI_NONE) peer_rssi.add((int)pong_.rssi_last);
+  if (pong_.rssi_last && *pong_.rssi_last != hm::proto::RSSI_NONE) peer_rssi.add((int)*pong_.rssi_last);
 }
 
 bool Pinger::done(hm::ticks_t now) const {

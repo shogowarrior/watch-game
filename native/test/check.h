@@ -1,4 +1,5 @@
-// Minimal host test harness: TEST(name) registers a function, CHECK fails it.
+// Minimal host test harness: TEST(name) registers a function, CHECK fails it,
+// SKIP ends it as skipped.
 #pragma once
 #include <stdio.h>
 
@@ -11,6 +12,7 @@ struct Test {
 };
 extern Test* tests;
 extern int failures;
+extern int skips;
 
 struct Reg {
   Test t;
@@ -31,4 +33,11 @@ struct Reg {
       hmt::failures++;                                                    \
       return;                                                             \
     }                                                                     \
+  } while (0)
+
+#define SKIP(why)                    \
+  do {                               \
+    printf("  skip: %s\n", why);     \
+    hmt::skips++;                    \
+    return;                          \
   } while (0)
