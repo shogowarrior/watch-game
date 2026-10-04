@@ -32,8 +32,8 @@ def compilers():
 def units(tmp):
     """The core's sources, and one source per header that includes only it."""
     inc = os.path.join(ROOT, "native", "core", "include")
-    out = sorted(glob.glob(os.path.join(ROOT, "native", "core", "src", "*.cpp")))
-    for h in sorted(glob.glob(os.path.join(inc, "hm", "*.h"))):
+    out = sorted(glob.glob(os.path.join(ROOT, "native", "core", "src", "**", "*.cpp"), recursive=True))
+    for h in sorted(glob.glob(os.path.join(inc, "hm", "**", "*.h"), recursive=True)):
         rel = os.path.relpath(h, inc)
         src = os.path.join(tmp, rel.replace(os.sep, "_") + ".cpp")
         with open(src, "w") as f:

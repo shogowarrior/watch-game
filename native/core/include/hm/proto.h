@@ -26,7 +26,7 @@ constexpr uint8_t BATT_UNKNOWN = 255;
 constexpr uint8_t F_SWEEP = 0x01, F_TAPS = 0x0E, F_TAPS_SHIFT = 1, F_WALK = 0x10, F_READY = 0x20;
 
 // An RSSI-ish value as i8, rounded half to even like Python's round(); NAN is None.
-int8_t clamp_i8(float v);
+int8_t clamp_i8(double v);
 uint8_t clamp_u8(int32_t v);
 uint16_t clamp_u16(int32_t v);
 // ms since my last bump, or BUMP_NONE when there is none (has_bump false) or it is too old.
@@ -39,7 +39,7 @@ inline uint16_t seq_of(const uint8_t* buf) { return (uint16_t)(buf[4] | buf[5] <
 struct Beacon {
   uint8_t game_id = 0;
   uint16_t seq = 0;
-  float rssi_last = NAN, rssi_filt = NAN;   // NAN: none (sent as RSSI_NONE)
+  double rssi_last = NAN, rssi_filt = NAN;   // NAN: none (sent as RSSI_NONE)
   uint32_t steps = 0;
   int32_t activity = 0, battery = BATT_UNKNOWN, state = 0;
   uint8_t flags = 0;
