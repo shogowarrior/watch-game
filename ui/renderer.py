@@ -274,7 +274,7 @@ class Renderer:
             self._gv = gv
             self._gq = int(gv * 256)
         if scr == S_PAIRING:
-            if sub == "looking":
+            if sub == "looking" or sub == "howto":   # a how-to card keeps the looking field
                 pu = PU_LOOKING
             elif sub == "seen" or sub == "confirmed":
                 fl = SEEN_FL

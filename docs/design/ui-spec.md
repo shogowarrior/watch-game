@@ -114,17 +114,17 @@ RenderParams = namedtuple("RenderParams", (
     "pulse_period_ms", # int 400..4000; ring spawn period = haptic heartbeat base period
     "wavelength_px",   # float 0..140; == abs(speed_px_s) * pulse_period_ms / 1000 (±1 px)
     "glow_r_px",       # float 0..96; centre glow (or halo outside the iris) radius
-    "ring_live",       # bool: >= 1 packet in the last 1000 ms. False -> next outward ring is a grey ghost with no haptic
+    "ring_live",       # bool: >= 1 packet in the last 1000 ms. False -> next outward ring is a grey ghost with no haptic; always False in PAIRING looking/howto
     "burst",           # bool: spawn one extra bright ring this frame (zone closer, FOUND, relink)
     # --- centre glyph ---
     "glyph",           # "glow"|"seeker"|"chevrons"|"arrow"|"countdown"|"turn"|"check"|"runes"|"battery"|"bump"
     "arrow_deg",       # float 0..360 or None; clockwise from screen-up
     "cone_deg",        # float 12..60 or None; beam half-angle = sigma (clamped for drawing)
     "arrow_style",     # "solid_a"|"solid_b"|"outline"|None  (tiers from cone_deg)
-    "trend",           # int -1|0|+1 (+1 = warmer); in LINK_LOST the last trend (LAST chip mark)
+    "trend",           # int -1|0|+1 (+1 = warmer); in LINK_LOST the last trend (LAST chip mark); +1 on the PAIRING howto card 3
     "trend_strong",    # bool: draw 2 chevrons instead of 1
     "countdown",       # int|None: digit for the countdown glyph
-    "runes",           # (3 ints 0..7) | None; PAIRING only, set in seen/confirmed
+    "runes",           # (3 ints 0..7) | None; PAIRING only, set in seen/confirmed and on the howto card 1
     "bump_icons",      # int 0..5 | None: HOT bump view; bit 0 your watch lit, bit 1 the friend's lit, bit 2 the friend's grey (cannot count a bump)
     # --- text slots ---
     "dist_band",       # "<3"|"~5"|"~10"|"~20"|"~40"|"60+"|None
@@ -148,12 +148,14 @@ RenderParams = namedtuple("RenderParams", (
 
 | Field | Range and validity rules |
 |---|---|
-| `screen` / `sub` | PAIRING: `looking`, `seen`, `confirmed`, `calibrate`, `split`. SCANNING: `ready`, `sweep`, `result`. FAR–HOT: `None` or DIRECTION phases `reveal`, `turn`, `walk`. FOUND: `celebrate`, `result`. LINK_LOST: `None`. MENU: the visible index of the selected row as a string, plus `^`/`v` scroll marks (see MENU) |
+| `screen` / `sub` | PAIRING: `looking`, `howto` (a how-to card is open over `looking`), `seen`, `confirmed`, `calibrate`, `split`. SCANNING: `ready`, `sweep`, `result`. FAR–HOT: `None` or DIRECTION phases `reveal`, `turn`, `walk`. FOUND: `celebrate`, `result`. LINK_LOST: `None`. MENU: the visible index of the selected row as a string, plus `^`/`v` scroll marks (see MENU) |
 | `intensity` | `p(d)` smoothed (§5.1). In SCANNING and DIRECTION-TURN it is the *live mirror* value (§5.7) |
 | `speed_px_s` / `pulse_period_ms` / `wavelength_px` | From the zone table (§5.3). Only new rings take changed values |
 | `arrow_deg`, `cone_deg`, `arrow_style` | All three are None together. `arrow_deg` is never set while `cone_deg` > 60, while `screen` is SEARCHING, SCANNING, LINK_LOST, FOUND or PAIRING, or while `sub` is `ready`/`sweep` |
-| `trend` | Non-zero only in FAR/NEAR/WARM, only while own activity is walk or run, only while not `unreliable` (§5.5), and hidden for the update in which the zone clamp moves the band against it (§5.4). Always 0 in HOT. In LINK_LOST it is the last trend before the loss, drawn only as the LAST chip's mark (§6), and `trend_strong` stays False |
-| `runes` / `menu_rows` | `runes` only in PAIRING, and required with the `runes` glyph in `seen` / `confirmed`. `menu_rows` exactly when `screen` is MENU |
+| `trend` | Non-zero only in FAR/NEAR/WARM, only while own activity is walk or run, only while not `unreliable` (§5.5), and hidden for the update in which the zone clamp moves the band against it (§5.4). Always 0 in HOT. In LINK_LOST it is the last trend before the loss, drawn only as the LAST chip's mark (§6), and `trend_strong` stays False. On the PAIRING `howto` card 3 it is +1 (an example warmer chevron, no signal behind it) and `trend_strong` stays False |
+| `runes` / `menu_rows` | `runes` only in PAIRING, and required with the `runes` glyph in `seen` / `confirmed` and on the `howto` card 1 (an example row). `menu_rows` exactly when `screen` is MENU |
+| `glyph` (how-to) | `chevrons` only in FAR/NEAR/WARM and on the PAIRING `howto` card 3. A `howto` card's glyph is `runes`, `countdown`, `chevrons` or `bump` (card 4, `bump_icons` 0), and it always has a top chip and a word |
+| `ring_live` (PAIRING) | Always False in PAIRING `looking` and `howto`, whose rings are inward (`speed_px_s` ≤ 0). There is no partner yet, so nothing there may look like a signal |
 | `bump_icons` | Set exactly when `glyph` is `bump`. Only HOT uses `bump`, and always with `sub` None. An int 0..5: bit 0 (1) = your watch counted a spike in HOT in the last 1 s; bit 1 (2) = the friend's did (its reported spike, with `ST_TAP_HOT`); bit 2 (4) = the friend's watch cannot count a bump (grey). Bits 1 and 2 are never set together. `word` is never `BUMP!` while bit 2 is set |
 | `status` | `unreliable` implies `visible`: an unreliable signal pins the StatusStrip with warn-coloured link bars (§5.5) |
 | `sweep` | SCANNING `ready` / `sweep` / `result`. In SCANNING `result` (fix), slot 0 is θ, the angle the best bin morphs into (no wedge is drawn), and `active_bin` is the best bin while its blink is on. In the DIRECTION `turn` phase it carries the pacer wedge: (pacer_deg, 12×None, None, False). None everywhere else |
@@ -364,7 +366,8 @@ The field table in each screen uses: ramp | I | speed | period | λ | glow_r | n
 
 | Sub | Field | Centre (iris r 92, y 28–212) | Top slot | Bottom slot | Haptic |
 |---|---|---|---|---|---|
-| `looking` | green, I = 0.1, speed **−30** (inward), 3000 ms, λ 90, glow 30, pulse_amp 2.0 | 3 `line.subtle` dots r 5 at (64,120), (120,120), (176,120) | chip `START OTHER WATCH` | word `LOOKING` `text.secondary` | — |
+| `looking` | green, I = 0.1, speed **−30** (inward), 3000 ms, λ 90, glow 30, pulse_amp 2.0; `ring_live` false | 3 `line.subtle` dots r 5 at (64,120), (120,120), (176,120) | chip `START OTHER WATCH` | word `LOOKING` `text.secondary`. 5 s into each looking spell: toast `SWIPE: HOW TO PLAY` once, until this player has opened the cards or reached `calibrate` since power-on; never over another toast, under the MENU or `SAVER ON`, or with the screen off | — |
+| `howto` (a how-to card, below) | as `looking`: inward listening rings, `ring_live` false. A card never shows a signal | the card's glyph in its own iris (runes r 92, countdown r 64, chevrons r 44, bump r 64) | chip `HOW TO PLAY n/4` | the card's word | — (no haptic on a flip) |
 | `seen` | green, rings stop, floor 0.4; halo breathes glow_amp 1.5↔3.0 over 2400 ms `in_out_sine` | 3 runes (48 px boxes at x 40–88, 96–144, 152–200, y 96–144), drawn in one every 150 ms, `text.primary`, `stroke.l` | chip `SAME RUNES?` | word `BUMP = YES` (a tap or short press still confirms) | `DOUBLE` when the partner is seen |
 | `confirmed` | as `seen` | runes turn `prox.7` | chip `WAITING FOR FRIEND` | word `YOU'RE IN` | — |
 | `calibrate` (3 s) | green; the fill disc levels r 64→168 go to 4 as R(t) = 64 + 104·t/3 s, with a 3 px edge at level 6 | iris r 64, countdown `3 2 1` (`type.display`, x 108–132, y 96–144) | chip `STAND 1 STEP APART` | word `HOLD STILL` | `TICK` each second; `CLOSER` when done |
@@ -376,6 +379,14 @@ The field table in each screen uses: ramp | I | speed | period | λ | glow_r | n
 - **Calibration gate:** if the RSSI sd over 1 s is > 4 dB, the fill pauses and the top chip reads `HOLD STILL`. After 10 s the watch uses the nominal p₁ₘ and moves on (toast `CAL SKIPPED`).
 - **Round start.** Every split start raises the info toast `NEW ROUND` (2.5 s): the first after calibration and each one after FOUND, so the calibration and countdown read as a round starting, not the game restarting. A `CAL SKIPPED` toast raised on the same tick keeps the slot instead, and this player's READY drops the toast so its `READY` word shows at once. A `NEW ROUND` toast still up when the split ends is dropped, so it never shows in the hunt. When the split ends (after `GO`), the next screen (SEARCHING or the zone screen) shows the top chip `FIND YOUR FRIEND` for 4 s; entering HOT replaces it with `LOOK UP`.
 - **Runes:** chips overlap the iris rim in PAIRING. That is acceptable because no rings run behind them.
+- **How-to cards (`howto`).** In `looking`, a sideways swipe opens card 1 (either direction). Swipe left for the next card and right for the previous one. Swiping left on card 4 or right on card 1 closes the cards, and so does a short press of the button; a tap on a card does nothing and shows nothing. The cards never advance by themselves (§12) and play no haptic. They close by themselves the moment a partner is seen (`seen`), and on END ROUND, a partner-left reset, the 10 % `SAVER ON` interstitial (no card opens while it shows) and shutdown. They never reopen by themselves. The MENU opens over a card and returns to it. Pairing runs underneath unchanged: the beacon still shows PAIRING, so a watch on a card is a candidate like any watch in `looking`. A press or tap made while a card was on screen, or within 600 ms after the cards closed by themselves (`HOWTO_PRESS_GUARD_MS`), only closes the cards: it never confirms runes the player has not seen. Swiping again within about half a second (3 touches within 1 s) trips the touch burst filter (§8) and blocks touches for 2 s. Mockups: `snapshots/pairing_howto_*.png`, `snapshots/pairing_looking_hint.png`.
+
+| Card | Centre | Top | Bottom |
+|---|---|---|---|
+| 1 | runes, an example row sun, wave, cross (ids 0, 3, 6), `text.primary`, iris r 92 | `HOW TO PLAY 1/4` | `PAIR UP` |
+| 2 | countdown `30` held still (the split length), iris r 64 | `HOW TO PLAY 2/4` | `SPLIT UP` |
+| 3 | one warmer chevron (filled `prox.7`, nudging), iris r 44 | `HOW TO PLAY 3/4` | `GET CLOSER` |
+| 4 | the bump view with both watches ready, neither lit (§6 HOT) | `HOW TO PLAY 4/4` | `BUMP!` in `prox.7` |
 
 ### SEARCHING
 
@@ -451,7 +462,7 @@ The field table in each screen uses: ramp | I | speed | period | λ | glow_r | n
 - Both watches see an accelerometer bump spike within 400 ms of each other. A spike is a run of the gravity-removed |a| above 0.5 g, at most 10 ms wide, that peaks at 1.0 g or more, with 200 ms refractory time (`app/imu_feed.py`; provisional values in `tokens.json` `thresholds.bump_spike`). A gentle bump must count: soft bumps peaked at 1–1.5 g in 1–8 samples on real watches (2026-10-04), and hard side knocks at 2–5 g felt uncomfortable. The width is taken at the lower level, so turning the watch in the hand (runs of 20+ samples whose top may cross 1 g) is never a spike. The two-watch 400 ms match in HOT keeps a single watch's spike from ever being a bump. The accelerometer samples at 800 Hz while a spike can count (HOT, PAIRING `seen` and `confirmed`) and in FOUND (so a knock's touch is still recognised there, §8), and at 100 Hz otherwise: its filter passes about 0.4× the rate, so at 100 Hz a 1–3 ms knock is smeared to about 1 g, while at 800 Hz it keeps most of its 3–8 g peak. Each beacon carries `bump_ago_ms` (time since the sender's last spike), so the receiver places the partner's spike on its own clock as t_rx − `bump_ago_ms` − air time (`finder/session.py`). No clock offset is needed.
 - Players knock the watches screen to screen, so a knock touches both panels. A screen touch never stops a spike; the knock's touch does nothing instead (§8). No spike counts inside the haptic blanking window (§7). An accepted spike is matched and sent in beacons (`bump_ago_ms`) at once.
 
-**Fallback:** both players short-press within 3 s while in HOT with band ≤ `~5`. In HOT a short press is this fallback press; a second short press within 1 s (partner not pressing) starts a scan instead. A screen tap in HOT starts no scan (§8).
+**Fallback:** both players short-press within 3 s while in HOT with band ≤ `~5`. In HOT a short press is this fallback press; a second short press within 1 s (partner not pressing) starts a scan instead. A screen tap in HOT starts no scan. While the readout is showing, it raises the toast `PRESS 2X TO SCAN`, never for a knock (§8 Ignored taps).
 
 RSSI alone never enters FOUND.
 
@@ -463,7 +474,7 @@ RSSI alone never enters FOUND.
 | `result` (until a button press) | as above | as above | chip `BUTTON: PLAY AGAIN` | word `FOUND 1:48` in `accent.found`: FOUND and the session time, m:ss up to 9:59 (`FOUND 1:48`), then mm:ss with no space (`FOUND12:48`, 10 characters), and `FOUND 1H+` past the 99:59 cap. Never an `M` for minutes: the readout's `M` means metres | — |
 
 - Both watches enter FOUND on the shared bump packet. Entering FOUND lights the screen for 10 s whatever the tilt (§8 Event wake), so a FOUND made with the wrists together or lowered is still seen.
-- FOUND stays until a button press. A short press on either watch in `result` starts a new round on both: PAIRING `split`, keeping the existing pairing and calibration (the other watch follows once it sees the split, after at least 500 ms in FOUND). A press in `celebrate` does nothing, so a press made with the bump never skips the result; a press on a dark screen, or on one FOUND lit while the wrist stayed down, only wakes it (§8). A screen tap does nothing in FOUND, a finger's or a knock's (§8); a long press still opens the MENU.
+- FOUND stays until a button press. A short press on either watch in `result` starts a new round on both: PAIRING `split`, keeping the existing pairing and calibration (the other watch follows once it sees the split, after at least 500 ms in FOUND). A press in `celebrate` does nothing, so a press made with the bump never skips the result; a press on a dark screen, or on one FOUND lit while the wrist stayed down, only wakes it (§8). A screen tap does nothing in FOUND, a finger's or a knock's (§8); in `result` a finger's tap raises the toast `PRESS THE BUTTON` (§8 Ignored taps). A long press still opens the MENU.
 - The standing wave's breathing changes the field by 1 ramp step over 1.2 s, well inside the flash limit.
 
 ### SCANNING (a guided 360° body turn; a centre tap from FAR/NEAR/WARM, or a short press, which in HOT must be a second press within 1 s)
@@ -614,15 +625,18 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 | Input | Where | Action |
 |---|---|---|
 | **Tap** (touch down→up 60–400 ms, one finger, moving ≤ 12 px, inside r ≤ 92 of C) | FAR–WARM | Start SCANNING. The 3 s `ready` countdown is the confirmation window, so an accidental tap costs nothing and any second tap cancels |
-| Tap | HOT | Nothing: players knock the watches screen to screen, and a knock whose spike was missed must not start a scan (it would stop bump sensing). A short press scans (the second within 1 s, below) |
+| Tap | HOT | No action: players knock the watches screen to screen, and a knock whose spike was missed must not start a scan (it would stop bump sensing). A short press scans (the second within 1 s, below). While the readout shows, the toast `PRESS 2X TO SCAN` says so (Ignored taps, below) |
+| Tap | PAIRING `looking` | No action; toast `SWIPE: HOW TO PLAY` (Ignored taps). On a how-to card a tap does nothing and shows nothing |
 | Tap | PAIRING `seen` | Confirm runes |
 | Tap | PAIRING `split` | READY (see PAIRING **Ready skip**) |
 | Bump watches | PAIRING `seen` / `confirmed` | Confirm both sides at once (the word asks for it: `BUMP = YES`). Felt by one watch only: a felt-it toast (§6 HOT) |
 | Tap | DIRECTION `turn` | "I'm facing it": lock now |
-| Tap | FOUND | Nothing: only the side button starts the next round, so a brush of the screen or a knock never skips the result |
+| Tap | FOUND | No action: only the side button starts the next round, so a brush of the screen or a knock never skips the result. In `result` a deliberate tap raises the toast `PRESS THE BUTTON` (Ignored taps) |
 | Tap | SCANNING | Cancel |
 | **Long-press** (≥ 800 ms stationary) | Any screen | MENU |
-| **Button short** | Any screen | The same primary action as a tap on that screen, except in HOT (there it is the fallback bump press, and a second short press within 1 s (partner not pressing) starts a scan) and in FOUND (in `result` it starts the next round on both watches; in `celebrate` it does nothing). In the MENU it moves to the next row. **When the screen is off, or an event lit it and the wrist has not been raised since (Event wake), it only wakes the screen** |
+| **Swipe** up / down | MENU | Scroll the rows (MENU) |
+| Swipe left / right | PAIRING `looking` | Open and flip the how-to cards (§6 PAIRING). Anywhere else a sideways swipe does nothing and shows nothing |
+| **Button short** | Any screen | The same primary action as a tap on that screen, except in HOT (there it is the fallback bump press, and a second short press within 1 s (partner not pressing) starts a scan) and in FOUND (in `result` it starts the next round on both watches; in `celebrate` it does nothing). In the MENU it moves to the next row. On a how-to card it closes the cards. **When the screen is off, or an event lit it and the wrist has not been raised since (Event wake), it only wakes the screen** |
 | **Button long** (1.5 s) | Any screen | MENU. Nothing is ever mapped near the AXP202 hardware power-off hold |
 | Wrist raise (BMA423 wrist-tilt IRQ, or `face_up` from `finder/motion.py`) | — | Screen on. The first frame is the current state with no intro (rings are time-based, so they are already mid-flight). Backlight 1.0 for 3 s, then 0.6 |
 | Wrist down (on battery: tilted more than 60° from face-up for 10 s, 3 s at 5 %) | Except during a scan, the DIRECTION `turn` (in `ready`, 2 s not face-up cancels the scan instead) and an event wake's hold (below) | Backlight off and rendering stops. Radio, logic and haptics continue. **On USB power the screen stays on** (and plugging in wakes it), so a desk test can watch both screens. Held at an angle up to 60° (reading it), the screen stays on |
@@ -637,6 +651,20 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 - After 3 or more touch-downs in 1 s (any length, gesture or not), ignore touches for 2 s.
 - The wake window and the 2 s block judge a touch by when the finger landed, not by when its gesture ends.
 - **Knocks.** Players knock the watches screen to screen. A gesture (tap, swipe or press, on any screen) whose finger landed from 100 ms before its own counted accelerometer spike until 300 ms after it waits up to 500 ms after the spike for the partner's word: if the partner reports a spike within 400 ms of it, it was a knock and the gesture does nothing; if not, the finger itself made the spike and the gesture runs then. The spike counts either way (§6 HOT). The accelerometer samples fast in FOUND too, so a knock's touch there is still told from a finger's; neither starts a new round (§6 FOUND). The felt-it check (§6 HOT) uses the same 500 ms wait but ignores touches: a one-sided knock touches both screens, so a touch says nothing about which watch felt it.
+
+**Ignored taps.** A deliberate tap that does nothing on its screen shows an info toast naming what does work there, so an ignored tap never looks like a frozen watch.
+
+| Where | Toast (info, 2.5 s) |
+|---|---|
+| PAIRING `looking`, no how-to card open | `SWIPE: HOW TO PLAY` |
+| HOT, while the bottom slot shows the readout (no `BUMP!`, `HOLD STILL`, arrow word or `SAVER ON`) | `PRESS 2X TO SCAN` |
+| FOUND `result` | `PRESS THE BUTTON` |
+| Every other tap that does nothing: a how-to card, PAIRING `confirmed` and `calibrate`, SEARCHING, LINK-LOST (its banner owns the slot), SCANNING `result` (brief; the screen shows the outcome), FOUND `celebrate`, HOT with a word up, the MENU off a row, a tap outside r 92, anything during `SAVER ON` | None: the screen already says what to do, the slot is taken, or the touch is not deliberate. PAIRING `split` taps belong to the split screen |
+
+- Deliberate means a **Tap** as defined above that passed every touch filter (wake window, multi-touch, the 2 s burst block). Swipes and long presses never toast. A short press of the button that does nothing shows the same toast as a tap on that screen.
+- **Never for a knock.** The toast waits 500 ms (the knock wait) after the finger landed, and is dropped if the partner reported a counted spike in the knock window of that landing (Knocks, above), so a knock felt by both watches or by the partner only stays silent. A spike felt by this watch only means the finger made it (Knocks), so the toast still shows, except in HOT, where the felt-it check (§6 HOT) already speaks for that spike.
+- It is dropped if by then the screen no longer calls for that toast, another toast or banner is up or waiting, the MENU is open or the screen is off. It never replaces another toast. A burst block cancels a waiting one.
+- At most one every 5 s (`IGNORED_TOAST_GAP_MS`); taps while one shows neither re-raise nor extend it. No haptic plays (a pulse would blank the bump sensor, §7).
 
 **During a scan:**
 
@@ -735,7 +763,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 - **Type size:** anything read while walking is ≥ 32 px (about 3.7 mm) and ≤ 10 characters. 16 px text is only for stationary moments: pairing, scan prep, toasts, menu. The 8 px micro type is debug and battery % only.
 - **Photosensitivity:** travelling rings only. There is no full-field change of more than 2 ramp steps in 333 ms. The HOT rings at 2 Hz are narrow bands, and the scan bin blink covers one bar.
 - **Eyes-free:** zone heartbeats, zone changes, wrong way, scan pacing, lost, found and battery are all distinct patterns. A player can play FAR → HOT with the wrist down and look only to scan or bump. HOT itself is silent between events (no heartbeat, so knocks are sensed); its entry plays `CLOSER`, and `DOUBLE` plays once both watches can count a bump. On battery both light the screen for 5 s (§8 Event wake), as do link loss and a friend leaving; FOUND lights it for 10 s.
-- **One hand:** every action is reachable with the side button alone (short = primary, long = menu), and the tap target is the whole iris.
+- **One hand:** every game action is reachable with the side button alone (short = primary, long = menu), and the tap target is the whole iris. The optional how-to cards need a swipe; nothing in a round depends on them.
 
 ## 12. What not to do
 

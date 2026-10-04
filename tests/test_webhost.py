@@ -249,6 +249,21 @@ def test_manual_pairing_without_auto_pair():
     assert max(p.countdown for p in s._params) > AUTO_SPLIT_S     # the full split, not the demo cut
 
 
+def test_sideways_swipe_flips_howto_cards_until_paired():
+    s = TwoWatchSim()
+    s.auto_pair = False
+    s.set_pose(1, 30.0, 0.0, 270.0)           # B too far to be a candidate: A keeps looking
+    s.step(1000)
+    assert s.telemetry(0)["sub"] == "looking"
+    s.swipe_h(0, True)
+    s.step(200)
+    assert s.telemetry(0)["sub"] == "howto" and s.games[0].howto.card == 1
+    s.set_pose(1, 1.0, 0.0, 270.0)            # B comes close: seen, and the card closes
+    assert _run_until(s, lambda s: s.games[0].pair.sub == "seen", 5000)
+    s.step(200)
+    assert s.telemetry(0)["sub"] == "seen" and not s.games[0].howto.open
+
+
 def test_auto_pair_starts_quickly():
     s = TwoWatchSim()
     split = [None, None]

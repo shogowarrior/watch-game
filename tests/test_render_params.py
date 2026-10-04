@@ -168,21 +168,63 @@ def test_spec_copy_fits_font_and_length():
     words = ("LOOKING", "BUMP = YES", "YOU'RE IN", "HOLD STILL", "SPLIT UP", "GO", "SEARCHING",
              "WALK ABOUT", "BUMP!", "FOUND", "FOUND 1:48", "FOUND 9:59", "FOUND12:48",
              "FOUND 1H+", "TURN RIGHT", "TURN LEFT",
-             "4 O'CLOCK", "12 O'CLOCK", "AHEAD", "BEHIND", "WALK", "SAVER ON", "BYE")
+             "4 O'CLOCK", "12 O'CLOCK", "AHEAD", "BEHIND", "WALK", "SAVER ON", "BYE",
+             "PAIR UP", "GET CLOSER")
     labels = ("START OTHER WATCH", "WAITING FOR FRIEND", "SAME RUNES?", "STAND 1 STEP APART",
               "NO PEEKING", "FIND YOUR FRIEND", "FASTER IS CLOSER", "TAP TO SCAN",
               "LOOK UP", "BUMP WRISTS", "FRIEND NOT READY", "ONLY YOU FELT IT",
               "FRIEND FELT IT", "TIME 12:48", "TIME 99:59",
               "BUTTON: PLAY AGAIN", "HOLD AT CHEST", "HOLD FLAT",
               "FRIEND SCANNING", "TAP TO RESCAN", "WRONG WAY? RESCAN", "LAST ~20M",
-              "CAL SKIPPED", "FRIEND BATT 20%")
+              "CAL SKIPPED", "FRIEND BATT 20%", "HOW TO PLAY 1/4", "HOW TO PLAY 4/4")
     for w in words:
         assert validate(_zone_frame(0, word=w)) == [], w
     for s in labels:
         assert validate(_zone_frame(0, top_text=s)) == [], s
     for s in ("NO FIX, TRY AGAIN", "NEW ROUND", "SIGNAL LOST", "LOST: GO BACK", "LOST: KEEP ON",
-              "BACK IN RANGE", "BATTERY 5%"):
+              "BACK IN RANGE", "BATTERY 5%", "SWIPE: HOW TO PLAY", "PRESS 2X TO SCAN",
+              "PRESS THE BUTTON"):
         assert validate(_zone_frame(0, banner=(s, "info", False))) == [], s
+
+
+_LOOK = dict(screen="PAIRING", zone=None, ramp="green", intensity=0.1, speed_px_s=-30,
+             pulse_period_ms=3000, wavelength_px=90, glow_r_px=30, ring_live=False)
+
+
+def _card(k, **kw):
+    from finder import howto as HT
+    top, word, glyph, runes, cd, trend, bump = HT.CARDS[k - 1]
+    d = dict(_LOOK, sub="howto", top_text=top, word=word, glyph=glyph, runes=runes,
+             countdown=cd, trend=trend, bump_icons=bump)
+    d.update(kw)
+    return make_params(**d)
+
+
+def test_howto_frames_validate():
+    for k in (1, 2, 3, 4):
+        assert validate(_card(k)) == [], (k, validate(_card(k)))
+    hint = make_params(**dict(_LOOK, sub="looking", glyph="runes", top_text="START OTHER WATCH",
+                              word="LOOKING", banner=("SWIPE: HOW TO PLAY", "info", False)))
+    assert validate(hint) == [], validate(hint)
+
+
+def test_howto_violations():
+    look = dict(_LOOK, sub="looking", glyph="runes", top_text="START OTHER WATCH", word="LOOKING")
+    assert _has(validate(make_params(**dict(look, glyph="chevrons"))), "glyph")
+    assert _has(validate(make_params(**dict(look, ring_live=True))), "ring_live")
+    assert _has(validate(make_params(**dict(look, speed_px_s=40, pulse_period_ms=2400,
+                                            wavelength_px=96))), "ring_live")
+    split = dict(_LOOK, sub="split", glyph="countdown", countdown=20, trend=1)
+    assert _has(validate(make_params(**split)), "trend")
+    assert _has(validate(_card(1, ring_live=True)), "ring_live")
+    assert _has(validate(_card(1, speed_px_s=40, pulse_period_ms=2400, wavelength_px=96)),
+                "ring_live")
+    assert _has(validate(_card(1, glyph="check", runes=None)), "glyph")
+    assert _has(validate(_card(3, trend_strong=True)), "trend_strong")
+    assert _has(validate(_card(3, trend=-1)), "trend")
+    assert _has(validate(_card(1, runes=None)), "runes")
+    assert _has(validate(_card(2, word=None)), "top_text/word")
+    assert _has(validate(_card(4, bump_icons=None)), "bump_icons")
 
 
 def test_bump_icons_rules():

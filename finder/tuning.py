@@ -6,7 +6,7 @@ Plain constants only; blocks marked 'ui-spec only' come from ui-spec.md.
 """
 
 TOKENS_VERSION = '0.2.0'
-TOKENS_HASH = '0c431c77797ded8e'
+TOKENS_HASH = '5a9441fd26639ac6'
 
 # ---- Zones (thresholds.zones_m): boundary k is between zone k and k+1
 ZONE_FAR = 0
@@ -349,7 +349,7 @@ SCREENS = (
     'PAIRING', 'SEARCHING', 'FAR', 'NEAR', 'WARM', 'HOT', 'FOUND', 'SCANNING',
     'LINK_LOST', 'MENU',
 )
-SUBS_PAIRING = ('looking', 'seen', 'confirmed', 'calibrate', 'split')
+SUBS_PAIRING = ('looking', 'seen', 'confirmed', 'calibrate', 'split', 'howto')
 SUBS_SCANNING = ('ready', 'sweep', 'result')
 SUBS_DIRECTION = ('reveal', 'turn', 'walk')  # FAR..HOT sub (or None)
 SUBS_FOUND = ('celebrate', 'result')
@@ -416,6 +416,8 @@ PAIR_READY_HINT_MS = 5000  # split: chip TAP WHEN READY from 5 s in
 PAIR_READY_LEFT_S = 3  # split: both ready -> the countdown jumps to 3
 CAL_GATE_WINDOW_MS = 1000  # RSSI sd over 1 s > unstable_sd pauses the fill
 SEARCHING_WALK_ABOUT_MS = 45000
+HOWTO_HINT_MS = 5000  # PAIRING looking: SWIPE: HOW TO PLAY toast once after this
+HOWTO_PRESS_GUARD_MS = 600  # a press or tap this soon after the cards closed only closes
 KNOCK_TOUCH_BEFORE_MS = 300  # a touch whose touch-down a counted spike precedes by up to this
 KNOCK_TOUCH_AFTER_MS = 100  # ... or follows by up to this may be a knock's (§8) ...
 # ... so it waits this long after the spike for the partner's: a knock spikes both watches, a finger only its own
@@ -450,6 +452,7 @@ IDLE_DIM_BACKLIGHT = 0.35  # ui-spec §8: face-up > 30 s with no input
 STATUS_AFTER_WAKE_MS = 3000
 HINT_CHIP_MS = 4000  # top-slot hint chips (TAP TO SCAN, LOOK UP, FIND YOUR FRIEND, ...)
 HINT_STILL_MS = 6000  # TAP TO SCAN after 6 s still with no arrow
+IGNORED_TOAST_GAP_MS = 5000  # an ignored-tap toast at most once per this (§8)
 TAP_MIN_MS = 60
 TAP_MAX_MS = 400
 TAP_MOVE_PX = 12

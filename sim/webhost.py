@@ -77,7 +77,7 @@ from finder.compat import ticks_diff
 from finder.haptic_patterns import TOTAL_MS, HapticPlayer
 from finder.game import Game, M_PAIRING, M_HUNT, M_SCANNING
 from finder.gestures import TAP as G_TAP, LONG_PRESS as G_LONG_PRESS, SWIPE_U as G_SWIPE_U, \
-    SWIPE_D as G_SWIPE_D
+    SWIPE_D as G_SWIPE_D, SWIPE_L as G_SWIPE_L, SWIPE_R as G_SWIPE_R
 from finder.arrow import PH_TURN, wrap180, wrap360
 from finder.render_params import from_dict, validate
 from sim import Sim
@@ -433,6 +433,10 @@ class TwoWatchSim:
     def swipe(self, i, up=True):
         """Vertical swipe on the screen (MENU: up shows the rows below, down the rows above)."""
         self._gesture(i, G_SWIPE_U if up else G_SWIPE_D)
+
+    def swipe_h(self, i, left=True):
+        """Sideways swipe (PAIRING looking: left = next how-to card, right = previous)."""
+        self._gesture(i, G_SWIPE_L if left else G_SWIPE_R)
 
     def _gesture(self, i, code, x=120, y=120):
         """A finger lands (``Game.on_touch_down``: rain/sleeve burst filter),

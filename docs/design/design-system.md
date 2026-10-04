@@ -322,7 +322,7 @@ Both use the bottom slot at x 24..215, y 186..225: `surface.toast` fill, `radius
 
 | Kind | Severity border | Lifetime | Examples |
 |---|---|---|---|
-| Toast info | `prox.5` | 2.5 s | `BACK IN RANGE`, `SCAN AGAIN`, `NEW ROUND`, `ONLY YOU FELT IT` |
+| Toast info | `prox.5` | 2.5 s | `BACK IN RANGE`, `SCAN AGAIN`, `NEW ROUND`, `ONLY YOU FELT IT`, `PRESS 2X TO SCAN`, `SWIPE: HOW TO PLAY` |
 | Toast warn | `status.warn` | 2.5 s | `BATTERY 20%`, `FRIEND BATT 20%`, `FRIEND LEFT` |
 | Toast critical | `status.critical` | 2.5 s | `BATTERY 5%` |
 | Banner warn | `status.warn` | Until resolved | `SIGNAL LOST`, then `LOST: GO BACK` / `LOST: KEEP ON` (no clock), `FRIEND LOW BATTERY` |

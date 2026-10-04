@@ -47,6 +47,11 @@ not report within BUMP_WINDOW_MS gets ONLY YOU FELT IT / FRIEND FELT IT
 KNOCK_WAIT_MS after it, in HOT (top chip) and PAIRING seen/confirmed (toast)
 (ui-spec §6 HOT).
 
+In PAIRING looking, sideways swipes flip four how-to cards (``finder.howto``,
+sub ``howto``); a tap or press that does nothing raises a toast naming what
+works there, KNOCK_WAIT_MS after the touch and never for a knock (§8 Ignored
+taps).
+
 Choices where the spec is silent (all starting values):
   * the expected partner beacon rate mirrors the partner's ``beacon_hz``
     (scan > saver > HOT > normal); after a rate change the lower of the old and
@@ -78,6 +83,8 @@ Choices where the spec is silent (all starting values):
   * the split READY tap (beacon flag ``F_READY``) is final and counts only
     before GO; the partner's flag counts only while its beacon state is
     PAIRED (calibrate/split), and each new split starts with both cleared
+  * the how-to card state never reaches the beacon; the HOT ignored-tap toast
+    reads the previous tick's RenderParams (it shows only over the readout)
 
 Not yet wired (need a RenderParams contract change in finder/render_params.py
 and ui/renderer.py first): the 3 % BYE inward ring at -120 px/s (outside the
@@ -94,7 +101,8 @@ from finder.render_params import RenderParams, wavelength, BI_ME, BI_FRIEND, BI_
 from finder.estimators import make as _make_est
 from finder.estimators.base import ACT_STILL
 from finder.gestures import (TAP as G_TAP, LONG_PRESS as G_LONG_PRESS,
-                             SWIPE_U as G_SWIPE_U, SWIPE_D as G_SWIPE_D)
+                             SWIPE_U as G_SWIPE_U, SWIPE_D as G_SWIPE_D,
+                             SWIPE_L as G_SWIPE_L, SWIPE_R as G_SWIPE_R)
 from finder.proximity import (Proximity, DeliveryMeter, DELIVERY_WINDOW_MS,
                               FAR, NEAR, WARM, HOT)
 from finder.scan import ScanSession, R_CANCEL
@@ -102,6 +110,7 @@ from finder.scan import READY as SCAN_READY, SWEEP as SCAN_SWEEP
 from finder import arrow as A
 from finder import menu as MENU
 from finder import pairing as P
+from finder import howto as HT
 from finder.session import (MotionSnap, PeerView, LiveMirror, screen_code, fmt_found,
                             TAP_KEEP_MS, SC_MASK, SC_PAIRING, SC_HOT, SC_FOUND, SC_PAIRED,
                             SC_BYE, ST_PRESS, ST_GOODBYE, ST_CONFIRMED, ST_TAP_HOT)
@@ -152,6 +161,9 @@ T_FRIEND_LOW = "FRIEND LOW BATTERY"
 T_FRIEND_LEFT = "FRIEND LEFT"
 T_PLAY_AGAIN = "BUTTON: PLAY AGAIN"
 T_SIGNAL_LOST = "SIGNAL LOST"
+T_SWIPE_HOWTO = HT.HINT
+T_PRESS_2X = "PRESS 2X TO SCAN"
+T_PRESS_BUTTON = "PRESS THE BUTTON"
 T_LOST_GO_BACK = "LOST: GO BACK"
 T_LOST_KEEP_ON = "LOST: KEEP ON"
 
@@ -214,6 +226,8 @@ class Game:
         self.sun = False
         self.buzz = BUZZ_FULL
         self.params = None
+        self.howto = HT.HowTo()
+        self._howto_known = False     # cards opened or a round started since power-on
         # battery ladder: survives END ROUND
         self._bat_level = 100
         self._inter_until = None
@@ -293,6 +307,14 @@ class Game:
         self._touch_t = None      # last finger landing
         self._spike_touched = None  # last own spike a finger landing went with (§6 PAIRING)
         self._felt = None         # HOT felt-it chip text
+        self.howto.reset()
+        self._look_t = None       # PAIRING looking since (the SWIPE: HOW TO PLAY hint)
+        self._howto_hinted = False
+        self._howto_shut = None   # the cards closed by themselves at (press guard)
+        self._ign_s = None        # ignored-tap toast waiting out the knock wait
+        self._ign_td = 0          # ... for the touch that landed then
+        self._ign_knock = False   # ... a partner spike (or in HOT, ours) made it a knock
+        self._ign_t = None        # last ignored-tap toast raised
         self._felt_until = t_ms
         self._still_since = None
         self._still_done = False
@@ -463,6 +485,11 @@ class Game:
         if mn.is_open and (code == G_SWIPE_U or code == G_SWIPE_D):
             mn.scroll(t_ms, 1 if code == G_SWIPE_U else -1)
             return
+        if code == G_SWIPE_L or code == G_SWIPE_R:
+            if (not mn.is_open and self.mode == M_PAIRING and self.pair.sub == P.LOOKING
+                    and self._inter_until is None and not self._inter_pending):
+                self._howto_flip(1 if code == G_SWIPE_L else -1)
+            return
         if code != G_TAP:
             return
         if mn.is_open:
@@ -472,7 +499,8 @@ class Game:
         dy = y - T.CENTER[1]
         if dx * dx + dy * dy > T.TAP_R_MAX_PX * T.TAP_R_MAX_PX:
             return
-        self._primary(t_ms, False)
+        if not self._primary(t_ms, False):
+            self._ignored(t_ms, td)
 
     def on_button(self, t_ms, long=False):
         """Side button: short = primary action (wake only when off), long = MENU."""
@@ -491,8 +519,8 @@ class Game:
             self._long_press(t_ms)
         elif self.menu.is_open:
             self._menu_apply(t_ms, self.menu.next(t_ms))
-        else:
-            self._primary(t_ms, True)
+        elif not self._primary(t_ms, True):
+            self._ignored(t_ms, t_ms)
 
     def _touch_burst(self, t_ms):
         """Rain/sleeve filter: >= 3 touch-downs in 1 s block touches for 2 s."""
@@ -501,24 +529,31 @@ class Game:
         if tr.full_within(t_ms, T.TOUCH_BURST_WINDOW_MS):
             self._touch_block = ticks_add(t_ms, T.TOUCH_BURST_IGNORE_MS)
             tr.clear()
+            self._ign_s = None        # a burst is no deliberate tap
 
     def _primary(self, t_ms, button):
+        """The tap / short-press action of this screen; False if it did nothing
+        (an ignored tap or press, §8 Ignored taps)."""
         m = self.mode
         if m == M_PAIRING:
             pr = self.pair
+            if (pr.sub == P.LOOKING or pr.sub == P.SEEN) and self._howto_shown(t_ms):
+                if button:
+                    self.howto.reset()      # a press closes the cards; it never confirms
+                return True                 # runes the player has not seen (§6 PAIRING)
             if pr.sub == P.SPLIT:
                 pr.set_ready(t_ms)
                 if pr.ready and self._toast == T_NEW_ROUND:
                     self._toast = None      # its READY word shows at once (§6 Round start)
-            else:
-                pr.confirm(t_ms)
-        elif m == M_HUNT:
+                return True
+            return pr.confirm(t_ms)
+        if m == M_HUNT:
             a = self.arrow
             if a is not None and a.tap():
-                return
+                return True
             if self.px.zone == HOT:
                 if not button:
-                    return        # HOT: the screen is where watches knock (§8)
+                    return False  # HOT: the screen is where watches knock (§8)
                 pt = self._press_t
                 pv = self.peer
                 if (pt is not None and 0 <= ticks_diff(t_ms, pt) <= T.HOT_SCAN_PRESS_MS
@@ -527,13 +562,95 @@ class Game:
                     self._start_scan(t_ms)
                 else:
                     self._press_t = t_ms  # fallback bump press
-                return
+                return True
             self._start_scan(t_ms)
-        elif m == M_SCANNING:
-            self.scan.cancel(t_ms)
-        elif m == M_FOUND:            # the button only: a tap or a knock never skips the result
+            return True
+        if m == M_SCANNING:
+            return self.scan.cancel(t_ms)
+        if m == M_FOUND:              # the button only: a tap or a knock never skips the result
             if button and ticks_diff(t_ms, self.found_t) >= T.FOUND_CELEBRATE_MS:
                 self._new_round(t_ms)
+                return True
+        return False
+
+    # ---- how-to cards and ignored taps (ui-spec §6 PAIRING, §8) ---------------------
+    def _howto_shown(self, t_ms):
+        """A card is open, was on the last frame, or closed by itself moments
+        ago: a press or tap then is about the card, not the runes."""
+        if self.howto.open:
+            return True
+        p = self.params
+        if p is not None and p.sub == "howto":
+            return True
+        s = self._howto_shut
+        return s is not None and ticks_diff(t_ms, s) < T.HOWTO_PRESS_GUARD_MS
+
+    def _howto_flip(self, d):
+        if self.howto.flip(d):        # just opened: the hint has done its job
+            self._howto_known = True
+            if self._toast == T_SWIPE_HOWTO:
+                self._toast = None
+            if self._ign_s == T_SWIPE_HOWTO:
+                self._ign_s = None
+
+    def _howto_close(self, t_ms):
+        if self.howto.open:
+            self.howto.reset()
+            self._howto_shut = t_ms
+
+    def _ignored_text(self, t_ms):
+        """The toast an ignored tap or press raises on this screen, or None."""
+        if self._inter_until is not None or self._inter_pending:
+            return None               # SAVER ON owns the screen
+        m = self.mode
+        if m == M_PAIRING:
+            if self.pair.sub == P.LOOKING and not self.howto.open:
+                return T_SWIPE_HOWTO
+        elif m == M_HUNT:
+            p = self.params           # only over the readout (no word, no banner)
+            if (self.px.zone == HOT and p is not None and p.word is None
+                    and p.banner is None and p.dist_band is not None):
+                return T_PRESS_2X
+        elif m == M_FOUND:
+            if ticks_diff(t_ms, self.found_t) >= T.FOUND_CELEBRATE_MS:
+                return T_PRESS_BUTTON
+        return None
+
+    def _ignored(self, t_ms, td):
+        """A deliberate tap or press that did nothing: its toast waits out the
+        knock wait (``_resolve_ignored``); at most one per IGNORED_TOAST_GAP_MS."""
+        s = self._ign_t
+        if s is not None and ticks_diff(t_ms, s) < T.IGNORED_TOAST_GAP_MS:
+            return
+        if self._ign_s is not None:
+            return
+        s = self._ignored_text(t_ms)
+        if s is not None:
+            self._ign_s = s
+            self._ign_td = td
+            self._ign_knock = False
+
+    def _resolve_ignored(self, t_ms):
+        """Raise a waiting ignored-tap toast KNOCK_WAIT_MS after its touch landed,
+        unless it was a knock: a partner spike in the knock window (or in HOT our
+        own, which the felt-it check speaks for), latched as reports arrive."""
+        s = self._ign_s
+        if s is None:
+            return
+        td = self._ign_td
+        if _knock(self.peer.tap_t, td) or (self.mode == M_HUNT and _knock(self._spike_t, td)):
+            self._ign_knock = True
+        if ticks_diff(t_ms, td) < T.KNOCK_WAIT_MS:
+            return
+        self._ign_s = None
+        if (self._ign_knock or self._toast is not None or self.menu.is_open
+                or not self.screen_on or self._bye_t is not None
+                or self._ignored_text(t_ms) != s):
+            return
+        self._ign_t = t_ms
+        self._toast_set(s, "info")
+        if s == T_SWIPE_HOWTO:
+            self._howto_hinted = True
 
     def _input(self, t_ms):
         self._input_t = t_ms
@@ -619,6 +736,7 @@ class Game:
         if self._inter_pending and not scanning:
             self._inter_pending = False
             self._inter_until = ticks_add(t_ms, T.BATT_INTERSTITIAL_MS)
+            self.howto.reset()        # SAVER ON is never merged with a card
 
     # ---- per tick ----------------------------------------------------------------
     def tick(self, t_ms):
@@ -650,6 +768,7 @@ class Game:
             if h is not None and not self.menu.is_open:
                 self._held = None
                 self._emit(t_ms, h)
+            self._resolve_ignored(t_ms)
             self._show_pending(t_ms)
             if self.mode != M_HUNT:
                 self._peer_sweep = False
@@ -686,6 +805,13 @@ class Game:
         s = self._touch_t
         if s is not None and ticks_diff(t_ms, s) > KNOCK_KEEP_MS:
             self._touch_t = None
+        s = self._ign_t
+        if s is not None and ticks_diff(t_ms, s) >= T.IGNORED_TOAST_GAP_MS:
+            self._ign_t = None
+        s = self._howto_shut
+        if s is not None and ticks_diff(t_ms, s) >= T.HOWTO_PRESS_GUARD_MS:
+            self._howto_shut = None
+        self._look_t = _cap(t_ms, self._look_t)
         s = self._unrel_t
         if s is not None and ticks_diff(t_ms, s) >= UNRELIABLE_PIN_MS:
             self._unrel_t = None
@@ -799,6 +925,14 @@ class Game:
             self._toast_set(pr.toast, "info")       # CAL SKIPPED keeps the slot
         elif was == P.CALIBRATE and pr.sub == P.SPLIT:
             self._toast_set(T_NEW_ROUND, "info")
+        if pr.sub == P.LOOKING:
+            self._looking_hint(t_ms)
+        else:                                       # the partner is seen: the cards close
+            self._look_t = None
+            self._howto_hinted = False
+            self._howto_close(t_ms)
+            if pr.sub == P.CALIBRATE:
+                self._howto_known = True
         if pr.p1m is not None and pr.p1m != self._p1m:
             self._p1m = pr.p1m
             self.est.calibrate(pr.p1m)
@@ -815,6 +949,22 @@ class Game:
                 self._enter_hunt(t_ms, False)
             else:
                 self._enter_searching(t_ms)
+
+    def _looking_hint(self, t_ms):
+        """SWIPE: HOW TO PLAY once, HOWTO_HINT_MS into a looking spell, until the
+        cards were opened or a round started since power-on; never over another
+        toast, under the MENU or SAVER ON, or with the screen off (§6 PAIRING)."""
+        if self._look_t is None:
+            self._look_t = t_ms
+            return
+        if (self._howto_hinted or self._howto_known or self.howto.open
+                or ticks_diff(t_ms, self._look_t) < T.HOWTO_HINT_MS):
+            return
+        if (self.screen_on and self._toast is None and not self.menu.is_open
+                and self._bye_t is None and self._inter_until is None
+                and not self._inter_pending):
+            self._howto_hinted = True
+            self._toast_set(T_SWIPE_HOWTO, "info")
 
     # SEARCHING
     def _enter_searching(self, t_ms):
@@ -1127,6 +1277,7 @@ class Game:
         self._forget_trend()
         self._hint = None
         self._press_t = None
+        self._ign_s = None
         self._consume_bump()
         self._toast_set(T_NEW_ROUND, "info")
 
@@ -1339,6 +1490,7 @@ class Game:
             lv = self._bat_level
             if b <= T.BATT_SHUTDOWN_PCT:
                 self.menu.close()         # shutting down: BYE is shown, NOPE plays
+                self.howto.reset()
                 if self.mode == M_SCANNING:
                     self.scan.cancel(t_ms)    # and no sweep (20 Hz, F_SWEEP) runs on
                 self._bye_t = t_ms
@@ -1507,8 +1659,14 @@ class Game:
             if sub == P.LOOKING:
                 speed = ls
                 period = lp
-                top = T_START_OTHER
-                word = "LOOKING"
+                live = False                       # no partner yet: no live rings
+                c = self.howto.card
+                if c:
+                    sub = "howto"
+                    top, word, glyph, runes, cd, trend, bump = HT.CARDS[c - 1]
+                else:
+                    top = T_START_OTHER
+                    word = "LOOKING"
             elif sub == P.SEEN:
                 top = "SAME RUNES?"
                 word = W_BUMP_YES

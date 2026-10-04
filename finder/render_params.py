@@ -51,6 +51,7 @@ _NO_ARROW_SCREENS = ("SEARCHING", "SCANNING", "LINK_LOST", "FOUND", "PAIRING")
 _NO_BAND_SCREENS = ("PAIRING", "SEARCHING", "SCANNING", "FOUND")
 _TREND_SCREENS = ("FAR", "NEAR", "WARM", "LINK_LOST")   # LINK_LOST: the LAST chip's mark
 _CHEVRON_SCREENS = ("FAR", "NEAR", "WARM")
+_HOWTO_GLYPHS = ("runes", "countdown", "chevrons", "bump")   # PAIRING howto cards (§6)
 _RAMP_FOR = {"FOUND": "gold", "SEARCHING": "grey", "LINK_LOST": "grey",
              "PAIRING": "green", "SCANNING": "green",
              "FAR": "green", "NEAR": "green", "WARM": "green", "HOT": "green"}
@@ -196,6 +197,7 @@ def validate(rp):
         return ["RenderParams: expected %d fields" % len(FIELDS)]
     sc = rp.screen
     sub = rp.sub
+    howto = sc == "PAIRING" and sub == "howto"
 
     # screen
     if not _int(rp.t_ms) or rp.t_ms < 0:
@@ -238,6 +240,8 @@ def validate(rp):
             e("speed_px_s/pulse_period_ms: not the %s zone tempo" % sc)
     if ok and sc in ("SEARCHING", "LINK_LOST") and spd > 0:
         e("speed_px_s: %s rings must be inward (<= 0)" % sc)
+    if sc == "PAIRING" and sub in ("looking", "howto") and (rp.ring_live is True or (ok and spd > 0)):
+        e("ring_live/speed_px_s: no live or outward rings in PAIRING %s (no partner)" % sub)
     if not _in(rp.glow_r_px, 0.0, T.GLOW_R_MAX_PX):
         e("glow_r_px: must be 0..%g" % T.GLOW_R_MAX_PX)
     if not isinstance(rp.ring_live, bool):
@@ -269,12 +273,12 @@ def validate(rp):
             e("glyph: must be 'arrow' while an arrow is set")
     elif g == "arrow":
         e("glyph: 'arrow' needs arrow_deg/cone_deg/arrow_style")
-    if g == "chevrons" and sc not in _CHEVRON_SCREENS:
-        e("glyph: 'chevrons' only in FAR/NEAR/WARM")
+    if g == "chevrons" and sc not in _CHEVRON_SCREENS and not howto:
+        e("glyph: 'chevrons' only in FAR/NEAR/WARM (and the howto card 3)")
     tr = rp.trend
     if tr not in (-1, 0, 1) or isinstance(tr, bool):
         e("trend: must be -1, 0 or +1")
-    elif tr != 0 and sc not in _TREND_SCREENS:
+    elif tr != 0 and sc not in _TREND_SCREENS and not (howto and tr == 1 and g == "chevrons"):
         e("trend: must be 0 in %s" % sc)
     if not isinstance(rp.trend_strong, bool):
         e("trend_strong: must be bool")
@@ -282,6 +286,13 @@ def validate(rp):
         e("trend_strong: needs a non-zero trend")
     elif rp.trend_strong and sc == "LINK_LOST":
         e("trend_strong: must be False in LINK_LOST")
+    elif rp.trend_strong and howto:
+        e("trend_strong: must be False on a howto card")
+    if howto:
+        if g not in _HOWTO_GLYPHS:
+            e("glyph: a howto card is runes, countdown, chevrons or bump")
+        if rp.top_text is None or rp.word is None:
+            e("top_text/word: a howto card has both")
     cn = rp.countdown
     if cn is not None and (not _int(cn) or not 0 <= cn <= T.COUNTDOWN_MAX):
         e("countdown: must be None or int 0..%d" % T.COUNTDOWN_MAX)
@@ -298,16 +309,16 @@ def validate(rp):
             e("runes: must be None or 3 rune ids 0..7")
         elif sc != "PAIRING":
             e("runes: only in PAIRING")
-    elif g == "runes" and sub in ("seen", "confirmed"):
+    elif g == "runes" and sub in ("seen", "confirmed", "howto"):
         e("runes: glyph 'runes' needs them in %s" % sub)
     bi = rp.bump_icons
     if bi is not None and (not _int(bi) or not 0 <= bi <= BUMP_ICONS_MAX):
         e("bump_icons: must be None or int 0..%d" % BUMP_ICONS_MAX)
     elif (g == "bump") != (bi is not None):
         e("bump_icons: set exactly when glyph is 'bump'")
-    elif bi is not None:
+    elif bi is not None and not howto:
         if sc != "HOT":
-            e("glyph: 'bump' only in HOT")
+            e("glyph: 'bump' only in HOT (and on the howto card 4)")
         if sub is not None:
             e("glyph: 'bump' needs sub None")
         if bi & BI_FRIEND_OFF and rp.word == _W_BUMP:

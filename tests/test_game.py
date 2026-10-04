@@ -2417,11 +2417,12 @@ def test_found_result_word_chip_and_button_only():
     r.run(T.FOUND_CELEBRATE_MS)
     assert r.p.sub == "result" and r.p.top_text == "BUTTON: PLAY AGAIN"
     assert r.p.word == "FOUND 1:48"
-    t = r.t + 10                                # a finger tap (no spike): nothing
-    g.on_touch_down(t)
+    t = r.t + 10                                # a finger tap (no spike): no new round,
+    g.on_touch_down(t)                          # a toast says what does work
     g.on_gesture(t + 100, 1, 120, 120, t)
     r.run(T.KNOCK_WAIT_MS + 200)
-    assert g.mode == M_FOUND and r.p.word == "FOUND 1:48" and r.p.banner is None
+    assert g.mode == M_FOUND and r.p.word == "FOUND 1:48"
+    assert r.p.banner == ("PRESS THE BUTTON", "info", False)
     g.on_button(r.t)
     r.run(100)
     assert g.mode == M_PAIRING and r.p.sub == "split"
@@ -2899,3 +2900,374 @@ def test_faster_is_closer_waits_for_a_friend_scan_to_end():
     n.flags = 0
     n.run(T.HINT_CHIP_MS + 2000)                # after the entry's TAP TO SCAN
     assert any(p.top_text == "FASTER IS CLOSER" for p in n.params if p.t_ms > t1)
+
+
+# ---- how-to cards (PAIRING looking) and ignored taps (ui-spec §6, §8) ------------
+
+G_SWIPE_L, G_SWIPE_R = 4, 5
+
+
+def _looking(ms=1000):
+    """A Rig left in looking (no packets)."""
+    r = Rig()
+    r.run(ms, packets=False)
+    assert r.g.pair.sub == "looking"
+    return r
+
+
+def _swipe(r, left=True):
+    r.g.on_gesture(r.t, G_SWIPE_L if left else G_SWIPE_R)
+    r.run(100, packets=False)
+
+
+def _tap(r, x=120, y=120):
+    t = r.t + 10
+    r.g.on_touch_down(t)
+    r.g.on_gesture(t + 100, G_TAP, x, y, t)
+
+
+def test_howto_cards_flip_only_in_looking():
+    r = _looking()
+    tops = []
+    for _ in range(4):
+        _swipe(r)
+        assert r.p.sub == "howto"
+        tops.append(r.p.top_text)
+    assert tops == ["HOW TO PLAY %d/4" % k for k in (1, 2, 3, 4)]
+    assert [c[1] for c in __import__("finder.howto").howto.CARDS] == ["PAIR UP", "SPLIT UP",
+                                                                      "GET CLOSER", "BUMP!"]
+    _swipe(r)
+    assert r.p.sub == "looking" and r.p.top_text == "START OTHER WATCH"
+    _swipe(r, left=False)
+    assert r.p.top_text == "HOW TO PLAY 1/4"
+    _swipe(r, left=False)
+    assert r.p.sub == "looking"
+    r.g.on_button(r.t, long=True)               # MENU: sideways swipes do nothing there
+    r.run(100, packets=False)
+    _swipe(r)
+    assert r.p.screen == "MENU" and not r.g.howto.open
+    # seen, HOT, FOUND: sideways swipes change nothing
+    s = Rig()
+    s.rssi = -50
+    s.run(600)
+    assert s.g.pair.sub == "seen"
+    s.g.on_gesture(s.t, G_SWIPE_L)
+    s.run(100)
+    assert s.p.sub == "seen" and not s.g.howto.open and s.p.banner is None
+    h = hot_rig(4.0)
+    h.g.on_gesture(h.t, G_SWIPE_L)
+    h.run(100)
+    assert h.p.screen == "HOT" and h.p.sub is None and not h.g.howto.open
+
+
+def test_howto_cards_show_no_signal():
+    r = _looking()
+    for k in range(4):
+        _swipe(r)
+        p = r.p
+        assert p.sub == "howto" and p.speed_px_s == T.FIELD_PAIRING_LOOKING[2], p
+        assert not p.ring_live and p.heartbeat is None and p.haptic is None
+        assert p.zone is None and p.dist_band is None and p.banner is None
+        assert r.g.state_byte & SC_MASK == SC_PAIRING
+    assert r.p.glyph == "bump" and r.p.bump_icons == 0 and r.p.word == "BUMP!"
+
+
+def test_howto_cards_close_when_the_partner_is_seen():
+    r = _looking()
+    for _ in range(3):
+        _swipe(r)
+    assert r.p.top_text == "HOW TO PLAY 3/4"
+    r.rssi = -50
+    n = 0
+    while r.g.pair.sub != "seen":
+        r.run(100)
+        n += 1
+        assert n < 20
+    p = r.p
+    assert p.sub == "seen" and p.runes == rune_ids(MAC_A, MAC_B) and not r.g.howto.open
+    assert any(q.haptic == "DOUBLE" for q in r.params[-n:])
+    r.run(6000, packets=False)                  # the partner goes quiet: back to looking
+    assert r.p.sub == "looking" and not r.g.howto.open
+
+
+def test_looking_after_seen_never_shows_live_rings():
+    r = Rig()
+    r.rssi = -50
+    r.run(600)
+    assert r.g.pair.sub == "seen"
+    r.state = SC_FAR                            # the friend stops showing PAIRING; packets go on
+    n = 0
+    while r.g.pair.sub != "looking":
+        r.run(100)                              # validate: no ring_live in looking
+        n += 1
+        assert n < 100
+    assert not r.p.ring_live
+
+
+def test_howto_button_closes_tap_does_nothing():
+    r = _looking()
+    _swipe(r)
+    _swipe(r)
+    _tap(r)
+    r.run(1000, packets=False)
+    assert r.p.top_text == "HOW TO PLAY 2/4" and r.p.banner is None
+    r.g.on_button(r.t)
+    r.run(100, packets=False)
+    assert r.p.sub == "looking" and r.p.banner is None
+
+
+def test_a_press_racing_the_partner_never_confirms_unseen_runes():
+    r = _looking()
+    _swipe(r)
+    r.rssi = -50
+    while r.g.pair.sub != "seen":               # packets between ticks: seen, card still up
+        r.t += 50
+        r.packet()
+    r.g.on_button(r.t)                          # meant for the card
+    r.g.on_button(r.t + 30)                     # twice, before the screen changed
+    r.run(100)
+    assert r.g.pair.sub == "seen" and not r.g.pair.confirmed
+    r.g.on_button(r.t)                          # the runes on screen: now it confirms
+    r.run(100)
+    assert r.g.pair.sub == "confirmed"
+    # the cards closed by themselves at the tick: a press right after only closes
+    r2 = _looking()
+    _swipe(r2)
+    r2.rssi = -50
+    while r2.g.pair.sub != "seen":
+        r2.run(100)
+    r2.g.on_button(r2.t + 50)
+    r2.run(100)
+    assert r2.g.pair.sub == "seen" and not r2.g.pair.confirmed
+    r2.run(T.HOWTO_PRESS_GUARD_MS)
+    r2.g.on_button(r2.t)
+    r2.run(100)
+    assert r2.g.pair.sub == "confirmed"
+
+
+def test_howto_hint_toast_once_per_looking_spell():
+    r = Rig()
+    r.run(T.HOWTO_HINT_MS - 200, packets=False)
+    assert all(p.banner is None for p in r.params)
+    r.run(400, packets=False)
+    assert r.p.banner == ("SWIPE: HOW TO PLAY", "info", False)
+    r.run(T.TOAST_MS + 10000, packets=False)
+    hints = [p for p in r.params if p.banner and p.banner[0] == "SWIPE: HOW TO PLAY"]
+    assert T.TOAST_MS - 200 <= len(hints) * 100 <= T.TOAST_MS + 200
+    assert r.p.banner is None
+    # opening a card first: no hint; opening one clears a hint already up
+    o = _looking(1000)
+    _swipe(o)
+    o.run(8000, packets=False)
+    assert all(p.banner is None for p in o.params)
+    c = Rig()
+    c.run(T.HOWTO_HINT_MS + 300, packets=False)
+    assert c.p.banner[0] == "SWIPE: HOW TO PLAY"
+    _swipe(c)
+    assert c.p.banner is None and c.p.sub == "howto"
+    # after a round has started (calibrate reached) since power-on: never again
+    d = paired_rig()
+    d.g.reset(d.t)                              # END ROUND: back to looking
+    d.run(10000, packets=False)
+    assert d.p.sub == "looking"
+    assert not any(p.banner and p.banner[0] == "SWIPE: HOW TO PLAY" for p in d.params[-100:])
+
+
+def test_howto_card_2_mirrors_the_split_screen():
+    s = _to_split(Rig()).p
+    r = _looking()
+    _swipe(r)
+    _swipe(r)
+    c = r.p
+    assert (c.glyph, c.countdown, c.word) == (s.glyph, s.countdown, s.word)
+
+
+def test_saver_on_closes_the_cards_and_blocks_them():
+    r = _looking()
+    for _ in range(3):
+        _swipe(r)
+    r.g.set_battery(r.t, T.BATT_CRITICAL_PCT)
+    r.run(100, packets=False)
+    assert r.p.word == "SAVER ON" and not r.g.howto.open
+    _swipe(r)                                   # during SAVER ON: no card
+    _tap(r)
+    ps = r.run(T.KNOCK_WAIT_MS + 300, packets=False)
+    assert not r.g.howto.open
+    assert all(p.sub != "howto" and p.banner is None for p in ps), [(p.sub, p.banner) for p in ps]
+
+
+def test_ignored_tap_in_hot_says_press_2x_to_scan():
+    r = hot_rig(4.0)
+    r.run(1000)
+    assert r.p.dist_band == "~5" and r.p.word is None and r.p.banner is None
+    _tap(r)
+    ps = r.run(T.KNOCK_WAIT_MS)
+    assert all(p.banner is None for p in ps)
+    r.run(200)
+    assert r.p.banner == ("PRESS 2X TO SCAN", "info", False)
+    assert r.g.mode == M_HUNT and r.g.bump_armed()
+    r.run(T.TOAST_MS + 100)
+    assert r.p.banner is None
+
+
+def test_ignored_tap_toast_rate_limited_and_never_replaces_a_toast():
+    r = hot_rig(4.0)
+    r.run(1000)
+    _tap(r)
+    r.run(T.KNOCK_WAIT_MS + 200)
+    t0 = r.t
+    assert r.p.banner[0] == "PRESS 2X TO SCAN"
+    r.run(800)
+    _tap(r)                                     # while it shows: not re-raised, not extended
+    r.run(T.TOAST_MS)
+    shown = [p for p in r.params if p.t_ms >= t0 and p.banner]
+    assert len(shown) * 100 <= T.TOAST_MS + 200 and r.p.banner is None
+    while r.t - t0 < T.IGNORED_TOAST_GAP_MS - T.KNOCK_WAIT_MS - 300:
+        r.run(100)
+    _tap(r)                                     # toast gone, but within the 5 s: none
+    r.run(T.KNOCK_WAIT_MS + 200)
+    assert r.p.banner is None
+    r.run(T.IGNORED_TOAST_GAP_MS)
+    _tap(r)
+    r.run(T.KNOCK_WAIT_MS + 200)
+    assert r.p.banner[0] == "PRESS 2X TO SCAN"
+    lk = _looking()                             # FRIEND LEFT up in looking: kept
+    lk.g._toast_set("FRIEND LEFT", "warn")
+    lk.run(100, packets=False)
+    _tap(lk)
+    lk.run(T.KNOCK_WAIT_MS + 200, packets=False)
+    assert lk.p.banner == ("FRIEND LEFT", "warn", False)
+    b = hot_rig(4.0)
+    b.run(1000)
+    b.g._toast_set("BACK IN RANGE", "info")
+    b.run(100)
+    _tap(b)
+    b.run(T.KNOCK_WAIT_MS + 200)
+    assert b.p.banner[0] == "BACK IN RANGE"
+    b.run(T.TOAST_MS)
+    assert not any(p.banner and p.banner[0] == "PRESS 2X TO SCAN" for p in b.params)
+
+
+def test_knock_touches_never_toast():
+    def hot():
+        r = hot_rig(4.0)
+        r.state = SC_HOT | ST_TAP_HOT
+        r.run(1000)
+        return r
+
+    def found():
+        r = hot_rig()
+        _found_by_press(r)
+        r.state = SC_FOUND
+        r.run(T.FOUND_CELEBRATE_MS + 300)
+        return r
+
+    for make in (hot, found):
+        for case in ("both", "partner"):
+            r = make()
+            t = r.t + 10
+            r.g.on_touch_down(t)
+            if case == "both":
+                assert r.g.on_accel_tap(t + 20)
+            r.peer_tap(t + 40, 3)               # its report lands a beacon later
+            r.g.on_gesture(t + 100, G_TAP, 120, 120, t)
+            ps = r.run(T.KNOCK_WAIT_MS + 1000)
+            assert not any(p.banner and p.banner[0] in ("PRESS 2X TO SCAN", "PRESS THE BUTTON")
+                           for p in ps), (make.__name__, case)
+    # only our watch spiked: in HOT the felt-it check speaks; in FOUND it was a finger
+    r = hot()
+    t = r.t + 10
+    r.g.on_touch_down(t)
+    assert r.g.on_accel_tap(t + 20)
+    r.g.on_gesture(t + 100, G_TAP, 120, 120, t)
+    ps = r.run(T.KNOCK_WAIT_MS + 1000)
+    assert not any(p.banner and p.banner[0] == "PRESS 2X TO SCAN" for p in ps)
+    f = found()
+    t = f.t + 10
+    f.g.on_touch_down(t)
+    assert f.g.on_accel_tap(t + 20)
+    f.g.on_gesture(t + 100, G_TAP, 120, 120, t)
+    f.run(T.KNOCK_WAIT_MS + 300)
+    assert f.p.banner == ("PRESS THE BUTTON", "info", False) and f.g.mode == M_FOUND
+
+
+def test_filtered_touches_never_toast():
+    r = hot_rig(4.0)
+    r.run(1000)
+    _tap(r, 10, 10)                             # outside the iris: a grip
+    ps = r.run(T.KNOCK_WAIT_MS + 300)
+    assert all(p.banner is None for p in ps)
+    _tap(r)                                     # a tap, then more landings: a burst
+    t = r.t + 10
+    r.g.on_touch_down(t + 150)
+    r.g.on_touch_down(t + 300)
+    ps = r.run(T.KNOCK_WAIT_MS + 300)
+    assert all(p.banner is None for p in ps)
+    o = hot_rig(4.0)                            # the screen goes dark inside the knock wait
+    o.face_up = False
+    o.run(100)
+    while ticks_diff(o.t, o.g._down_since) < T.WRIST_DOWN_MS - 300:
+        o.run(100)
+    _tap(o)
+    ps = o.run(T.KNOCK_WAIT_MS + 300)
+    assert not o.g.screen_on and all(p.banner is None for p in ps)
+    d = hot_rig(4.0)
+    d.face_up = False
+    _dark(d)
+    _tap(d)                                     # a dark screen
+    ps = d.run(T.KNOCK_WAIT_MS + 300)
+    assert all(p.banner is None for p in ps)
+
+
+def test_no_toast_where_the_screen_already_says_it():
+    def tap_quiet(r, packets=True):
+        _tap(r)
+        ps = r.run(T.KNOCK_WAIT_MS + 400, packets=packets)
+        assert all(p.banner is None for p in ps), [(p.screen, p.banner) for p in ps]
+
+    h = hot_rig()                               # bump-ready: BUMP! holds the slot
+    assert h.p.word == "BUMP!"
+    tap_quiet(h)
+    s = _to_split(Rig())                        # SEARCHING: the split ends with no link
+    while s.g.mode != M_SEARCHING:
+        s.run(100, packets=False)
+    s.run(T.TOAST_MS, packets=False)
+    tap_quiet(s, packets=False)
+    w = warm_rig()                              # LINK-LOST: its banner owns the slot
+    w.run(6000, packets=False)
+    assert w.p.screen == "LINK_LOST"
+    _tap(w)
+    ps = w.run(T.KNOCK_WAIT_MS + 400, packets=False)
+    assert all(p.banner[0] == "SIGNAL LOST" for p in ps), [p.banner for p in ps]
+    c = Rig()
+    c.rssi = -50
+    c.run(600)
+    c.g.on_button(c.t)
+    c.run(100)
+    assert c.p.sub == "confirmed"
+    tap_quiet(c)
+    f = hot_rig()
+    _found_by_press(f)
+    f.state = SC_FOUND
+    tap_quiet(f)                                # celebrate
+
+
+def test_ignored_toast_dropped_when_the_screen_changed():
+    r = hot_rig(4.0)
+    r.run(1000)
+    _tap(r)
+    _found_by_press(r)                          # FOUND inside the knock wait
+    ps = r.run(T.KNOCK_WAIT_MS + 300)
+    assert not any(p.banner and p.banner[0] == "PRESS 2X TO SCAN" for p in ps)
+
+
+def test_ignored_tap_or_press_in_looking_says_swipe():
+    r = _looking(500)
+    _tap(r)
+    r.run(T.KNOCK_WAIT_MS + 200, packets=False)
+    assert r.p.banner == ("SWIPE: HOW TO PLAY", "info", False)
+    r.run(T.TOAST_MS + T.IGNORED_TOAST_GAP_MS, packets=False)
+    assert r.p.banner is None                   # the timed hint does not repeat it
+    r.g.on_button(r.t)
+    r.run(T.KNOCK_WAIT_MS + 200, packets=False)
+    assert r.p.banner == ("SWIPE: HOW TO PLAY", "info", False)
