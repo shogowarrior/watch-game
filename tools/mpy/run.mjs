@@ -4,7 +4,7 @@
 //   node tools/mpy/run.mjs tests/runner.py [args...]
 //   node tools/mpy/run.mjs tools/bakeoff.py --quick
 //
-// The repo's Python packages (app/, finder/, hal/, sim/, ui/, tests/, tools/) are copied
+// The repo's Python packages (app/, finder/, hal/, native/, sim/, ui/, tests/, tools/) are copied
 // into the WebAssembly filesystem at /repo and cwd is /repo, and sys.argv is set
 // as CPython would set it.
 import { loadMicroPython } from "./node_modules/@micropython/micropython-webassembly-pyscript/micropython.mjs";
@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const DIRS = ["app", "finder", "hal", "sim", "ui", "tests", "tools"];
+const DIRS = ["app", "finder", "hal", "native", "sim", "ui", "tests", "tools"];
 const [script, ...args] = process.argv.slice(2);
 if (!script) {
   console.error("usage: node tools/mpy/run.mjs <file.py> [args...]");
