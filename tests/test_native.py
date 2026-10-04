@@ -89,6 +89,21 @@ def test_bench_report_groups_lines_by_variant():
     assert "| variant | hz | target | fps | p95_us | miss |" in md and "| idf-esplcd | espidf | NO | - |" in md
 
 
+def test_wifi_files_for_native_builds_are_ignored():
+    # The only places a native build may keep Wi-Fi details (native/.gitignore).
+    _cpython("runs git (CPython)")
+    import subprocess
+    for p in ("native/arduino/include/wifi_secrets.h", "native/idf/main/wifi_secrets.h",
+              "native/idf/lvgl/src/wifi_secrets.h", "native/arduino/secrets.ini", "native/idf/secrets.ini"):
+        try:
+            r = subprocess.run(["git", "check-ignore", "-q", p], capture_output=True)
+        except OSError:
+            raise Skip("git is not installed")
+        if r.returncode == 128:
+            raise Skip("not a git checkout")
+        assert r.returncode == 0, p + " is not ignored by git"
+
+
 def test_capture_keeps_lines_until_done():
     # native/tools/capture.py on a pseudo-terminal: every line kept, CRs dropped,
     # partial lines held until their newline, stop at the --until text.

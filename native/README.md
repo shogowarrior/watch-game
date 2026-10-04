@@ -43,6 +43,14 @@ pio run -d native/idf                 # -> native/idf/.pio/build/{bench-esplcd,b
 pio run -d native/idf/lvgl            # -> native/idf/lvgl/.pio/build/bench-lvgl/firmware.bin
 ```
 
+## Wi-Fi details
+
+The native builds don't join Wi-Fi. If one ever needs to, the name and password
+go only in a file named `wifi_secrets.h` (C/C++) or `secrets.ini` (PlatformIO
+`extra_configs`), which `native/.gitignore` ignores at any depth
+(`tests/test_native.py` checks it). They never go in `platformio.ini`, build
+flags, `sdkconfig*`, source, logs or chat.
+
 ## MicroPython with a C module (`micropython/`)
 
 Stock MicroPython keeps every buffer in PSRAM, which the SPI DMA cannot read,
