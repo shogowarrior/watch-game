@@ -19,7 +19,12 @@
   for 0.7 s, so the chip does not flicker); the result is clamped to nominal +-6 dB; after
   10 s the nominal p1m is used (toast ``CAL SKIPPED``).
 * ``split``: 30 s countdown (``split_s``), TICK at 3/2/1, CLOSER and ``GO`` at 0
-  for 1 s.
+  for 1 s. Either player may tap READY (``set_ready``: TICK; final), and the
+  partner's READY arrives in its beacons (``set_peer_ready``: DOUBLE). Once
+  both are ready the countdown jumps to ``PAIR_READY_LEFT_S`` (3) left, so
+  both watches still give the 3/2/1 ticks and GO together; each watch jumps
+  when it learns the second READY, so they stay within one beacon of each
+  other. With one or no READY the full countdown runs.
 
 ``update(t)`` returns the haptic started this frame (or None); ``toast`` is a
 one-shot set on the update that raised it. Pure logic, no radio access.
@@ -28,7 +33,7 @@ one-shot set on the update that raised it. Pure logic, no radio access.
 import math
 from array import array
 
-from finder.compat import TickRing, ticks_diff
+from finder.compat import TickRing, ticks_add, ticks_diff
 from finder import tuning as T
 from finder.haptic_patterns import stronger
 
@@ -195,6 +200,9 @@ class Pairing:
         self._last_rx = None
         self._last_pair = None     # the partner last showed PAIRING (seen/confirmed)
         self.countdown = None
+        self.ready = False         # split: this player tapped READY
+        self.peer_ready = False    # ... and the partner did (from its beacons)
+        self.t_split = t_ms        # split start (t_sub moves when READY skips ahead)
         self.toast = None
         self.unstable = False
         self._unst_t = None
@@ -204,8 +212,35 @@ class Pairing:
     def start_split(self, t_ms):
         """New round with the existing pairing and calibration."""
         self._set(SPLIT, t_ms)
+        self.t_split = t_ms
         self.countdown = self.split_s
         self._digit = self.split_s
+        self.ready = False
+        self.peer_ready = False
+
+    def set_ready(self, t_ms):
+        """This player tapped READY in the split (before GO); final."""
+        if self.sub != SPLIT or self.ready or self.countdown == 0:
+            return
+        self.ready = True
+        self._emit("TICK")
+        self._skip(t_ms)
+
+    def set_peer_ready(self, t_ms, on):
+        """The partner's beacons say READY (it shows its split)."""
+        if self.sub != SPLIT or not on or self.peer_ready:
+            return
+        self.peer_ready = True
+        self._emit("DOUBLE")
+        self._skip(t_ms)
+
+    def _skip(self, t_ms):
+        if not (self.ready and self.peer_ready):
+            return
+        left = self.split_s * 1000 - ticks_diff(t_ms, self.t_sub)
+        keep = T.PAIR_READY_LEFT_S * 1000
+        if left > keep:
+            self.t_sub = ticks_add(t_ms, keep - self.split_s * 1000)
 
     def _set(self, sub, t_ms):
         self.sub = sub

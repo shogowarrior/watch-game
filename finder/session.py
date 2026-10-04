@@ -209,6 +209,11 @@ class PeerView:
         return bool(self.state & ST_PRESS)
 
     @property
+    def ready(self):
+        """Tapped READY in its split countdown (it shows PAIRED)."""
+        return bool(self.flags & proto.F_READY) and (self.state & SC_MASK) == SC_PAIRED
+
+    @property
     def confirmed(self):
         return bool(self.state & ST_CONFIRMED)
 

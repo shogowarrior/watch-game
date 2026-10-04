@@ -74,7 +74,9 @@ in one message with the current default marked. Don't build on an assumption.
    - PAIRING split and SCANNING ready rings use the zone's lead/trail widths;
    - in sun mode the ghost rings lift one stop (snapshot `far_glow_sun`);
    - the MENU over FOUND freezes the breathing;
-   - no top chip while a sweep is paused.
+   - no top chip while a sweep is paused;
+   - the split READY skip: TAP WHEN READY, FRIEND READY, WAITING FOR FRIEND
+     and BOTH READY (snapshots `pairing_split_*`).
 
    The scan-result dart at θ already matches.
 3. **Simulator artifact.** Republish

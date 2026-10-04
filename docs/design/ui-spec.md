@@ -347,7 +347,7 @@ def sigma(s0, turn_deg, steps_walked, still_s, colder_hits, unreliable):
 - Path-loss exponent: n = 2.6 outdoors (default) and 3.0 indoors or in crowds, via `Game.set_place()` (tokens `calibrate.n` / `n_indoor`; see docs/estimation/bakeoff.md §6). Players set it with the MENU row `PLACE: OUT/IN`.
 - Every gate is expressed relative to p₁ₘ (for example, bump-ready is d ≤ 3 m from the model). None uses an absolute dBm value.
 - Beacon rate: 10 Hz normally, 20 Hz in HOT and on both watches during a scan, 5 Hz in saver.
-- Each beacon carries: own battery %, activity, steps, the screen and state flags (scan, press, goodbye, runes confirmed, bump made in HOT) and the age of the last bump spike (`bump_ago_ms`). The layout is in `finder/proto.py`. A watch in PAIRING `calibrate` or `split` sends its own screen code `PAIRED` instead of PAIRING: it is already paired.
+- Each beacon carries: own battery %, activity, steps, the screen and state flags (scan, press, goodbye, runes confirmed, bump made in HOT, ready in the split) and the age of the last bump spike (`bump_ago_ms`). The layout is in `finder/proto.py`. A watch in PAIRING `calibrate` or `split` sends its own screen code `PAIRED` instead of PAIRING: it is already paired.
 
 ---
 
@@ -365,10 +365,11 @@ The field table in each screen uses: ramp | I | speed | period | λ | glow_r | n
 | `seen` | green, rings stop, floor 0.4; halo breathes glow_amp 1.5↔3.0 over 2400 ms `in_out_sine` | 3 runes (48 px boxes at x 40–88, 96–144, 152–200, y 96–144), drawn in one every 150 ms, `text.primary`, `stroke.l` | chip `SAME RUNES?` | word `TAP = YES` | `DOUBLE` when the partner is seen |
 | `confirmed` | as `seen` | runes turn `prox.7` | chip `WAITING` | word `WAITING` | — |
 | `calibrate` (3 s) | green; the fill disc levels r 64→168 go to 4 as R(t) = 64 + 104·t/3 s, with a 3 px edge at level 6 | iris r 64, countdown `3 2 1` (`type.display`, x 108–132, y 96–144) | chip `STAND 1 STEP APART` | word `HOLD STILL` | `TICK` each second; `CLOSER` when done |
-| `split` (30 s) | **Live** hunt field from real packets (zone tempo, with the §5.3 lead / trail), heartbeat muted | iris r 64, countdown `30…0` (2 digits `type.display`, x 96–144) | chip `NO PEEKING` | word `SPLIT UP` | `TICK` at 3, 2, 1; `CLOSER` at 0 (word `GO` for 1 s) |
+| `split` (30 s) | **Live** hunt field from real packets (zone tempo, with the §5.3 lead / trail), heartbeat muted | iris r 64, countdown `30…0` (2 digits `type.display`, x 96–144) | chip `NO PEEKING`; from 5 s in `TAP WHEN READY`; `FRIEND READY` once the partner is ready; after this player's READY `WAITING FOR FRIEND`, then `BOTH READY` | word `SPLIT UP`; `READY` after this player's READY | `TICK` at 3, 2, 1; `CLOSER` at 0 (word `GO` for 1 s). `TICK` on this player's READY, `DOUBLE` on the partner's |
 
 - **Confirm:** the target is the whole iris (a 184 px disc) or a short press of the button (R-11 asks for 80 px or more). One action per player. A matched bump (both watches' accelerometer spikes within 400 ms, as in the HOT bump rule) in `seen` or `confirmed` confirms both sides at once and goes straight to `calibrate`; it skips the rune check (`finder/pairing.py`).
 - **Candidates:** only a watch that shows PAIRING (`looking`, `seen`, `confirmed`) is taken; one in `calibrate` or `split` (screen code `PAIRED`) is never a candidate. `seen` / `confirmed` return to `looking` when the partner is silent for 5 s or has not shown PAIRING for 2 s (it paired with someone else, or its round started without this watch).
+- **Ready skip (split):** a tap on the iris or a short press says READY. It cannot be taken back, and it is ignored once the countdown shows `GO`. Each beacon carries the sender's READY (flags bit 5, only while it shows `PAIRED`). When both players are ready the countdown jumps to 3 (`PAIR_READY_LEFT_S`) unless less is left, so both watches still give the 3, 2, 1 ticks and `GO` together. Each watch jumps when it learns of the second READY, so they stay within one beacon of each other. With one READY or none, the full 30 s runs. Mockup: `snapshots/pairing_split_*.png`.
 - **Calibration gate:** if the RSSI sd over 1 s is > 4 dB, the fill pauses and the top chip reads `HOLD STILL`. After 10 s the watch uses the nominal p₁ₘ and moves on (toast `CAL SKIPPED`).
 - **Runes:** chips overlap the iris rim in PAIRING. That is acceptable because no rings run behind them.
 
@@ -590,6 +591,7 @@ Every pulse is ≥ 60 ms and every gap ≥ 60 ms (ERM spin-up). Duty stays ≤ 1
 | **Tap** (touch down→up 60–400 ms, one finger, moving ≤ 12 px, inside r ≤ 92 of C) | FAR–WARM | Start SCANNING. The 3 s `ready` countdown is the confirmation window, so an accidental tap costs nothing and any second tap cancels |
 | Tap | HOT | Nothing: players knock the watches screen to screen, and a knock whose spike was missed must not start a scan (it would stop bump sensing). A short press scans (the second within 1 s, below) |
 | Tap | PAIRING `seen` | Confirm runes |
+| Tap | PAIRING `split` | READY (see PAIRING **Ready skip**) |
 | Bump watches | PAIRING `seen` / `confirmed` | Confirm both sides at once |
 | Tap | DIRECTION `turn` | "I'm facing it": lock now |
 | Tap | FOUND `result` | New round (not a knock's touch, below) |

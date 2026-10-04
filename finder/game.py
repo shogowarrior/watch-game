@@ -60,6 +60,9 @@ Choices where the spec is silent (all starting values):
   * ``ready`` cancels silently after SCAN_READY_DOWN_MS not flat or 15 s without
     completing, so an accidental tap never pins the screen on and 20 Hz
     beacons; the screen stays on in ``ready`` only while face-up
+  * the split READY tap (beacon flag ``F_READY``) is final and counts only
+    before GO; the partner's flag counts only while its beacon state is
+    PAIRED (calibrate/split), and each new split starts with both cleared
 
 Not yet wired (need a RenderParams contract change in finder/render_params.py
 and ui/renderer.py first): the 3 % BYE inward ring at -120 px/s (outside the
@@ -288,6 +291,8 @@ class Game:
         if self.mode == M_PAIRING and pr.sub == P.CALIBRATE:
             pr.on_rssi(t_ms, rssi)
             return
+        if self.mode == M_PAIRING and pr.sub == P.SPLIT:
+            pr.set_peer_ready(t_ms, self.peer.ready)
         peer_rssi = self.peer.rssi_last
         self.est.update(t_ms, rssi, peer_rssi, self.me.info, self.peer.motion)
         if self.mode == M_SCANNING:
@@ -436,7 +441,11 @@ class Game:
     def _primary(self, t_ms, button):
         m = self.mode
         if m == M_PAIRING:
-            self.pair.confirm(t_ms)
+            pr = self.pair
+            if pr.sub == P.SPLIT:
+                pr.set_ready(t_ms)
+            else:
+                pr.confirm(t_ms)
         elif m == M_HUNT:
             a = self.arrow
             if a is not None and a.tap():
@@ -1156,7 +1165,9 @@ class Game:
     def fill_beacon(self, b, now):
         """Write this watch's fields into ``b`` (proto.Beacon) at transmit time."""
         b.state = self.state_byte
-        b.set_flags(self.mode == M_SCANNING and self.scan.active, self.taps, self.me.walking)
+        pr = self.pair
+        b.set_flags(self.mode == M_SCANNING and self.scan.active, self.taps, self.me.walking,
+                    self.mode == M_PAIRING and pr.sub == P.SPLIT and pr.ready)
         b.rssi_last = proto.clamp_i8(self.rssi_last)
         b.rssi_filt = proto.clamp_i8(self.est.rssi_f)
         b.steps = self.me.steps & 0xFFFF
@@ -1259,8 +1270,19 @@ class Game:
             else:
                 glyph = "countdown"
                 cd = pr.countdown
-                top = "NO PEEKING"
-                word = "GO" if pr.go else "SPLIT UP"
+                if pr.ready:
+                    top = "BOTH READY" if pr.peer_ready else "WAITING FOR FRIEND"
+                    word = "READY"
+                else:
+                    if pr.peer_ready:
+                        top = "FRIEND READY"
+                    elif ticks_diff(t_ms, pr.t_split) >= T.PAIR_READY_HINT_MS:
+                        top = "TAP WHEN READY"
+                    else:
+                        top = "NO PEEKING"
+                    word = "SPLIT UP"
+                if pr.go:
+                    word = "GO"
                 z = px.zone
                 zone = z
                 if z is not None:

@@ -391,6 +391,8 @@ SCAN_HOLD_REPEAT_MAX = 3
 # ---- ui-spec only: Pairing, found, battery, power, input (ui-spec §6, §8)
 PAIR_SPLIT_S = 30
 PAIR_GO_MS = 1000  # split: GO shown 1 s at 0
+PAIR_READY_HINT_MS = 5000  # split: chip TAP WHEN READY from 5 s in
+PAIR_READY_LEFT_S = 3  # split: both ready -> the countdown jumps to 3
 CAL_GATE_WINDOW_MS = 1000  # RSSI sd over 1 s > unstable_sd pauses the fill
 SEARCHING_WALK_ABOUT_MS = 45000
 KNOCK_TOUCH_BEFORE_MS = 300  # a touch whose touch-down a counted spike precedes by up to this

@@ -13,7 +13,7 @@ from finder.pairing import Calibrator, Pairing, rune_ids, fnv1a32, UNSTABLE_SHOW
 from finder.session import (PeerView, LiveMirror, fmt_mss, screen_code, SC_PAIRING, SC_FAR,
                             SC_NEAR, SC_WARM, SC_HOT, SC_FOUND, SC_SCANNING, SC_PAIRED, SC_BYE,
                             SC_MASK, ST_PRESS, ST_GOODBYE, ST_CONFIRMED, ST_TAP_HOT)
-from finder.gestures import GestureRecognizer
+from finder.gestures import GestureRecognizer, TAP as G_TAP
 from finder.render_params import validate
 from finder.estimators import NAMES, make
 from finder.estimators.base import RangeEstimator, MotionInfo, ACT_STILL, ACT_WALK
@@ -452,6 +452,113 @@ def test_split_length_is_settable():
         pr.update(t)
         assert t < 8000
     assert pr.sub == "done" and t == 1000 + 5000 + T.PAIR_GO_MS
+
+
+def _to_split(r):
+    """Rig through pairing and calibration into the split countdown (30 s left)."""
+    r.rssi = -50
+    r.run(600)
+    r.g.on_button(r.t)
+    r.state = SC_PAIRED | ST_CONFIRMED
+    r.rssi = -44
+    r.run(200)
+    while r.p.sub != "split":
+        r.run(100)
+        assert r.t < 10000
+    assert r.p.countdown == 30
+
+
+def _tap(r):
+    r.g.on_gesture(r.t, G_TAP, 120, 120, r.t - 60)
+
+
+def test_ready_on_both_watches_skips_the_split_to_three():
+    """§6 split: a tap says READY (TICK, chip WAITING FOR FRIEND); the
+    partner's READY arrives in its beacons (DOUBLE, chip FRIEND READY); once
+    both are ready the countdown jumps to 3 and ends with the usual 3/2/1
+    ticks and GO."""
+    r = Rig()
+    _to_split(r)
+    r.run(2000)
+    assert r.p.top_text == "NO PEEKING" and r.p.word == "SPLIT UP"
+    assert not r.g.pair.ready and not r.b.ready
+    r.run(T.PAIR_READY_HINT_MS - 2000)
+    assert r.p.top_text == "TAP WHEN READY" and r.p.word == "SPLIT UP"
+    t0 = r.t
+    _tap(r)
+    r.run(100)
+    assert r.p.top_text == "WAITING FOR FRIEND" and r.p.word == "READY"
+    assert r.haptics(t0) == ["TICK"], r.haptics(t0)
+    b = proto.Beacon(1)
+    r.g.fill_beacon(b, r.t)
+    assert b.ready                               # the partner learns it from the beacons
+    _tap(r)                                      # a second tap changes nothing
+    r.run(3000)
+    assert r.p.countdown > 20 and r.p.word == "READY"
+    t1 = r.t
+    r.flags = proto.F_READY                      # the partner taps READY
+    r.run(100)
+    assert r.p.top_text == "BOTH READY" and r.p.countdown == 3
+    assert r.haptics(t1)[0] == "DOUBLE", r.haptics(t1)
+    n = 0
+    while r.p.word != "GO":
+        r.run(100)
+        n += 1
+        assert n <= 31
+    assert r.p.countdown == 0 and r.haptics(t1) == ["DOUBLE", "TICK", "TICK", "CLOSER"], \
+        r.haptics(t1)
+    assert 2900 <= r.t - t1 <= 3100, r.t - t1
+    r.run(T.PAIR_GO_MS)
+    assert r.g.mode == M_HUNT
+
+
+def test_ready_on_one_watch_runs_the_full_split():
+    """The partner's READY alone (or this watch's alone) never shortens it;
+    a READY flag from a watch that is not in its split (it does not show
+    PAIRED) is ignored."""
+    r = Rig()
+    _to_split(r)
+    t0 = r.t
+    r.flags = proto.F_READY
+    r.state = SC_HOT                             # not a split: no READY
+    r.run(300)
+    assert not r.g.pair.peer_ready and r.p.top_text == "NO PEEKING"
+    r.state = SC_PAIRED
+    r.run(300)
+    assert r.g.pair.peer_ready and r.p.top_text == "FRIEND READY" and r.p.word == "SPLIT UP"
+    assert "DOUBLE" in r.haptics(t0)
+    while r.p.word != "GO":
+        r.run(100)
+        assert r.t - t0 < 31000
+    assert 29800 <= r.t - t0 <= 30200, r.t - t0
+    r2 = Rig()
+    _to_split(r2)
+    t0 = r2.t
+    _tap(r2)
+    while r2.p.word != "GO":
+        r2.run(100)
+        assert r2.t - t0 < 31000
+    assert 29800 <= r2.t - t0 <= 30200 and r2.p.top_text == "WAITING FOR FRIEND"
+
+
+def test_ready_after_go_or_outside_the_split_does_nothing():
+    pr = Pairing(MAC_A)
+    pr.set_ready(0)
+    pr.set_peer_ready(0, True)
+    assert not pr.ready and not pr.peer_ready    # looking: no split
+    pr.start_split(1000)
+    t = 1000
+    while pr.countdown != 0:
+        t += 100
+        pr.update(t)
+    pr.set_ready(t)
+    assert not pr.ready                          # GO: too late
+    pr.start_split(t)                            # a new round forgets READY
+    pr.set_ready(t)
+    pr.set_peer_ready(t, True)
+    assert pr.ready and pr.peer_ready
+    pr.start_split(t + 100)
+    assert not pr.ready and not pr.peer_ready
 
 
 def test_split_without_link_goes_to_searching_then_zone_on_three_packets():
