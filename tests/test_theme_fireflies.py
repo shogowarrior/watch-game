@@ -1,12 +1,16 @@
 """ui/themes/fireflies.py: the Fireflies theme (ui-spec §4A "Fireflies").
 
-The generic theme contract (dirty regions, allocation, lens, MENU freeze)
-is in tests/test_themes.py. These check the numbers of the Fireflies
-paragraph: flies per zone, the blink locked to the ring spawn with the
-zone's sync, the orbit shrinking with I, the moments (listening specks,
-still glow, frozen scan, gold FOUND ring), the ghost beat in grey, flies
-off the lens, tight changed regions, and the fly kernel's viper build
-agreeing with its plain one. Frames need framebuf (MicroPython):
+The generic theme contract (dirty regions, allocation, lens, MENU freeze,
+reset, wakes, staged switch) is in tests/test_themes.py. These check the
+numbers of the Fireflies paragraph: flies per zone, the blink locked to the
+ring spawn with the zone's sync, the orbit shrinking with I, the moments
+(listening specks, still glow, frozen scan, gold FOUND ring), the ghost beat
+in grey and latched per beat, flies off the lens (and how they follow it
+when it opens, closes or the calibrate fill ends), the halo's crossfade on a
+moment change, the glide onto the FOUND ring, the saver's blink scale, the
+moment under the MENU, tight changed regions, the clock wrap, the staged
+load and the fly kernel's viper build agreeing with its plain one. Frames
+need framebuf (MicroPython):
 
     node tools/mpy/run.mjs tests/runner.py test_theme_fireflies
 """
@@ -24,10 +28,11 @@ except ImportError:
 
 if HAVE_FB:
     from tools import render_themes as rt
+    from ui.field import EASE_IOC, GHOST_AMP, ease
     from ui.renderer import FrameCapture
     from ui.themes import ThemedRenderer
     from ui.themes import fireflies as F
-    from ui.themes.base import ALL, theme_luts
+    from ui.themes.base import ALL, M_FOUND, theme_luts
 
 P = T.THEME_PARAMS["fireflies"]
 PERIOD = (2400, 1600, 1000, 500)        # zone ring periods (ui-spec §5.3)
@@ -69,6 +74,30 @@ def _run(r, cap, phases, t0, t1, step, each=None):
         if each is not None:
             each(t)
         t += step
+
+
+def _pos(th):
+    """{slot: (cx, cy)} of the flies drawn this frame."""
+    out = {}
+    for j in range(th.nn):
+        if _slot(th, F.F_CS, j) != F.NONE:
+            out[j] = (_slot(th, F.F_CX, j), _slot(th, F.F_CY, j))
+    return out
+
+
+def _moved(a, b):
+    """Largest per-frame move (px, the larger of |dx| and |dy|) of a fly
+    drawn in both position maps."""
+    m = 0
+    for j in b:
+        if j in a:
+            m = max(m, abs(b[j][0] - a[j][0]), abs(b[j][1] - a[j][1]))
+    return m
+
+
+def _arrow(z):
+    return rt.rs.hunt(z, sub="walk", glyph="arrow", arrow_deg=30, cone_deg=31,
+                      arrow_style="solid_b", trend=1)
 
 
 # ---- tokens (any runtime) ---------------------------------------------------------
@@ -581,3 +610,402 @@ def test_fly_kernel_viper_agrees_with_plain():
             assert ca.buf == cb.buf, (fx, t)
             assert a.theme.dirty == b.theme.dirty and a.theme.spans == b.theme.spans, (fx, t)
             t += 100
+
+
+# ---- review round fixes ------------------------------------------------------------
+def test_closing_lens_lets_the_flies_drift_back():
+    # an opening lens is taken at once (no fly on it); a closing one is
+    # followed at <= 30 px/s, so at 10 fps no fly moves more than 4 px a
+    # frame when the iris closes (it used to jump 35 px)
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    th = r.theme
+    for z in range(4):
+        phases = [(0, rt.rs.hunt(z)), (1000, _arrow(z)), (2000, rt.rs.hunt(z))]
+        r.reset()
+        last = None
+        edges = []
+        t = 0
+        while t <= 4500:
+            r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+            iris = r.field.iris
+            if 1000 <= t < 2000:
+                assert th.edge == max(iris + T.IRIS_RIM_PX, F.CORE_R), (z, t, th.edge, iris)
+            pos = _pos(th)
+            if t >= 2000:
+                edges.append(th.edge)
+                assert _moved(last, pos) <= 4, (z, t, _moved(last, pos))
+            last = pos
+            t += 100
+        drops = [edges[k] - edges[k + 1] for k in range(len(edges) - 1)]
+        assert max(drops) == 3 and min(drops) >= 0, (z, drops)
+        assert edges[0] == 64 + T.IRIS_RIM_PX and edges[-1] == F.CORE_R, (z, edges)
+
+
+def test_flies_come_back_after_the_calibrate_fill():
+    # the fill is the lens only while it is on: on the split's first frame
+    # (the fill fading) the clearance already follows the lens in, so the
+    # live flies come back from beyond the fill's edge a few px a frame
+    # (they used to stay hidden for the 600 ms fade, then all jump in 92 px)
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    th = r.theme
+    split = rt.rs.hunt(1, screen="PAIRING", sub="split", glyph="countdown", countdown=30)
+    phases = [(0, dict(rt.rs._cal, countdown=3)), (1000, dict(rt.rs._cal, countdown=2)),
+              (2000, dict(rt.rs._cal, countdown=1)), (3000, split)]
+    r.reset()
+    f = r.field
+    last = None
+    shown = []
+    fill_edge = 0
+    t = 0
+    while t <= 6500:
+        r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+        if t == 2900:
+            fill_edge = f.fill_r + 3
+            assert f.fill_v == F.FILL_V and th.edge == fill_edge, (th.edge, fill_edge)
+        if t == 3000:
+            assert 0 < f.fill_v < F.FILL_V                  # fading out
+            assert th.edge == fill_edge - 3, th.edge        # and the flies follow the lens in
+        pos = _pos(th)
+        if t >= 3000:
+            assert _moved(last, pos) <= 5, (t, _moved(last, pos))
+            n = 0                                           # centres on the screen, lit or not
+            for j in range(th.nn):
+                if 0 <= _slot(th, F.F_CX, j) < 240 and 0 <= _slot(th, F.F_CY, j) < 240:
+                    n += 1
+            shown.append(n)
+        last = pos
+        t += 100
+    assert shown[0] == 0 and shown[-1] == 9, shown          # all nine are back
+
+
+def test_ghost_is_read_once_per_beat():
+    # whether a beat is a ghost is the ring's own flag, read once per spawn
+    # and held to the next: ring_live dropping or rising mid-period changes
+    # nothing until the next spawn (it used to turn every blink in flight
+    # grey at once)
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    th = r.theme
+    f = r.field
+    top_green = theme_luts("fireflies")["green"].c[63]
+    top_grey = theme_luts("fireflies")["grey"].c[63]
+    live = rt.rs.hunt(1)                                    # NEAR: one beat per 1.6 s
+    ghost = dict(live, ring_live=False)
+    r.reset()
+    spawns = []
+    state = [0, 0]                                          # last spawn, frame time
+
+    def frame(kw):
+        t = state[1]
+        r.frame(rt.rs.make_params(t_ms=rt.T0 + t, **kw), cap, rt.T0 + t)
+        if f.last_spawn != state[0]:
+            state[0] = f.last_spawn
+            spawns.append(t)
+        state[1] = t + 50
+    while len(spawns) < 3:
+        frame(live)
+    while len(spawns) < 4:                                  # ring_live drops after a live spawn
+        frame(ghost)
+        if len(spawns) < 4:
+            assert th.fpa[F.NQ - 1] == top_green and th.pm[F.P_GAMP] == 256, state
+    assert th.fpa[F.NQ - 1] == top_grey                     # the ghost ring's own frame
+    k = len(spawns)
+    while len(spawns) == k:                                 # the next beat is a ghost: grey
+        frame(ghost if state[1] < spawns[-1] + 400 else live)
+        if len(spawns) == k:                                # (ring_live is back after 400 ms)
+            assert th.fpa[F.NQ - 1] == top_grey and th.pm[F.P_GAMP] == GHOST_AMP, state
+    assert th.fpa[F.NQ - 1] == top_green and th.pm[F.P_GAMP] == 256      # live again
+
+
+def test_switched_in_the_menu_over_found():
+    # a Fireflies made in the MENU over FOUND starts in FOUND with the FOUND
+    # screen's intensity, not the MENU params' (§4A rule 2), in gold, and
+    # nothing jumps when the MENU closes
+    _need_fb()
+    cap = FrameCapture()
+    found = dict(rt.rs._found, sub="result", word="TAP=AGAIN")
+    menu = dict(rt.rs._menu, sub="1v", menu_rows=rt.rs.MENU_ROWS, ramp="gold", intensity=0.3)
+    phases = [(0, found), (600, menu), (1600, found)]
+    gold = list(theme_luts("fireflies")["gold"].c)
+    r = ThemedRenderer("ripple", overlays=False)
+    last = None
+    t = 0
+    while t <= 2400:
+        if t == 1000:
+            r.set_theme("fireflies")
+        r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+        th = r.theme
+        if t >= 1000:
+            assert th.name == "fireflies" and th.m == M_FOUND and th.nn == 22, (t, th.m, th.nn)
+            assert th.ib == (F.NI - 1) * F.NE, (t, th.ib)  # I = 1.0 under the MENU too
+            for q in range(F.QK, F.NQ):
+                assert th.fpa[q] in gold, (t, q)
+            pos = _pos(th)
+            assert len(pos) == 22
+            if last is not None:
+                assert _moved(last, pos) <= 4, (t, _moved(last, pos))
+            last = pos
+        t += 100
+
+
+def test_halo_crossfades_with_the_moment():
+    # on a moment change floor and halo crossfade over the field's 600 ms
+    # (in_out_cubic, §5.3) from what was shown (they used to ease over
+    # ~150 ms: 1.4 levels in one frame into a scan)
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    th = r.theme
+    near = rt.rs.hunt(2, dist_band="~10")
+    scan = dict(rt.rs._scan, sub="sweep", glyph="turn", intensity=0.6, glow_r_px=12,
+                sweep=(135, rt.rs.BINS, 4, False))
+    phases = [(0, near), (1000, scan), (2000, near)]
+    r.reset()
+    g0 = g1 = 0
+    t = 0
+    while t <= 2800:
+        r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+        assert th.fl == F.FL_A
+        if t == 900:
+            g0 = th.gl
+        if 1000 <= t <= 1800:                               # into the scan: the live mirror
+            tgt = F.MG_A + ((F.MG_B * r._iq) >> 8)
+            e = ease(EASE_IOC, t - 1000, F.XF_MS)
+            want = g0 + (((tgt - g0) * e) >> 8)
+            assert th.gl == (want + 4) & ~7, (t, th.gl, want)
+        if t == 1900:
+            g1 = th.gl
+        if t == 2000:
+            assert th.gl == g1                              # out again: from what was shown
+        if t == 2100:
+            assert abs(th.gl - g1) < 64, (th.gl, g1)        # ... easing (1/4 level a frame)
+        if t >= 2600:                                       # ... to the halo, 0.9 I
+            assert th.gl == (((F.HALO * r._iq) >> 8) + 4) & ~7, (t, th.gl)
+        t += 100
+
+
+def test_flies_glide_onto_the_found_ring():
+    # HOT -> FOUND: the flies take the ring's places in their angular order
+    # (breathing 0.3 rad apart by place) and glide there over the 400 ms gold
+    # crossfade, never onto the lens (they used to jump up to 160 px); a
+    # wake into FOUND has no glide
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    th = r.theme
+    found = dict(rt.rs._found, sub="celebrate", word="FOUND")
+    phases = [(0, rt.rs.hunt(3, dist_band="<3")), (1000, dict(found, burst=True)), (1100, found)]
+    rt.run(r, cap, phases, 900)
+    before = _pos(th)
+    ang = [_slot(th, F.F_PA, j) for j in range(22)]
+    assert len(before) == 22
+    r.frame(rt.params_at(phases, 1000), cap, rt.T0 + 1000)
+    assert th.gliding and _pos(th) == before               # the FOUND frame: where they were
+    rk = [_slot(th, F.F_RK, j) for j in range(22)]
+    order = sorted(range(22), key=lambda j: (ang[j], j))
+    assert [rk[j] for j in order] == list(range(22)), rk
+    for j in range(22):
+        assert _slot(th, F.F_EO, j) == (rk[j] * F.STEP_FOUND_E) & 1023
+    last = before
+    t = 1100
+    while t <= 1700:
+        r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+        pos = _pos(th)
+        assert _moved(last, pos) <= 32, (t, _moved(last, pos))
+        for x, y in pos.values():
+            assert (x - 119.5) ** 2 + (y - 119.5) ** 2 >= 18 ** 2, (t, x, y)
+        if t >= 1400:
+            assert not th.gliding
+            for x, y in pos.values():
+                d = math.sqrt((x - 119.5) ** 2 + (y - 119.5) ** 2)
+                assert 72.5 <= d <= 95.5, (t, x, y)
+        last = pos
+        t += 100
+    # places 1/22 turn apart, in the order the flies came in
+    a = [_slot(th, F.F_PA, j) for j in range(22)]
+    for j in range(22):
+        k = order[(rk[j] + 1) % 22]
+        gap = (a[k] - a[j]) & 1023
+        assert 44 <= gap <= 49, (j, k, gap)
+    _, phases, _ = rt.fixture("found_result")             # a wake into FOUND: no glide
+    r.reset()
+
+    def each(t):
+        assert not th.gliding, t
+    _run(r, cap, phases, 0, 600, 100, each)
+
+
+def test_saver_scales_the_blink_amplitude():
+    # battery saver: pulse_amp x 0.7 (§8) on the blink, eased in and out by
+    # at most 256 per 600 ms (no flash)
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    th = r.theme
+    near = rt.rs.hunt(1)
+    saver = dict(near, status=(10, 64, 3, True, False))
+    phases = [(0, near), (1000, saver), (2500, near)]
+    r.reset()
+    sv = []
+    t = 0
+    while t <= 3500:
+        r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+        sv.append((t, th.sv, th.pm[F.P_GAMP]))
+        t += 100
+    step = (256 * 100) // F.XF_MS + 1
+    for k in range(1, len(sv)):
+        assert abs(sv[k][1] - sv[k - 1][1]) <= step, sv[k]
+    for t, v, g in sv:
+        if t < 1000 or t >= 2800:
+            assert v == 256 and g == 256, (t, v, g)
+        if 1300 <= t < 2500:
+            assert v == F.SAVER_PU == 179 and g == 179, (t, v, g)
+    peak = {}
+    for name, kw in (("on", near), ("saver", saver)):
+        r.reset()
+        hi = -1
+        t = 0
+        while t <= 4000:
+            r.frame(rt.rs.make_params(t_ms=rt.T0 + t, **kw), cap, rt.T0 + t)
+            hi = max(hi, _level(th, 0))
+            t += 20
+        peak[name] = hi
+    assert peak["saver"] < peak["on"] == F.NE - 1, peak
+
+
+def test_clock_wraps_on_whole_cycles():
+    # the theme clock wraps on whole breaths and whole cycles of the speck
+    # trip angles, derived from the tokens (it was a hand-made constant)
+    from ui.themes import fireflies as FF
+    a, b = FF.BREATHE_MS, FF.LISTEN_MS * FF.N_SANG
+    g = a
+    k = b
+    while k:
+        g, k = k, g % k
+    assert FF.CLK_WRAP == a // g * b < (1 << 30)
+    if not HAVE_FB:
+        return
+    # across the wrap the specks and the breathing carry on as if it were not
+    # there: a theme whose clock is 300 ms short of the wrap shows, frame for
+    # frame, the levels and specks one shows 300 ms earlier
+    cap = FrameCapture()
+    for fx in ("searching", "found_result"):
+        _, phases, _ = rt.fixture(fx)
+        ra = _renderer()
+        rb = _renderer()
+        seen = {}
+        t = 0
+        while t <= 2000:
+            p = rt.params_at(phases, t)
+            ra.frame(p, cap, rt.T0 + t)
+            rb.frame(p, cap, rt.T0 + t)
+            if t == 0:
+                rb.theme.clk = F.CLK_WRAP - 300
+                rb.theme.m_t0 = 0
+            ta = ra.theme
+            tb = rb.theme
+            seen[t] = [_level(ta, j) for j in range(ta.nn)]
+            if fx == "searching":
+                seen[t] = [(_slot(ta, F.F_CX, j), _slot(ta, F.F_CY, j), _slot(ta, F.F_CS, j))
+                           for j in range(3)]
+                cur = [(_slot(tb, F.F_CX, j), _slot(tb, F.F_CY, j), _slot(tb, F.F_CS, j))
+                       for j in range(3)]
+            else:
+                cur = [_level(tb, j) for j in range(tb.nn)]
+            if t >= 700:                                    # (the iris has opened in both)
+                assert cur == seen[t - 300], (fx, t, cur, seen[t - 300])
+            t += 100
+        assert rb.theme.clk == 2000 - 300                   # it did wrap
+
+
+def test_shared_helpers_are_the_shared_ones():
+    from ui import field
+    from ui.themes import base
+    from ui.themes import fireflies as FF
+    assert FF._aligned is field._aligned
+    assert FF.ALL == base.ALL
+    if HAVE_FB:
+        assert not hasattr(_renderer().theme, "np")
+
+
+_LOADED = ("_SPR", "_COR", "_SH", "_CH", "_nspr", "_tb", "_tbs", "_PYK", "_VK", "_vtried",
+           "_KERN", "_KIND")
+
+
+def _forget():
+    """Make the module load from scratch (fresh objects: themes already made
+    keep theirs)."""
+    F._SPR = [None] * F.N_SPR
+    F._COR = [None] * F.N_SPR
+    F._SH = bytearray(F.N_SPR)
+    F._CH = bytearray(F.N_SPR)
+    F._nspr = 0
+    F._tb = None
+    F._tbs = 0
+    F._PYK = None
+    F._VK = None
+    F._vtried = False
+    F._KERN = None
+    F._KIND = None
+
+
+def _queued(r, cap, phases):
+    """Frames until the queued theme takes over."""
+    n = 0
+    while r.loading is not None:
+        r.frame(rt.params_at(phases, n * 100), cap, rt.T0 + n * 100)
+        n += 1
+        assert n < 100, "load never finished"
+    return n
+
+
+def test_staged_load_resumes_and_draws_whole():
+    # loading through ThemedRenderer.queue_theme: the old theme draws until
+    # the last step, a load abandoned half way resumes without redoing a
+    # step, and the theme then draws exactly as one loaded whole
+    _need_fb()
+    saved = [getattr(F, k) for k in _LOADED]
+    _, phases, _ = rt.fixture("hot")
+    ca = FrameCapture()
+    cb = FrameCapture()
+    cc = FrameCapture()
+    try:
+        _forget()
+        a = ThemedRenderer("ripple", overlays=False)
+        a.queue_theme("fireflies")
+        full = _queued(a, ca, phases)
+        assert a.theme.name == "fireflies" and full >= 12, full
+        _forget()
+        b = ThemedRenderer("ripple", overlays=False)
+        b.queue_theme("fireflies")
+        for k in range(7):                                  # the import and six load steps
+            b.frame(rt.params_at(phases, k * 100), cb, rt.T0 + k * 100)
+        assert b.loading == "fireflies" and b.theme.name == "ripple"
+        assert F._nspr == F.N_SPR and F._tbs == 1 and F._PYK is None
+        b.set_theme("ripple")                               # abandoned
+        assert b.loading is None
+        b.queue_theme("fireflies")
+        assert _queued(b, cb, phases) == full - 6           # the six are not redone
+        # what it built is what the first load built
+        assert bytes(F._SH) == bytes(saved[2]) and bytes(F._CH) == bytes(saved[3])
+        assert list(F._tb) == list(saved[5]) and F._KIND == saved[11]
+        for n in range(F.N_SPR):
+            k = 1 if F._SH[n] == F.NONE else 2 * F._SH[n] + 1
+            for y in range(k):
+                for x in range(k):
+                    assert F._SPR[n].pixel(x, y) == saved[0][n].pixel(x, y), (n, x, y)
+        c = ThemedRenderer("fireflies", overlays=False)
+        for fx in ("hot", "found_celebrate", "searching"):
+            _, ph, ms = rt.fixture(fx)
+            rt.run(a, ca, ph, ms)
+            rt.run(b, cb, ph, ms)
+            rt.run(c, cc, ph, ms)
+            assert ca.buf == cc.buf and cb.buf == cc.buf, fx
+    finally:
+        for k, v in zip(_LOADED, saved):
+            setattr(F, k, v)
