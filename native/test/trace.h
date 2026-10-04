@@ -8,6 +8,16 @@
 // the Python attribute names. Numbers compare as Python's == does (exactly:
 // the port computes in double, as CPython does), objects field by field, and
 // fields that refer to another traced object are left to that object's trace.
+//
+// What an object called while a recorded call ran comes before that call's
+// line, in order: functions it was given ("cb" lines) and methods of a device
+// it was given ("dev" lines: a test's stand-in for a hal part, with the
+// result and the device's fields that changed). Calls holds them; the port's
+// stand-in function or fake device takes each one as the C++ makes the same
+// call, answers with its result (and a fake device takes on the recorded
+// fields), and a call left over or made out of order is a difference. A call
+// that raised OSError in Python ("err") is a C++ status return; the port
+// returns Jraise() for it.
 #pragma once
 #include <stdint.h>
 
@@ -88,6 +98,9 @@ Json Jbytes(const uint8_t* p, size_t n);
 // "crc": CRC-32 of its bytes}; item is the C++ element size ('f': float).
 Json Jarray(char typecode, const void* data, size_t n, size_t item);
 Json Jobj(const char* cls, std::vector<std::pair<std::string, Json>> fields);   // {"@": cls, ...}; no "@" if cls is null
+// The result of a call that raised in Python (the trace's "err"), as the
+// port gives it where the C++ returns a bus error (false, -1).
+Json Jraise(const char* type = "OSError");                                      // {"@raise": type}
 
 // Python's == on recorded values; *where names the first difference.
 bool same(const Json& want, const Json& got, std::string* where);
@@ -96,15 +109,23 @@ bool same(const Json& want, const Json& got, std::string* where);
 class State {
  public:
   void operator()(const char* name, Json v) { fields.emplace_back(name, std::move(v)); }
+  // A field this object's replay no longer checks: other code changed it in
+  // a way the port does not model.
+  void skip(const char* name) { skipped.emplace_back(name); }
   std::vector<std::pair<std::string, Json>> fields;
+  std::vector<std::string> skipped;
 };
 
-// The calls an object made to a function it was given, as recorded, for the
-// port's stand-in function to answer in order.
+// The calls an object made to functions and devices it was given, as
+// recorded, for the port's stand-ins to answer in order.
 class Calls {
  public:
   // The recorded result of the next call, after checking it is `name` with `args`.
   Json take(const char* name, const Json& args);
+  // The next call's "dev" line, after checking it is dev.method(args): its
+  // "r", or "err" where Python raised, and in "s" the device's fields that
+  // changed since this object's previous "dev" line.
+  Json device(const char* dev, const char* method, const Json& args);
   std::deque<Json> pending;
 };
 
