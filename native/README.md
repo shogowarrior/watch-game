@@ -83,8 +83,8 @@ library is needed. Close any serial monitor first. After `HM done` the watch
 keeps showing the HOT field at 20, 30 and 60 fps in turn, 10 s each, for
 judging smoothness by eye (the LVGL build: its chips over the field, then its
 arcs, at 30 fps). The I2C0 check in `bench-esplcd` adds about 20 s before the
-display steps; keep the watch still then. If the watch switches off during it,
-the faster clock upset the power chip: press the side button to turn it on.
+display steps. If the watch switches off during it, the faster clock upset the
+power chip: press the side button to turn it on.
 
 To go back to MicroPython: `tools/flash.sh <port>` (it erases the flash), then
 `python3 tools/deploy.py --port <port>`.

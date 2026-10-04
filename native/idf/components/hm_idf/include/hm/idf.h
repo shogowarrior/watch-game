@@ -1,5 +1,5 @@
-// ESP-IDF 5 hardware shared by the native/idf builds: I2C0 with a clock per chip,
-// and two ways to drive the ST7789 over SPI2 (HSPI) with DMA.
+// ESP-IDF 5 hardware shared by the native/idf builds: the two I2C buses with a
+// clock per chip, and two ways to drive the ST7789 over SPI2 (HSPI) with DMA.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -13,11 +13,12 @@
 namespace hm {
 namespace idf {
 
-// I2C0 on pins 21/22: the AXP202, the BMA423 and the PCF8563 RTC, one handle each.
-class I2c0 : public I2cBus {
+// One I2C controller and the chips on it, one handle each, each at its own clock.
+class I2cPort : public I2cBus {
  public:
-  static constexpr uint8_t AXP202 = 0x35, BMA423 = 0x19, PCF8563 = 0x51;
-  static constexpr uint32_t HZ = 400000;      // what the AXP202 and the RTC are rated for
+  static constexpr uint32_t HZ = 400000;      // the AXP202, RTC and touch panel's rating
+  static constexpr int MAX_CHIPS = 3;
+  I2cPort(int port, int sda, int scl, const uint8_t* addrs, int n);
   bool begin();                               // every chip at HZ
   // That chip's SCL clock from its next transfer. Only while nothing else uses the chip.
   bool set_clock(uint8_t addr, uint32_t hz) override;
@@ -25,11 +26,26 @@ class I2c0 : public I2cBus {
   bool read(uint8_t addr, uint8_t reg, uint8_t* d, size_t n) override;
 
  private:
-  static constexpr int N = 3, TIMEOUT_MS = 50;
-  static constexpr uint8_t ADDRS[N] = {AXP202, BMA423, PCF8563};
+  static constexpr int TIMEOUT_MS = 50;
   int index(uint8_t addr) const;
+  const int port_, sda_, scl_, n_;
+  uint8_t addrs_[MAX_CHIPS] = {};
   i2c_master_bus_handle_t bus_ = nullptr;
-  i2c_master_dev_handle_t dev_[N] = {};
+  i2c_master_dev_handle_t dev_[MAX_CHIPS] = {};
+};
+
+// I2C0 on pins 21/22: the AXP202, the BMA423 and the PCF8563 RTC.
+struct I2c0 : I2cPort {
+  static constexpr uint8_t AXP202 = 0x35, BMA423 = 0x19, PCF8563 = 0x51;
+  static constexpr uint8_t CHIPS[] = {AXP202, BMA423, PCF8563};
+  I2c0() : I2cPort(0, 21, 22, CHIPS, 3) {}
+};
+
+// I2C1 on pins 23/32: the FT6336 touch panel.
+struct I2c1 : I2cPort {
+  static constexpr uint8_t FT6336 = 0x38;
+  static constexpr uint8_t CHIPS[] = {FT6336};
+  I2c1() : I2cPort(1, 23, 32, CHIPS, 1) {}
 };
 
 // SPI2 with SCK 18, MOSI 19 and no MISO (HSPI's default MISO is GPIO12, the
