@@ -42,7 +42,8 @@ The C++ port of `finder/` (one header per Python module, `core/include/hm/<modul
 names as in Python, floats as `double` like CPython, ticks with MicroPython's
 2^30 period) is checked call for call against the Python. `run.py` runs
 `tools/trace_game.py` while it compiles: it runs Python tests (`TESTS` there:
-those of the modules ported so far) with every game class wrapped, and records
+those of the modules ported so far), each with the game classes `TESTS` names
+for it wrapped (objects of the others still show as references), and records
 each outermost call on each object (arguments, result, the object's public
 state afterwards, the functions it calls back, attributes other code writes
 between calls) into one JSON-lines file per class. Each ported class has a
