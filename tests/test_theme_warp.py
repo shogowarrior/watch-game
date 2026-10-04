@@ -32,6 +32,14 @@ def _need_fb():
         raise Skip("framebuf is MicroPython-only")
 
 
+def _loaded():
+    """Warp's load steps all done, as make() and ThemedRenderer run them
+    (load() is idempotent), for tests that use the module's kernels."""
+    _need_fb()
+    for _ in W.load():
+        pass
+
+
 def _renderer():
     return ThemedRenderer("warp", overlays=False)
 
@@ -53,6 +61,29 @@ def _shown(th):
 
 def _u(th, j):
     return th.st[j * W.ST_N]
+
+
+def _drawing(kern, bad=0):
+    """A star kernel for kernel_agrees from a plain one: ``kern`` runs
+    without drawing, then its segments go out as fb.line calls (as the
+    wasm path draws them). ``bad`` 1 gets one colour wrong, 2 adds a stray
+    pixel."""
+    def k(st, cst, tab, rtab, prm, seg, fbuf, sp):
+        d = prm[W.P_DRAW]
+        prm[W.P_DRAW] = 0
+        b = kern(st, cst, tab, rtab, prm, seg, fbuf, sp)
+        prm[W.P_DRAW] = d
+        if bad == 1:
+            seg[4] ^= 1
+        if d:
+            y0 = prm[W.P_FY0]
+            for i in range(prm[W.P_NSEG]):
+                o = i * 5
+                fbuf.line(seg[o], seg[o + 1] - y0, seg[o + 2], seg[o + 3] - y0, seg[o + 4])
+            if bad == 2:
+                fbuf.pixel(5, 5, 0x1234)
+        return b
+    return k
 
 
 def _lut(name, ramp):
@@ -97,7 +128,7 @@ def test_kernel_literals_are_the_constants():
 def test_kernels_agree():
     # where viper compiled (the watch, a 32-bit unix build) it is used only
     # after matching the plain kernel and FrameBuffer.line; elsewhere plain
-    _need_fb()
+    _loaded()
     assert W.KERNEL in ("viper", "python"), W.KERNEL        # never "self-check failed"
     assert W.DIFF_KIND in ("viper", "python"), W.DIFF_KIND
     if W.KERNEL == "viper":
@@ -109,31 +140,71 @@ def test_kernels_agree():
         assert W.diff_agrees(W.pal_diff_py, W.pal_diff)
     # the check itself: a kernel that draws its segments with fb.line passes,
     # one that gets a single colour wrong, or draws one stray pixel, is caught
-    def drawing(bad):
-        def kern(st, cst, tab, rtab, prm, seg, fbuf, sp):
-            d = prm[W.P_DRAW]
-            prm[W.P_DRAW] = 0
-            b = W.star_kernel_py(st, cst, tab, rtab, prm, seg, fbuf, sp)
-            prm[W.P_DRAW] = d
-            if bad == 1:
-                seg[4] ^= 1
-            if d:
-                y0 = prm[W.P_FY0]
-                for i in range(prm[W.P_NSEG]):
-                    o = i * 5
-                    fbuf.line(seg[o], seg[o + 1] - y0, seg[o + 2], seg[o + 3] - y0, seg[o + 4])
-                if bad == 2:
-                    fbuf.pixel(5, 5, 0x1234)
-            return b
-        return kern
+    assert W.kernel_agrees(W.star_kernel_py, _drawing(W.star_kernel_py))
+    assert not W.kernel_agrees(W.star_kernel_py, _drawing(W.star_kernel_py, 1))
+    assert not W.kernel_agrees(W.star_kernel_py, _drawing(W.star_kernel_py, 2))
 
-    assert W.kernel_agrees(W.star_kernel_py, drawing(0))
-    assert not W.kernel_agrees(W.star_kernel_py, drawing(1))
-    assert not W.kernel_agrees(W.star_kernel_py, drawing(2))
+
+def test_self_check_covers_the_cap_and_unchanged_stars():
+    # a kernel without the saver cap, or one that reports unchanged stars as
+    # changed, fails the self-check (the listening frame's cap bites, and
+    # the held frame runs twice on the same state)
+    _loaded()
+    src = W._SSRC
+    assert W.kernel_agrees(W.star_kernel_py, _drawing(W._plain(src, "star_kernel")))
+    for a, b in (("if v > vmax:", "if v > vmax + 99999:"),
+                 ("            if same == 0:\n", "            if same >= 0:\n")):
+        assert a in src, a
+        bad = W._plain(src.replace(a, b), "star_kernel")
+        assert not W.kernel_agrees(W.star_kernel_py, _drawing(bad)), a
+
+
+def test_loads_in_steps():
+    # queue_theme loads Warp one step a frame while Ripple keeps drawing (the
+    # module's load() runs each _step once, also when a load is abandoned
+    # half-way and queued again), then draws as a theme loaded whole
+    _loaded()
+    done = []
+    step = W._step
+
+    def counted(k):
+        done.append(k)
+        return step(k)
+
+    W._stage = 0
+    W._step = counted
+    try:
+        r = ThemedRenderer("ripple", overlays=False)
+        cap = FrameCapture()
+        _, phases, run_ms = rt.fixture("hot")
+        r.queue_theme("warp")
+        t = 0
+        while r.loading is not None:
+            n0 = len(done)
+            r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+            assert len(done) - n0 <= 1, done            # at most one load step a frame
+            assert r.loading is None or r.theme.name == "ripple"
+            t += rt.STEP_MS
+            if t == 600:                                # abandoned, then queued again
+                r.queue_theme("ripple")
+                assert r.loading is None
+                r.queue_theme("warp")
+            assert t < 5000, done
+        assert r.theme.name == "warp"
+        assert W._stage == W._NSTEPS and done[-1] == W._S_END, done
+        assert len(set(done)) == len(done) and len(done) >= 8, done    # each step once
+        assert W.KERNEL in ("viper", "python"), W.KERNEL
+    finally:
+        W._step = step
+    b = ThemedRenderer("warp", overlays=False)
+    cb = FrameCapture()
+    rt.run(r, cap, phases, run_ms)
+    rt.run(b, cb, phases, run_ms)
+    assert cap.buf == cb.buf
 
 
 def test_pal_diff():
-    _need_fb()
+    _loaded()
     import array
     for fn in (W.pal_diff_py, W.pal_diff):
         cur = array.array("H", range(256))
@@ -389,6 +460,196 @@ def test_menu_holds_the_stars():
     assert rec[5][1] != rec[9][1]                      # they flew before the menu
 
 
+def test_a_step_over_a_trip_wraps():
+    # a 250 ms frame (the longest step the clock gives) on a HOT beat moves
+    # the fastest stars more than a whole trip: the phase wraps mod 1 and the
+    # star restarts as on any wrap, never runs past the end of its trip
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    hot = rs.hunt(3, dist_band="~5")
+    fast = max(W.CST[j * W.CS_N] for j in range(W.NMAX))
+    over = 0
+    r.reset()
+    for t in range(0, 5001, 250):
+        r.frame(rs.make_params(t_ms=rt.T0 + t, **hot), cap, rt.T0 + t)
+        th = r.theme
+        if (th.prm[W.P_G] * fast) >> 8 > 65535:
+            over += 1
+        for j in range(W.NMAX):
+            u = th.st[j * W.ST_N]
+            assert 0 <= u <= 65535, (t, j, u)
+    assert over > 0, "no step over a trip"
+
+
+def test_no_surge_from_a_listening_spawn():
+    # SEARCHING's inward rings are no beats: FAR right after one does not
+    # surge until its own first ring (outward, live) spawns, then does
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    _, sp, _ = rt.fixture("searching")
+    phases = [(0, sp[0][1]), (3300, rs.hunt(0, dist_band="~40"))]
+    rec = []
+
+    def each(t, r, ev):
+        f = r.field
+        out = 0
+        for k in range(len(f.r_on)):
+            if f.r_on[k] and f.r_t0[k] == f.last_spawn and f.r_v[k] > 0:
+                out = 1
+        rec.append((t, r.theme.surge, out, rt.T0 + t - f.last_spawn))
+
+    _run(r, cap, phases, 6000, each)
+    far = [x for x in rec if x[0] >= 3300]
+    assert far[0][3] < 1000                      # the inward spawn is young
+    first = [x[0] for x in far if x[2]]
+    assert first, "FAR never spawned a ring"
+    for t, surge, out, age in far:
+        if t < first[0]:
+            assert surge == 0, (t, surge, age)
+    beat = [x for x in far if x[0] == first[0]][0]
+    assert beat[1] == W.SURGE[beat[3] // W.SURGE_STEP] and beat[1] > 0, beat
+
+
+def test_reset_restores_a_fresh_theme():
+    # after a renderer reset the stars start where a fresh theme starts
+    # them, with every clock and latch cleared, so frames match a fresh one's
+    _need_fb()
+    a = _renderer()
+    b = _renderer()
+    cap = FrameCapture()
+    _, phases, run_ms = rt.fixture("hot")
+    _run(a, cap, phases, run_ms)
+    a.reset()
+    ta = a.theme
+    tb = b.theme
+    assert bytes(ta.st) == bytes(tb.st)
+    for k in ("twc", "fage", "ls", "ghost", "lbeat", "surge", "key", "xf_on", "n"):
+        assert getattr(ta, k) == getattr(tb, k), k
+    ca = FrameCapture()
+    cb = FrameCapture()
+    for fx in ("pairing_seen", "far"):
+        _, phases, run_ms = rt.fixture(fx)
+        _run(a, ca, phases, run_ms)
+        b = _renderer()
+        _run(b, cb, phases, run_ms)
+        assert ca.buf == cb.buf, fx
+
+
+def test_wake_into_found_never_replays_the_slowdown():
+    # a wake shows FOUND as it is (§4A rule 6): stopped when the renderer
+    # did not see FOUND start, where the slow-down is by then when it did
+    # (FOUND began in a dark spell); only the burst frame starts it at 1.6
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    cel = dict(rs._found, sub="celebrate", word="FOUND")
+    gs = []
+    _run(r, cap, [(0, cel)], 1000, lambda t, r, ev: gs.append(r.theme.prm[W.P_G]))
+    assert all(g == 0 for g in gs), gs
+    r.reset()
+    hot = rs.hunt(3, dist_band="<3")
+    for t in range(0, 900, 100):
+        kw = hot if t < 500 else (dict(cel, burst=True) if t == 500 else cel)
+        r.frame(rs.make_params(t_ms=rt.T0 + t, **kw), cap if t < 500 or t >= 800 else None,
+                rt.T0 + t)
+    assert r.theme.wake
+    r.frame(rs.make_params(t_ms=rt.T0 + 900, **cel), cap, rt.T0 + 900)
+    want = 1.6 * 2.718281828 ** (-400 / 400.0) * 0.1        # 400 ms into FOUND
+    assert abs(r.theme.prm[W.P_G] / 65536.0 - want) < 0.003, r.theme.prm[W.P_G]
+
+
+def test_made_in_the_menu_takes_the_screen_under_it():
+    # a Warp chosen in the MENU over HOT shows HOT's 70 stars at HOT's
+    # brightness (the MENU's own params say WARM), and keeps them when the
+    # MENU closes
+    _need_fb()
+    r = ThemedRenderer("ripple", overlays=False)
+    cap = FrameCapture()
+    hot = rs.hunt(3, dist_band="~5")
+    phases = [(0, hot), (600, dict(rs._menu, sub="1v", menu_rows=rs.MENU_ROWS)), (1600, hot)]
+    ifac = W.BI0 + ((W.BI1 * int(hot["intensity"] * 256)) >> 8)
+    for t in range(0, 2100, 100):
+        if t == 1000:
+            r.set_theme("warp")
+        r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+        if t >= 1000:
+            th = r.theme
+            assert th.n == 70 and th.prm[W.P_N] == 70 and th.m == W.M_LIVE, (t, th.n)
+            assert th.prm[W.P_IFAC] == ifac, (t, th.prm[W.P_IFAC], ifac)
+            if t >= 1600:
+                assert not th.xf_on, t
+
+
+def test_held_stars_move_once_while_the_iris_opens():
+    # a held star behind the lens moves out once, on the wake, past the size
+    # the lens is opening to; none moves again while the iris opens
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    for fx in ("scan_sweep", "direction_turn", "pairing_seen"):
+        _, phases, run_ms = rt.fixture(fx)
+        rec = []
+        _run(r, cap, phases, run_ms, lambda t, r, ev: rec.append(
+            (t, r.field.iris, [_u(r.theme, j) for j in range(W.NMAX)])))
+        assert rec[0][1] < rec[-1][1], (fx, rec[0][1], rec[-1][1])      # the iris opened
+        for a, b in zip(rec, rec[1:]):
+            assert a[2] == b[2], (fx, b[0], [j for j in range(W.NMAX) if a[2][j] != b[2][j]])
+
+
+def test_calibrate_fill_covers_stars_in_place():
+    # the PAIRING calibrate fill grows over the held stars: they stay where
+    # they are, hidden while under it, instead of being moved out ahead of
+    # it again and again (only the lens moves held stars)
+    _need_fb()
+    r = _renderer()
+    cap = FrameCapture()
+    _, ph, _ = rt.fixture("pairing_seen")
+    phases = [(0, ph[0][1])] + [(1000 * (k + 1), dict(rs._cal, countdown=3 - k)) for k in range(3)]
+    rec = []
+    _run(r, cap, phases, 4000, lambda t, r, ev: rec.append(
+        (t, [_u(r.theme, j) for j in range(W.N_STILL)],
+         r.field.fill_r if r.field.fill_v else 0,
+         [r.theme.st[j * W.ST_N + 2] for j in range(W.N_STILL)])))
+    for a, b in zip(rec, rec[1:]):
+        if b[0] >= 1000:
+            assert a[1] == b[1], (b[0], [j for j in range(W.N_STILL) if a[1][j] != b[1][j]])
+    t, us, fr, boxes = [x for x in rec if x[0] == 2500][0]      # half-way: some covered
+    lim = (fr + 3 + W.CLIP_PX) * 16
+    under = [j for j in range(W.N_STILL) if W.TAB[us[j] >> 6] < lim]
+    assert len(under) >= 3, (fr, under)
+    assert all(boxes[j] == W.NONE for j in under), under
+    assert any(boxes[j] != W.NONE for j in range(W.N_STILL))
+    assert all(b == W.NONE for b in rec[-1][3])                 # all covered by the end
+
+
+def test_steady_frames_allocate_nothing():
+    # hard rule 2: once a moment's first frames are drawn a frame allocates
+    # nothing (the floor and glow targets used to come back as a tuple)
+    _need_fb()
+    import gc
+    r = _renderer()
+    cap = FrameCapture()
+    for fx in ("near", "warm_arrow"):                # the renderer's one-off buffers (events)
+        _, phases, run_ms = rt.fixture(fx)
+        _run(r, cap, phases, run_ms)
+    for fx in ("far", "hot", "far_ghost", "searching", "pairing_seen", "scan_sweep",
+               "found_result", "saver"):
+        _, phases, run_ms = rt.fixture(fx)
+        ps = [rt.params_at(phases, t) for t in range(0, run_ms + 1, rt.STEP_MS)]
+        r.reset()
+        for n in range(len(ps)):
+            gc.collect()
+            gc.disable()
+            a0 = gc.mem_alloc()
+            r.frame(ps[n], cap, rt.T0 + n * rt.STEP_MS)
+            grown = gc.mem_alloc() - a0
+            gc.enable()
+            if n >= 3:
+                assert grown == 0, (fx, n, grown)
+
+
 # ---- drawing -------------------------------------------------------------------------
 def test_streaks_cover_the_step():
     # a moving star's box spans where it was and where it is (blur, not jumps)
@@ -428,18 +689,19 @@ def test_streaks_cover_the_step():
 
 
 def test_never_inside_the_lens_or_fill():
-    # every pixel of ring index below the rim's outer edge (and the calibrate
-    # fill's edge) shows the base palette: no star is drawn there
+    # on every frame, the iris opening included, every pixel of ring index
+    # below the rim's outer edge (and the calibrate fill's edge) shows the
+    # base palette: no star is drawn there
     _need_fb()
     r = _renderer()
     cap = FrameCapture()
     idx = r.map.idx
+    seen = [0]
     for fx in ("warm_arrow", "scan_sweep", "pairing_seen", "pairing_calibrate", "direction_turn"):
         _, phases, run_ms = rt.fixture(fx)
 
         def each(t, r, ev):
-            if t < 300 or t % 600:
-                return
+            seen[0] += 1
             f = r.field
             lim = f.iris + T.IRIS_RIM_PX if f.iris else 7
             if f.fill_v and f.fill_r + 3 > lim:
@@ -456,6 +718,7 @@ def test_never_inside_the_lens_or_fill():
                         assert buf[o] | (buf[o + 1] << 8) == pal[i], (fx, t, x, y, i)
 
         _run(r, cap, phases, run_ms, each)
+    assert seen[0] == 5 * 16, seen[0]                  # every frame of the five fixtures
 
 
 def test_stars_are_drawn_and_brighter_than_the_base():

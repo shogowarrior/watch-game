@@ -4,28 +4,36 @@ What it draws, per moment (``Theme.moment``):
 
 - *Live* (FAR-HOT, PAIRING ``split``, SCANNING ``ready``): ``stars[z]``
   (18/30/46/70) stars fly out at ``rate[z]`` (0.45/0.65/0.95/1.45) trips a
-  second, each scaled by the star's own period factor. On every live ring
-  spawn (the beat) the flight speeds up x(1 + 1.3 e^(-t/170 ms)), so the
-  heartbeat and the surge land on the same frame. A ghost beat (``ring_live``
-  false) has no surge (no packet, no push) and draws the stars grey at 0.6 of
-  their brightness (the ghost ring scale, ``ui.field.GHOST_AMP``) until the
-  next live beat.
+  second; each star's trip takes (0.8 + 0.6 h) / rate for its own fixed hash
+  h, so stars fly at 0.72-1.25 x rate (mean about 0.93 x rate). On every live
+  beat (the field's ring spawn, when that ring flies outward and is not a
+  ghost) the flight speeds up x(1 + 1.3 e^(-t/170 ms)): the factor at a
+  frame's beat age scales that frame's whole step, so the surge lands on the
+  heartbeat's frame. A ghost beat (``ring_live`` false) has no surge (no
+  packet, no push) and draws the stars grey at 0.6 of their brightness (the
+  ghost ring scale, ``ui.field.GHOST_AMP``) until the next live beat; an
+  inward (listening) ring spawn, such as the last one before SEARCHING turns
+  into FAR, is no beat at all.
 - *Listening* (SEARCHING, LINK-LOST, PAIRING ``looking``): ``listen_stars``
   (14) drift back toward the centre at ``listen_rate`` (-0.22).
 - *Still* (PAIRING ``seen`` / ``confirmed`` / ``calibrate``): ``still_stars``
   (30) hold their places and twinkle.
 - *Scan* (SCANNING sweep / result, the DIRECTION turn pacer): ``scan_stars``
   (24) hold still over the live-mirror halo (glow 1 + 5 I, §5.7).
-- *Found*: ``found_stars`` (56) slow from ``found_rate`` (1.6) as
-  e^(-t/``found_ms``) (400 ms) to a stop at t = 4 x 400 ms (rate under 0.03
-  trips a second), then twinkle; gold through the field's hue crossfade.
+- *Found*: ``found_stars`` (56) twinkle as they slow from ``found_rate``
+  (1.6) as e^(-t/``found_ms``) (400 ms) to a stop at t = 4 x 400 ms = 1.6 s
+  (rate under 0.03 trips a second), then twinkle in place; gold through the
+  field's hue crossfade. A wake into FOUND never replays the slow-down: the
+  stars are where the slow-down is by then when the renderer saw FOUND start
+  (a dark spell), else stopped; only the frame that carries the FOUND
+  ``burst`` starts it from 1.6.
 
 Each star is a streak from where it was on the last drawn frame to where it is
 now, a dim tail (the 60 % nearer where it was) and a bright head, so speed
 reads as blur, not as jumps; a star that wraps (leaves the screen and starts
 again at the centre, or the reverse when listening) restarts with no streak.
-Stars never draw inside the lens and its rim (nor inside the PAIRING calibrate
-fill disc): a streak is clipped CLIP_PX (2 px) outside them, and a dot only
+Stars never draw inside the lens and its rim, nor inside the PAIRING calibrate
+fill disc: a streak is clipped CLIP_PX (2 px) outside them, and a dot only
 grows to 2x2 or a cross 2 px further out. A star is never drawn darker than
 the base layer under it (its level is at least the floor and glow at the inner
 end of each segment plus 0.5 level for the head, 0.25 for the tail), so stars
@@ -38,15 +46,19 @@ field's crossfaded glow radius, ``glow_r_px``), vignette, the lens in
 rings and no FOUND standing wave. The floor and glow levels below crossfade
 over 600 ms on a moment or zone change (the §4 level crossfade, EASE_IOC), the
 floor under the §4 flash limit. MENU holds the moment, the levels and every
-star (``dt`` is 0), so only the menu dim moves.
+star (``dt`` is 0), so only the menu dim moves; a theme made in the MENU (a
+wake there) takes the moment, zone and intensity of the screen under it
+(``Theme.moment``, ``Theme.live``).
 
 Star count changes never pop: the stars are one fixed list of 70 and a moment
 shows stars 0..n-1, so a zone change only adds or drops stars at the end of
 the list. While the stars move, a star switches on or off only when it wraps
-(it appears at the centre or the edge and leaves the same way); while they
+(it appears at the centre or the edge and leaves the same way; a step of a
+whole trip or more, a 250 ms frame on a HOT beat, is a wrap too); while they
 are held (still, scan, a stopped FOUND) it fades over FADE_MS. A wake (first
-frame, screen back on, theme switch) shows every star of the moment in place
-at once (§8: no intro).
+frame, screen back on, theme switch, renderer reset) shows every star of the
+moment in place at once (§8: no intro), and ``reset()`` puts every star back
+where a fresh theme starts it.
 
 Cost (ui-spec §4A rule 7): the base is the field's own two viper kernels (the
 170-entry palette and the mirrored quadrant blit). The stars are one pass of
@@ -55,11 +67,22 @@ changed boxes and up to three segments a star), compiled with
 ``@micropython.viper`` where the port has it; there it also draws the
 segments straight into the frame with framebuf's own line algorithm. Both are
 used only after ``kernel_agrees`` has checked them against the plain kernel
-and ``FrameBuffer.line`` (state, segments, spans and pixels) at import (the
-import, kernels compiled and checked, takes about as long as ui/field.py's).
-Elsewhere (CPython, the wasm port) the same source runs as plain Python and
-the segments go out as ``fb.line`` calls. Nothing allocates per frame: star
-state lives in preallocated int arrays, every curve is an import-time table.
+and ``FrameBuffer.line`` (state, segments, spans and pixels; the saver cap
+and the unchanged-star path included). Elsewhere (CPython, the wasm port)
+the same source runs as plain Python and the segments go out as ``fb.line``
+calls. Nothing allocates per frame: star state lives in preallocated int
+arrays, every curve is a table built at load.
+
+Loading (ui/themes/base.py "Loading"): the import compiles the module and
+builds the small surge and slow-down tables, the one step that cannot be
+split (on a 32-bit desktop build about 6-10 ms, a little under ui/field.py's
+import). ``load()`` does the rest in 13 steps (``_step``): the radius table
+in two halves, the per-star constants, pal_diff compiled, its self-check,
+the star kernel compiled plain and then as viper (one compile a step, about
+2 ms each), the self-check fixture, one self-check frame a step and the
+choice, each of the others under 1 ms (about 8 ms in all; without viper the
+check steps are skipped). ``__init__`` only allocates (the Radial base, the
+star arrays) and resets.
 
 Changed regions (§4A rule 6): the box of each star's old and new streak (one
 box when the star moved along its ray, two when it wrapped; none when neither
@@ -81,11 +104,13 @@ detail the spec leaves open, from the approved mockup (``fWarp``) unless noted:
   (x (1 + vig) / 2, so a held star still reads near the edge), and while
   twinkling above 0.85 (SPARK) a 3x3 cross, the centre at the head's level and
   the arms at the tail's.
-- held stars (still, scan, a stopped FOUND) that sit behind the lens or the
-  fill, or past the screen edge, move there unseen to a place between the lens
-  (+ LENS_PX) and the edge (- EDGE_PX), a fixed fraction of the way per star
-  (the mockup's hash), and fade in, so the moment shows its stars instead of
-  hiding most of them behind the lens (r(u) puts half the stars inside r 64).
+- held stars (still, scan, a stopped FOUND) that sit behind the lens (at the
+  size it is opening or closing to, so a star moves once) or past the screen
+  edge move there unseen to a place between the lens (+ LENS_PX) and the edge
+  (- EDGE_PX), a fixed fraction of the way per star (the mockup's hash), and
+  fade in, so the moment shows its stars instead of hiding most of them behind
+  the lens (r(u) puts half the stars inside r 64). The calibrate fill only
+  covers stars (they are not drawn under it); none move away from it.
 - each star's trip period factor 0.8 + 0.6 h and start phase h from the
   mockup's integer hash h; directions on the golden angle (137.5 deg, so any
   first n stars are spread evenly round the dial; the mockup hashed them).
@@ -158,7 +183,7 @@ FADE_MS = const(400)        # count change while the stars are held
 CLIP_PX = const(2)          # streaks start this far outside the rim (pixel rounding and
                             # the wide head's 1 px offset stay off the rim)
 EDGE_PX = 3                 # a held star sits this far inside the screen edge...
-LENS_PX = const(2)          # ...and this far outside the lens (and fill)
+LENS_PX = const(2)          # ...and this far outside the lens's clip
 SPARK = const(218)          # twinkle above 0.85: the star flares to a 3x3 cross
 NONE = const(999)           # no box
 
@@ -214,7 +239,7 @@ P_FY0 = const(13)           # fbuf's first frame row
 P_FH = const(14)            # fbuf's rows
 P_NSEG = const(15)          # out: segments written
 P_NMAX = const(16)
-P_UMIN = const(17)          # u of the innermost visible radius (held stars move out to it)
+P_UMIN = const(17)          # u just outside the lens (held stars below it move out)
 P_LEN = const(18)
 SEG_MAX = const(3)          # segments a star
 
@@ -230,7 +255,7 @@ def _hash(n):
 
 
 def _stars():
-    """Per-star constants (cst) and start phases."""
+    """Per-star constants (cst) and start phases (a load step)."""
     cst = array.array("i", [0] * (NMAX * CS_N))
     u0 = []
     for j in range(NMAX):
@@ -258,14 +283,21 @@ def _stars():
     return cst, u0
 
 
-CST, U0 = _stars()
+# The kernel table: VIG and SIN copied at import, the radius per u filled by
+# load() (1024 float powers), the base levels per frame (Warp._base_levels).
 TAB = array.array("i", [0] * K_N)
-for _k in range(1024):
-    TAB[K_RT + _k] = int(16 * (R0_PX + R_SPAN * ((_k + 0.5) / 1024.0) ** R_POW) + 0.5)
 for _k in range(N_IDX):
     TAB[K_VIG + _k] = VIG[_k]
 for _k in range(360):
     TAB[K_SIN + _k] = SIN[_k]
+CST = None                  # per-star constants and start phases (load)
+U0 = None
+
+
+def _radius(k0, k1):
+    """Radius table entries k0..k1-1 (Q4 px per u >> 6; a load step)."""
+    for k in range(k0, k1):
+        TAB[K_RT + k] = int(16 * (R0_PX + R_SPAN * ((k + 0.5) / 1024.0) ** R_POW) + 0.5)
 
 
 def _u_at(rq):
@@ -284,7 +316,9 @@ def _u_at(rq):
 
 
 # ---- star kernel ------------------------------------------------------------------
-# One pass over the stars: flight (wraps switch stars on / off), held-star fades,
+# One pass over the stars: flight (wraps switch stars on / off; the phase wraps
+# mod 1 however long the step), held-star fades (a shown star below prm[P_UMIN],
+# behind the lens, or past its edge phase moves to its place between them),
 # radius, clip at prm[P_RMIN], brightness and colours, segments into ``seg``,
 # changed boxes into the strip spans ``sp`` (returns the strip bits), then, with
 # prm[P_DRAW], the segments drawn into ``fbuf`` exactly as FrameBuffer.line
@@ -324,11 +358,10 @@ def star_kernel(st, cst, tab, rtab, prm, seg, fbuf, sp) -> int:
         if g != 0:
             u = u0 + ((g * cv[co]) >> 8)
             if u > 65535:
-                u -= 65536
                 wr = 1
             elif u < 0:
-                u += 65536
                 wr = 1
+            u = u & 65535
             sv[so] = u
         o = sv[so + 1]
         if wr:
@@ -343,7 +376,7 @@ def star_kernel(st, cst, tab, rtab, prm, seg, fbuf, sp) -> int:
                 rel = 0
                 if u > ue:
                     rel = 1
-                if tv[u >> 6] < rmin:
+                if u < umin:
                     rel = 1
                 if rel:
                     if umin < ue:
@@ -747,16 +780,22 @@ def _ident(x):
     return x
 
 
-def _compile(src, name):
-    """(plain, viper or None) for one kernel source."""
+def _plain(src, name):
+    """Kernel ``name`` of ``src`` as plain Python (identity ptr shims)."""
     ns = {"ptr8": _ident, "ptr16": _ident, "ptr32": _ident}
     exec(src, ns)
+    return ns[name]
+
+
+def _viper(src, name):
+    """Kernel ``name`` of ``src`` compiled with @micropython.viper, or None
+    where the port has no viper (CPython, wasm)."""
     try:
         vs = {}
         exec("@micropython.viper" + src, vs)
     except Exception:  # noqa: BLE001 - no viper (CPython, wasm): plain Python
-        return ns[name], None
-    return ns[name], vs[name]
+        return None
+    return vs[name]
 
 
 def diff_agrees(ka, kb):
@@ -784,12 +823,14 @@ def diff_agrees(ka, kb):
 
 # Self-check frames for the star kernel: (g, n, fstep, rmin, tw, twd, ifac,
 # vmax, dim, lift, lut): outward flight with wraps and count changes, the same
-# twinkling and dimmed with a lens, inward flight with a lift and the saver
-# cap, held stars fading in and out.
+# twinkling and dimmed with a lens, inward flight with a lift and a saver cap
+# low enough to clip the brightest heads and tails, held stars fading in and
+# out, run twice on the same state (the second frame finds the fully shown
+# stars unchanged, so it covers the "nothing to report" path).
 CHECK_PRMS = (
     (30000, 46, 0, 128, 0, 0, 256, 1792, 256, 0, LUT_MIX),
     (21000, 18, 0, 1088, 1, 77, 154, 1792, 128, 0, LUT_MIX),
-    (-9000, 14, 0, 128, 0, 0, 200, 1280, 256, 9, LUT_GREY),
+    (-9000, 14, 0, 128, 0, 0, 200, 640, 256, 9, LUT_GREY),
     (0, 30, 64, 480, 1, 300, 230, 1792, 200, 0, LUT_MIX),
 )
 CHECK_FH = const(40)
@@ -798,7 +839,8 @@ CHECK_Y0 = (0, 100, 200)
 
 def _check_state(case):
     """Star state for self-check frame ``case``: phases, shown levels and old
-    boxes that hit every branch (wraps, fades, no old box, unchanged)."""
+    boxes that hit the wraps, the fades and stars with and without an old
+    box (the held frame's second run hits the unchanged stars)."""
     st = array.array("i", [0] * (NMAX * ST_N))
     for j in range(NMAX):
         o = j * ST_N
@@ -812,25 +854,89 @@ def _check_state(case):
     return st
 
 
-def _check_prm(case, draw, y0):
+def _check_prm(case):
     prm = array.array("i", [0] * P_LEN)
     vals = CHECK_PRMS[case]
     for i in range(len(vals)):
         prm[i] = vals[i]
     prm[P_MARK] = 1
-    prm[P_DRAW] = draw
-    prm[P_FY0] = y0
     prm[P_FH] = CHECK_FH
     prm[P_NMAX] = NMAX
     prm[P_UMIN] = _u_at(prm[P_RMIN] + 32)
     return prm
 
 
-def _check_spans():
-    sp = bytearray(20)
+def _check_fixture():
+    """What the self-check frames need, built once (a load step): segment
+    buffers (and zeros to clear them), the kernel table with made-up base
+    levels, a made-up colour table, a band and its reference, a state and
+    spans to run on, and each frame's start state and params."""
+    n = NMAX * SEG_MAX * 5
+    tab = array.array("i", TAB)
+    for k in range(NB4):
+        tab[K_BL + k] = 900 - k * 19
+    buf = bytearray(240 * CHECK_FH * 2)
+    ref = bytearray(240 * CHECK_FH * 2)
+    cases = []
+    for case in range(len(CHECK_PRMS)):
+        cases.append((_check_state(case), _check_prm(case)))
+    return (array.array("i", [0] * n), array.array("i", [0] * n), array.array("i", [0] * n),
+            tab, array.array("H", [(i * 2731 + 0x1357) & 0xFFFF for i in range(600)]),
+            buf, framebuf.FrameBuffer(buf, 240, CHECK_FH, framebuf.RGB565),
+            ref, framebuf.FrameBuffer(ref, 240, CHECK_FH, framebuf.RGB565),
+            array.array("i", [0] * (NMAX * ST_N)), bytearray(2 * 10), cases)
+
+
+def _clear_spans(sp):
     for k in range(10):
         sp[2 * k] = 255
-    return sp
+        sp[2 * k + 1] = 0
+
+
+def _agrees_case(ka, kb, fx, case):
+    """``kernel_agrees`` for self-check frame ``case`` alone, on the fixture
+    ``fx`` (``_check_fixture``). A held frame (no flight) runs twice on the
+    same state."""
+    seg, sg2, zero, tab, rtab, buf, fb, ref, rfb, st, sp, cases = fx
+    st0, prm = cases[case]
+    reps = 2 if prm[P_G] == 0 else 1
+    want = []
+    st[:] = st0
+    prm[P_DRAW] = 0
+    prm[P_FY0] = 0
+    for _ in range(reps):
+        _clear_spans(sp)
+        seg[:] = zero
+        bits = ka(st, CST, tab, rtab, prm, seg, rfb, sp)
+        if prm[P_NSEG] < 12:                     # the frame must exercise the drawing
+            return False
+        want.append((bits, prm[P_NSEG], bytes(st), bytes(sp), bytes(seg)))
+    ok = True
+    for y0 in CHECK_Y0:
+        st[:] = st0
+        prm[P_DRAW] = 1
+        prm[P_FY0] = y0
+        for rep in range(reps):
+            _clear_spans(sp)
+            sg2[:] = zero
+            fb.fill(0x5A5A)
+            bits = kb(st, CST, tab, rtab, prm, sg2, fb, sp)
+            if (bits, prm[P_NSEG], bytes(st), bytes(sp), bytes(sg2)) != want[rep]:
+                ok = False
+                break
+            # the segments are the reference's: draw them with FrameBuffer.line
+            rfb.fill(0x5A5A)
+            for i in range(prm[P_NSEG]):
+                o = i * 5
+                rfb.line(sg2[o], sg2[o + 1] - y0, sg2[o + 2], sg2[o + 3] - y0, sg2[o + 4])
+            if buf != ref:
+                ok = False
+                break
+        if not ok:
+            break
+    prm[P_DRAW] = 0
+    prm[P_FY0] = 0
+    return ok
 
 
 def kernel_agrees(ka, kb):
@@ -838,69 +944,92 @@ def kernel_agrees(ka, kb):
     every CHECK_PRMS frame: the star state, the segments, the spans and the
     strip bits; and if ``kb`` drawing its own segments (prm[P_DRAW]) into a
     frame band (a FrameBuffer, as ``draw`` passes it) gives the same pixels as
-    FrameBuffer.line drawing ``ka``'s, at three band offsets."""
+    FrameBuffer.line drawing ``ka``'s, at three band offsets. (``load`` runs
+    the same check one frame a step.)"""
     if framebuf is None:
         return False
-    n = NMAX * SEG_MAX * 5
-    seg = array.array("i", [0] * n)
-    sg2 = array.array("i", [0] * n)
-    tab = array.array("i", TAB)
-    for k in range(NB4):
-        tab[K_BL + k] = 900 - k * 19
-    rtab = array.array("H", [(i * 2731 + 0x1357) & 0xFFFF for i in range(600)])
-    buf = bytearray(240 * CHECK_FH * 2)
-    fb = framebuf.FrameBuffer(buf, 240, CHECK_FH, framebuf.RGB565)
-    ref = bytearray(240 * CHECK_FH * 2)
-    rfb = framebuf.FrameBuffer(ref, 240, CHECK_FH, framebuf.RGB565)
+    fx = _check_fixture()
     for case in range(len(CHECK_PRMS)):
-        st = _check_state(case)
-        prm = _check_prm(case, 0, 0)
-        sp = _check_spans()
-        for i in range(n):
-            seg[i] = 0
-        bits = ka(st, CST, tab, rtab, prm, seg, rfb, sp)
-        ns = prm[P_NSEG]
-        if ns < 12:                              # the frame must exercise the drawing
+        if not _agrees_case(ka, kb, fx, case):
             return False
-        want = (bits, ns, bytes(st), bytes(sp), bytes(seg))
-        for y0 in CHECK_Y0:
-            st = _check_state(case)
-            prm = _check_prm(case, 1, y0)
-            sp = _check_spans()
-            for i in range(n):
-                sg2[i] = 0
-            fb.fill(0x5A5A)
-            bits = kb(st, CST, tab, rtab, prm, sg2, fb, sp)
-            if (bits, prm[P_NSEG], bytes(st), bytes(sp), bytes(sg2)) != want:
-                return False
-            rfb.fill(0x5A5A)
-            for i in range(ns):
-                o = i * 5
-                rfb.line(seg[o], seg[o + 1] - y0, seg[o + 2], seg[o + 3] - y0, seg[o + 4])
-            if buf != ref:
-                return False
     return True
 
 
-def _kernels():
-    dpy, dvp = _compile(_DSRC, "pal_diff")
-    spy, svp = _compile(_SSRC, "star_kernel")
-    dk, dkind = dpy, "python"
-    if dvp is not None:
-        if diff_agrees(dpy, dvp):
-            dk, dkind = dvp, "viper"
-        else:
-            dkind = "python (viper self-check failed)"
-    sk, skind = spy, "python"
-    if svp is not None:
-        if kernel_agrees(spy, svp):
-            sk, skind = svp, "viper"
-        else:
-            skind = "python (viper self-check failed)"
-    return dpy, dk, dkind, spy, sk, skind
+# ---- loading in steps (ui/themes/base.py "Loading") ------------------------------
+# _step(k): 0-1 the radius table (two halves), 2 the per-star constants, 3 pal_diff
+# compiled (plain and viper: two small sources), 4 its self-check, 5 the star
+# kernel compiled plain, 6 compiled as viper, 7 the self-check fixture, 8..11 one
+# self-check frame each, 12 the choice (and the fixture let go).
+_S_CK = 8
+_S_END = _S_CK + len(CHECK_PRMS)
+_NSTEPS = _S_END + 1
+_stage = 0                  # load steps done
+pal_diff_py = None          # the kernels and how they run (set by load)
+pal_diff = None
+DIFF_KIND = None
+star_kernel_py = None
+star_kernel = None
+KERNEL = None
+_vk = None                  # a viper kernel waiting for its self-check
+_ck = None                  # the self-check fixture while the check runs
+_ck_ok = False
 
 
-pal_diff_py, pal_diff, DIFF_KIND, star_kernel_py, star_kernel, KERNEL = _kernels()
+def _step(k):
+    """Load step ``k`` (see above); returns the next step."""
+    global CST, U0, pal_diff_py, pal_diff, DIFF_KIND, star_kernel_py, star_kernel, KERNEL
+    global _vk, _ck, _ck_ok
+    if k < 2:
+        _radius(512 * k, 512 * k + 512)
+    elif k == 2:
+        CST, U0 = _stars()
+    elif k == 3:
+        pal_diff_py = _plain(_DSRC, "pal_diff")
+        _vk = _viper(_DSRC, "pal_diff")
+    elif k == 4:
+        pal_diff, DIFF_KIND = pal_diff_py, "python"
+        if _vk is not None:
+            if diff_agrees(pal_diff_py, _vk):
+                pal_diff, DIFF_KIND = _vk, "viper"
+            else:
+                DIFF_KIND = "python (viper self-check failed)"
+        _vk = None
+    elif k == 5:
+        star_kernel_py = _plain(_SSRC, "star_kernel")
+    elif k == 6:
+        _vk = _viper(_SSRC, "star_kernel")
+        _ck_ok = False
+        if _vk is None:
+            return _S_END                        # no viper: plain Python
+    elif k == 7:
+        if framebuf is None:
+            return _S_END                        # cannot check: plain Python
+        _ck = _check_fixture()
+        _ck_ok = True
+    elif k < _S_END:
+        _ck_ok = _agrees_case(star_kernel_py, _vk, _ck, k - _S_CK)
+        if not _ck_ok:
+            return _S_END
+    else:
+        star_kernel, KERNEL = star_kernel_py, "python"
+        if _vk is not None:
+            if _ck_ok:
+                star_kernel, KERNEL = _vk, "viper"
+            else:
+                KERNEL = "python (viper self-check failed)"
+        _vk = None
+        _ck = None
+    return k + 1
+
+
+def load():
+    """The module's one-time work, one ``_step`` per iteration (a generator).
+    Idempotent: ``_stage`` counts the steps done, so a load abandoned
+    half-way resumes where it stopped, and a finished one does nothing."""
+    global _stage
+    while _stage < _NSTEPS:
+        _stage = _step(_stage)
+        yield
 
 
 class Warp(Theme):
@@ -912,11 +1041,7 @@ class Warp(Theme):
         self.rad = Radial("warp")
         self.ramps = self.rad.ramps
         self.prev = array.array("H", [0] * 256)
-        st = array.array("i", [0] * (NMAX * ST_N))
-        for j in range(NMAX):
-            st[j * ST_N] = U0[j]
-            st[j * ST_N + 2] = NONE
-        self.st = st
+        self.st = array.array("i", [0] * (NMAX * ST_N))
         self.tab = array.array("i", TAB)
         self.prm = array.array("i", [0] * P_LEN)
         self.prm[P_NMAX] = NMAX
@@ -925,11 +1050,36 @@ class Warp(Theme):
         self.kern = star_kernel
         self.kdraw = 1 if KERNEL == "viper" else 0
         self.bkey = array.array("i", [-1] * 4)     # fl, gl, gr, iris the base table is for
+        self.reset()
+
+    def reset(self):
+        """Back to a fresh theme's state (base.py): every star at its start
+        phase, hidden and with no box; clocks, latches and the level
+        crossfade cleared; the base table and the ramps redone on the next
+        frame (a wake)."""
+        Theme.reset(self)
+        st = self.st
+        for j in range(NMAX):
+            o = j * ST_N
+            st[o] = U0[j]
+            st[o + 1] = 0
+            st[o + 2] = NONE
+            for i in range(3, ST_N):
+                st[o + i] = 0
+        bk = self.bkey
+        for i in range(4):
+            bk[i] = -1
+        pv = self.prev
+        for i in range(256):
+            pv[i] = 0
+        self.ramps.snap()
         self.m = M_LIVE
         self.z = 0
         self.key = -1
         self.fl = 0
         self.gl = 0
+        self.tfl = 0                       # _targets' floor and glow
+        self.tgl = 0
         self.xf_on = False
         self.xf_ms = 0
         self.xf_fl = 0
@@ -937,13 +1087,15 @@ class Warp(Theme):
         self.twc = 0                       # twinkle clock, ms mod TW_MS
         self.fage = 0                      # ms into FOUND
         self.ls = 0                        # the beat (last ring spawn) last seen
-        self.ghost = 0                     # that beat was a ghost
+        self.ghost = 0                     # its ring was a ghost: grey stars
+        self.lbeat = 0                     # its ring was live and outward: a surge
         self.surge = 0                     # Q8
         self.n = 0
 
     # ---- per frame -------------------------------------------------------------
     def _targets(self, p, m, iq):
-        """Theme floor and glow for moment ``m`` (Q8 levels)."""
+        """Theme floor and glow for moment ``m`` (Q8 levels) into ``tfl``,
+        ``tgl`` (attributes: a returned tuple would allocate every frame)."""
         if m == M_LIVE:
             fl = LIVE_FL_A + ((LIVE_FL_B * iq) >> 8)
             gl = LIVE_GL_A + ((LIVE_GL_B * iq) >> 8)
@@ -961,7 +1113,8 @@ class Warp(Theme):
             gl = FOUND_GL
         if p.sun and fl < SUN_FLOOR:
             fl = SUN_FLOOR
-        return fl, gl
+        self.tfl = fl
+        self.tgl = gl
 
     def build(self, p, t, core, rim, vmax, lift):
         dt = self.clock(p, t)
@@ -970,17 +1123,26 @@ class Warp(Theme):
         r = self.r
         q = self.prm
         if wake or r._scr != S_MENU:
-            # MENU holds the moment, the levels and the stars (dt is 0)
+            # MENU holds the moment, the levels and the stars (dt is 0); a
+            # wake there (a theme made in the MENU) takes the moment, zone
+            # and intensity of the screen under it
             m = self.moment(p)
-            z = self.zone(p)
+            lp = self.live(p)
+            z = self.zone(lp)
             iq = self.iq()
+            if lp is not p:
+                iq = int(lp.intensity * 256)
+                iq = 0 if iq < 0 else (256 if iq > 256 else iq)
             key = m * 4 + (z if m == M_LIVE else 0)
             if wake:
                 if m == M_FOUND:
-                    # a wake shows FOUND as it is now (§8): slowing only
-                    # while the celebration that started it is young
-                    self.fage = (ticks_diff(t, r._sub_t0) if r._sub == "celebrate"
-                                 else FEXP_N * FEXP_STEP)
+                    # a wake never replays the slow-down (§4A rule 6): it is
+                    # where it is by then if the renderer saw FOUND start,
+                    # else over; only the frame with the burst starts it
+                    a = ticks_diff(t, r._sub_t0)
+                    if r._sub != "celebrate" or (a <= 0 and not p.burst):
+                        a = FEXP_N * FEXP_STEP
+                    self.fage = a
             elif key != self.key:
                 self.xf_fl = self.fl
                 self.xf_gl = self.gl
@@ -992,7 +1154,9 @@ class Warp(Theme):
             self.key = key
             self.m = m
             self.z = z
-            fl, gl = self._targets(p, m, iq)
+            self._targets(p, m, iq)
+            fl = self.tfl
+            gl = self.tgl
             if wake:
                 self.xf_on = False
             elif self.xf_on:
@@ -1018,14 +1182,21 @@ class Warp(Theme):
                 n = STARS[z]
                 ls = f.last_spawn
                 if wake or ls != self.ls:
+                    # a new beat: grey while its ring is a ghost, a surge
+                    # only when its ring flies outward and is live (an
+                    # inward ring left from listening is no beat)
                     self.ls = ls
-                    gh = 0 if p.ring_live else 1
+                    gh = 0 if lp.ring_live else 1
+                    lb = 0
                     for k in range(len(f.r_on)):
                         if f.r_on[k] and f.r_t0[k] == ls:
-                            gh = f.r_ghost[k]
+                            if f.r_v[k] > 0:
+                                gh = f.r_ghost[k]
+                                lb = 1 - gh
                             break
                     self.ghost = gh
-                if not self.ghost:
+                    self.lbeat = lb
+                if self.lbeat:
                     a = self.beat_age(t) // SURGE_STEP
                     surge = SURGE[a] if a < SURGE_N else 0
                 rq = RATE_Q[z]
@@ -1044,6 +1215,7 @@ class Warp(Theme):
                 rq = (FOUND_Q * FEXP[k]) >> 8 if 0 <= k < FEXP_N else 0
             self.surge = surge
             self.n = n
+            # the surge at this frame's beat age scales its whole step
             g = (((dt * rq) >> 8) * (256 + surge)) >> 8
             q[P_G] = g
             q[P_N] = n
@@ -1086,9 +1258,16 @@ class Warp(Theme):
         iris = f.iris
         rmin = (iris + RIM_PX + CLIP_PX) if iris > 0 else R0_PX
         if f.fill_v and f.fill_r + 3 + CLIP_PX > rmin:
-            rmin = f.fill_r + 3 + CLIP_PX
+            rmin = f.fill_r + 3 + CLIP_PX       # the fill covers stars (no draw under it)
         q[P_RMIN] = rmin << 4
-        q[P_UMIN] = _u_at((rmin + LENS_PX) << 4) if q[P_FSTEP] else 0
+        if q[P_FSTEP]:
+            # held stars move out of the lens only, at the size it is
+            # opening or closing to (so each moves once), never the fill
+            ir = f.iris_to if f.iris_to > iris else iris
+            rl = (ir + RIM_PX + CLIP_PX) if ir > 0 else R0_PX
+            q[P_UMIN] = _u_at((rl + LENS_PX) << 4)
+        else:
+            q[P_UMIN] = 0
         bk = self.bkey
         if bk[0] != self.fl or bk[1] != self.gl or bk[2] != gr or bk[3] != iris:
             bk[0] = self.fl
