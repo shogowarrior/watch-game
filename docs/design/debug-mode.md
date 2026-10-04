@@ -16,6 +16,13 @@ doing, live, and the laptop logs it. The first way in is the **USB cable**
 Wi-Fi credentials must never be committed, and the owner enters them on the
 laptop, never in a chat.
 
+From the first bump tests (4 Oct 2026): each watch kept its own knock count,
+and the two counts disagreed. The owner asked for the watches to agree on the
+count. They already compare knock times by radio: a knock counts as a bump only
+when the other watch felt one within 0.4 s. So the Real watches view shows, for
+each watch, the knocks it felt, which of them matched the other watch's knock,
+and why the others did not count ("Knocks" below).
+
 ## Decisions
 
 1. **Real mode lives in the local page, not the artifact.** The claude.ai
@@ -143,7 +150,8 @@ Every datagram carries:
 
 The kinds are:
 
-- `"s"`: the existing state record, with unchanged fields.
+- `"s"`: the existing state record, plus its bump readings (`arm`, `tap`,
+  `tap_hot`, `ptap`, `ptap_hot`, `spk`; see "Knocks" below).
 - `"rp"`: `p` holds `finder.render_params.to_dict(params, json_ready=True)`;
   `on` is whether the screen is on; `bl` is the backlight from 0 to 100; `ch`
   is the radio's ESP-NOW channel: 6 on USB, the access point's on Wi-Fi, null
@@ -192,18 +200,18 @@ has room for.
   `app/runtime.py`, which also services the motor and touch, after each of the
   renderer's bands is blitted or pushed and after its overlays). One pump per
   pass was not enough: a frame takes about 80 ms, so a pass that draws one
-  carried at most 128 bytes (under 1.6 KB/s), less than the ~2.7 KB/s the
+  carried at most 128 bytes (under 1.6 KB/s), less than the ~3.1 KB/s the
   records need, and the queue filled up. At every service (about 5-15 ms
   apart) the FIFO refills nearly whole, several times per frame. Since `pump`
   allocates nothing, the render loop stays allocation-free (AGENTS rule 2).
 - **Loop exit and power off:** a forced telemetry flush sends what is left and
   calls `drain()`, which writes out everything queued, waiting on the port as
   `print` does, so the last records (such as `crash` or `pwr`) get out.
-- **Rate:** the `s` records at 5 Hz (about 410 bytes each, 2 KB/s) and the
+- **Rate:** the `s` records at 5 Hz (about 490 bytes each, 2.5 KB/s) and the
   events as they happen, but `rp` (about 664 bytes) at most once per second
   (`rp_ms` 1000; the Wi-Fi link sends it with every `s`, `rp_ms` 200), plus at
   once when the screen, its sub-state or its power changes. That is about
-  2.7 KB/s, a quarter of the line, so the queue only fills in a burst. An
+  3.1 KB/s, a quarter of the line, so the queue only fills in a burst. An
   `rp` the queue did not take goes with the next `s`. The page keeps the
   screen animating between `rp` records.
 - **Counters:** `stats()` gives `dev`, `link` (`usb`), `tx` (lines written
@@ -307,6 +315,79 @@ writable binary files (one per watch), each watch sends through
   on a daemon thread.
 - The two watches are `A` and `B`, with different `mac` values. Their `rp`
   records hold `finder.render_params.to_dict(params)`.
+- The players knock whenever A is next to B and both show HOT: first a knock
+  only A feels, then one B feels 0.6 s late, then a matched one, which ends
+  the round; a tap on FOUND starts the next. So the Knocks panel shows each
+  kind of verdict (`buzz` when a knock lands while a watch buzzes, such as
+  just after it enters HOT).
+
+### Knocks: which spikes the watches matched, and why the rest did not count
+
+The game's bump code is unchanged: this only reads it. Each watch learns its
+partner's spike times by radio (every beacon carries `bump_ago_ms`, the age
+of the sender's last spike; `finder/session.py` puts it on the receiver's
+clock as `peer.tap_t`), and counts a knock only when the partner's spike is
+within `BUMP_WINDOW_MS` (400) of its own. So each watch can say which of its
+spikes matched, on its own clock, as the game does.
+
+**What a watch adds to its state record** (`app/telemetry.py`):
+
+- `arm`: `Game.bump_armed()`, true while it feels for knocks (HOT, FOUND, and
+  PAIRING once the runes show; the accelerometer runs fast only then).
+- `tap`, `tap_hot`: its last spike that reached the game (`t` on its clock,
+  or null) and whether that spike was made in HOT (the beacon's
+  `ST_TAP_HOT`, which the partner sees too).
+- `ptap`, `ptap_hot`: the partner's last spike as heard by radio, on this
+  watch's clock (null before the first), and the partner's `ST_TAP_HOT`.
+- `spk`: the accelerometer's counts since it started, `[spikes, soft, odd,
+  buzz]` (`app/imu_feed.py`): spikes handed to the game; bumps that never
+  reached the spike peak (1 g); bumps too long or too short for a knock, or
+  within 200 ms of the last spike; and bumps hidden by the motor's own buzz.
+  Null on a watch without an accelerometer (and on the fake watches).
+
+Each spike that reaches the game is also a `tap` event (`ok` false: the game
+ignored it, because its own buzz was blanking the accelerometer).
+
+**The bridge judges every spike** (`tools/knocks.py`, `Knocks`, fed every
+record `handle` relays). A spike comes from a `tap` event, or from a state
+record's `tap` that no event brought (a record the USB queue dropped). It is
+judged once its watch's state records reach 1 s past it, or when that watch
+has been silent for 3 s:
+
+- `matched`: a partner spike heard by radio within 0.4 s of it (`gap`, ms,
+  positive when the partner's spike came first). The sentence adds whether
+  both were in HOT: a knock ends the round only then.
+- `buzz`: the game ignored it (its own buzz).
+- `apart`: the nearest partner spike heard was more than 0.4 s and at most
+  2 s away.
+- `alone`: no partner spike heard within 2 s. The sentence says why, from the
+  partner's own records at the same moment: it felt the knock but was
+  buzzing; it felt it but the time never reached this watch by radio; it was
+  not feeling for knocks (`arm` false); its accelerometer set the bump aside
+  (`spk`: too soft, the wrong length, or during its buzz); it sent nothing;
+  or it felt nothing.
+
+"The same moment" is laptop time: a watch's clock offset is the smallest
+`rx - t` over its last 50 state records (10 s), and a watch whose `t` goes
+back (it restarted) starts afresh. The offset only places spikes for the
+partner's side and the rows; matching uses the watch's own clock, as the game
+does.
+
+Each judgement is one line on `/events` and in the log:
+`{"src": "bridge", "rx": ms, "knock": {"dev", "t", "at", "row", "v", "gap",
+"why", "n"}}`: `at` the spike in laptop ms, `row` the same number for both
+watches' spikes of one knock (laptop times within 0.6 s), `v` the verdict
+above, `gap` null unless `matched` or `apart`, `why` one plain sentence (the
+verdict's own name, Matched, Set aside, Too far apart or Not matched, goes
+with it on the page and in the terminal) and `n` that watch's totals so far. A log reader that wants records skips lines
+without `rec`, as before. The bridge also prints the sentence in its
+terminal. `/debug/status` gains `"knocks": {"<dev>": totals}`, with totals
+`{"felt", "matched", "buzz", "apart", "alone", "spk"}` (`spk`: the
+accelerometer counts since the bridge first heard the watch).
+
+`python3 tools/knocks.py logs/debug-....jsonl` judges a saved session again
+and prints the same sentences and the totals, so a bump test can be read back
+without the page.
 
 ### Page side (`sim/webhost.py`, `web/sim/index.html`)
 
@@ -325,8 +406,14 @@ The page in Real mode:
   zone, trend, rssi/rssi_f, steps, activity, battery and loss, all with
   plain-language labels.
 - **Distance chart:** each watch's d_est (with the d_lo..d_hi band) and rssi_f.
+- **Knocks:** the matched count on each watch and whether the two agree,
+  each watch's totals as a sentence, and the last 10 knocks, newest first:
+  per knock, what each watch made of it (the bridge's sentence). Before the
+  first knock, a line on when knocks count. Counts come from
+  `/debug/status` when the stream opens, then from each `knock` line.
 - **Raw log:** the last 50 lines, collapsible. Plain text lines from a USB
-  port show there too, marked with the port.
+  port show there too, marked with the port, and the bridge's `knock` lines,
+  marked `bridge`.
 - **Waiting state:** a short how-to, USB first: plug both watches in, deploy
   each with `--debug A` / `--debug B`, run `python3 tools/debug_server.py
   --serial`, open `http://localhost:8765/local.html`; then one line on Wi-Fi.
@@ -353,7 +440,8 @@ How the page reads the records:
 - An `rp` record without `p` keeps the last screen. A `mac` of null (a watch
   whose radio failed to start) is accepted.
 - `window.fieldSim` also has `mode`, `setMode('sim'|'real')` (it resolves to the
-  mode in effect) and `real` (a summary of what each watch sent).
+  mode in effect) and `real` (a summary of what each watch sent, with the
+  knock totals and rows).
 
 ## Tests (both runners where they apply)
 
@@ -374,6 +462,9 @@ How the page reads the records:
   and short timeouts. These run on CPython only.
 - `show_params` draws the same frame the renderer draws for the same params.
 - The secrets guard.
+- `tools/knocks.py`: each verdict and reason from crafted records, the clock
+  offset and a restart, rows, a spike from a dropped `tap` event; the
+  bridge's `knock` lines, log and status; the fake watches' knocks end to end.
 
 No test uses real Wi-Fi or a real serial port.
 

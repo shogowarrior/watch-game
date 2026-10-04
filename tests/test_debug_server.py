@@ -272,6 +272,50 @@ def test_nothing_is_handled_after_close():
             assert len(f.read().splitlines()) == 1
 
 
+def test_knocks_are_judged_relayed_logged_and_counted():
+    """Each spike's judgement (tools/knocks.py) goes to the streams and the log
+    as a ``knock`` line from ``bridge``, to the terminal (``news``) and into
+    /debug/status; ``close`` judges the spikes still waiting."""
+    ds = _ds()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "debug-x.jsonl")
+        b = ds.Bridge(47268, log)
+        q = b.subscribe()
+
+        def rec(dev, t, ev="s", **kw):
+            d = dict({"dev": dev, "mac": "a1b2c3", "t": t, "ev": ev}, **kw)
+            return json.dumps(d).encode()
+        rx = 1_790_000_000_000
+        b.handle(rec("A", 1000), "ttyUSB0", rx)
+        b.handle(rec("A", 1050, "tap", ok=True), "ttyUSB0", rx + 200)
+        for i in range(1, 7):         # A's records reach 1 s past its spike, never hearing B
+            b.handle(rec("A", 1000 + 200 * i), "ttyUSB0", rx + 200 * i)
+        b.handle(rec("A", 2300, "tap", ok=False), "ttyUSB0", rx + 1400)
+        from tools.knocks import clock
+        assert b.news() == ["%s  knock, watch A  Not matched    B has sent nothing yet." % (
+            clock(rx + 50))] and b.news() == []
+        st = b.status()
+        assert st["packets"] == 9 and st["knocks"]["A"]["alone"] == 1, st
+        b.close()                     # the one still waiting: set aside while buzzing
+        lines = []
+        while True:
+            line = q.get_nowait()
+            if line is None:
+                break
+            lines.append(json.loads(line))
+        knocks = [m for m in lines if "knock" in m]
+        assert [m["src"] for m in knocks] == ["bridge", "bridge"], knocks
+        assert [(m["knock"]["dev"], m["knock"]["v"]) for m in knocks] == [("A", "alone"),
+                                                                       ("A", "buzz")]
+        assert knocks[0]["rx"] == rx + 1200 and knocks[0]["knock"]["at"] == rx + 50
+        assert knocks[1]["knock"]["n"]["felt"] == 2
+        assert [m["src"] for m in lines if "rec" in m] == ["ttyUSB0"] * 9
+        with open(log) as f:          # the log holds the same lines
+            assert [json.loads(x) for x in f.read().splitlines()] == lines
+        assert b.status()["knocks"]["A"]["buzz"] == 1
+
+
 def test_closed_tab_is_dropped():
     ds = _ds()
     import tempfile

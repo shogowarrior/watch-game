@@ -339,6 +339,30 @@ If a Wi-Fi watch does not show up:
 - If two different watches both say A (or B), the page says so: load one of
   them again with the other letter.
 
+### Bump tests: the Knocks panel
+
+The **Knocks** panel in the Real watches view lists the knocks, newest first,
+with what each watch made of its spike:
+
+- **Matched**: the other watch felt a knock within 0.4 s too (each watch
+  learns the other's knock time by radio). A matched knock ends the round
+  only when both watches were in HOT. The matched counts at the top of the
+  panel should be the same on both watches; when they differ, the rows show
+  which knock one of them missed.
+- **Set aside**: the watch was buzzing. Its own motor shakes the
+  accelerometer, so the game ignores spikes until 0.15 s after a buzz.
+- **Too far apart**: the other watch's knock came more than 0.4 s off.
+- **Not matched**: no knock from the other watch, and why: it felt one too
+  but was buzzing; its knock time never arrived by radio; it was not feeling
+  for knocks (it does only in HOT, in FOUND, and in PAIRING once the runes
+  show); its accelerometer passed the bump over (too soft, too long or too
+  short, or during its own buzz); or it felt nothing.
+
+Each watch's line also counts the bumps its accelerometer passed over. The
+bridge prints every knock in its terminal and saves it in the log, so a bump
+test can be read back later with `python3 tools/knocks.py
+logs/debug-....jsonl`.
+
 ### Turn it off
 
 `python3 tools/deploy.py --port <port> --no-debug` removes `/debug` and
@@ -353,7 +377,9 @@ bridge prints the file's name when it starts and when it stops). Each line is on
 message as the page received it: `{"src": the watch's port or address, "rx":
 laptop time in ms, "rec": what the watch sent}`. Text a watch prints on its
 USB port (the boot message, an error, the fps line) is saved too, as
-`{"src", "rx", "line": the text}`. These sessions are real radio data to
+`{"src", "rx", "line": the text}`, and the bridge's judgement of each knock
+as `{"src": "bridge", "rx", "knock"}` (`python3 tools/knocks.py
+logs/debug-....jsonl` prints a saved session's knocks again). These sessions are real radio data to
 calibrate the estimators with later (`docs/estimation/bakeoff.md`). No tool
 replays them yet: a replay input for the bake-off is a planned next step
 ([project/handoff.md](project/handoff.md)), and it will read the `rec` lines.
@@ -363,8 +389,10 @@ Pass `--no-log` to save nothing.
 
 `python3 tools/debug_server.py --demo` runs two pretend watches on the laptop
 that send the same messages as real watches on Wi-Fi; `--demo --serial` makes
-them use the USB link instead, through two pretend ports. One walks away to
-about 40 m and back while the other stands still.
+them use the USB link instead, through two pretend ports. Next to each other
+in HOT they knock (one knock only A feels, one B feels too late, then a
+matched one that ends the round); then one walks away to about 40 m and back
+while the other stands still.
 
 Notes:
 

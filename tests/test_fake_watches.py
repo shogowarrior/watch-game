@@ -35,7 +35,7 @@ def test_fake_watches_send_what_real_watches_send():
     from app.telemetry import DGRAM_MAX
     from finder.render_params import from_dict, validate
     try:
-        st = fw.run(port=rx.getsockname()[1], seconds=40, speed=100)
+        st = fw.run(port=rx.getsockname()[1], seconds=50, speed=100)
         th.join()
     finally:
         rx.close()
@@ -52,12 +52,27 @@ def test_fake_watches_send_what_real_watches_send():
             assert "ch" in r and r["ch"] is None           # no radio on the fakes
     s = [r for r in recs if r["ev"] == "s"]
     for k in ("rssi", "rssi_f", "d_est", "d_lo", "d_hi", "zone", "trend", "steps", "act",
-              "ui", "sub", "batt_pct", "seq", "peer_seq", "rx", "loss"):
+              "ui", "sub", "batt_pct", "seq", "peer_seq", "rx", "loss",
+              "arm", "tap", "tap_hot", "ptap", "ptap_hot", "spk"):
         assert k in s[-1], k
-    # they pair (the side key at the runes) and A walks away: the hunt shows zones
+    assert s[-1]["spk"] is None                            # no accelerometer on the fakes
+    # they pair (the side key at the runes), knock in HOT until FOUND, A taps for the
+    # next round and walks away: the hunt shows zones
     assert [r for r in recs if r["ev"] == "btn" and r["dev"] == "A"]
-    ui_a = set(r["ui"] for r in s if r["dev"] == "A")
-    assert "PAIRING" in ui_a and ("WARM" in ui_a or "NEAR" in ui_a), ui_a
+    ui_a = [r["ui"] for r in s if r["dev"] == "A"]
+    assert "PAIRING" in ui_a and "FOUND" in ui_a and ("WARM" in ui_a or "NEAR" in ui_a), ui_a
+    assert ui_a.index("HOT") < ui_a.index("FOUND")
+    assert [r for r in recs if r["ev"] == "touch" and r["dev"] == "A" and r["g"] == "TAP"]
+    # the bridge's judgement of the knocks (tools/knocks.py): the script's three kinds
+    from tools.knocks import Knocks
+    k = Knocks()
+    out = []
+    for r in recs:
+        out += k.feed(r, 1_790_000_000_000 + r["t"])
+    v = [(x["dev"], x["v"]) for x in out]
+    assert v[:5] == [("A", "alone"), ("A", "apart"), ("B", "apart"), ("A", "matched"),
+                     ("B", "matched")], v
+    assert out[3]["row"] == out[4]["row"] and "Both were in HOT." in out[3]["why"]
 
 
 def test_fake_watches_over_serial_write_paced_lines():
