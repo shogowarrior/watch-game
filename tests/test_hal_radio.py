@@ -218,3 +218,48 @@ def test_pinger_restarts_its_grid_after_a_stall():
         if a.n_tx > n:
             sent.append(t)
     assert sent == [0, 50, 100, 260, 310], sent
+
+
+def _joined_sta(channel):
+    """A fake STA joined to an access point on ``channel`` (as hal/debuglink leaves it)."""
+    fakes.install()
+    import network
+    network.set_ap("made-up-net", "made-up-pass", channel=channel, polls=1)
+    sta = network.WLAN(network.STA_IF)
+    sta.active(True)
+    sta.connect("made-up-net", "made-up-pass")
+    assert sta.isconnected()
+    return sta
+
+
+def test_associated_mode_keeps_the_connection_and_the_ap_channel():
+    # Debug mode: ESP-NOW shares the radio with the Wi-Fi connection.
+    sta = _joined_sta(13)                      # any of 1-13, not just 1/6/11
+    r = hr.EspNowRadio(channel=6, seed=1).begin(sta=sta)
+    assert r.associated and r.channel == 13 and sta.isconnected()
+    assert not any("channel" in kw for kw in sta.sets)   # never moved off the AP's channel
+    assert sta.cfg["pm"] == sta.PM_NONE and sta.cfg["txpower"] == 20
+    assert r.mac == sta.config("mac") and r._e.active() and r._e.peers == [hr.BCAST]
+    r.begin(channel=1)                         # re-begin stays associated
+    assert r.associated and r.channel == 13 and sta.isconnected()
+    buf = _beacon(1).pack_into(bytearray(16))
+    assert r.send(buf, 0) and r.n_tx == 1
+
+
+def test_associated_mode_rejects_a_channel_espnow_cannot_use():
+    sta = _joined_sta(14)
+    try:
+        hr.EspNowRadio(seed=1).begin(sta=sta)
+        assert False, "channel 14 accepted"
+    except ValueError:
+        pass
+
+
+def test_normal_mode_still_drops_a_connection():
+    # Normal play is unchanged: a joined STA (a notebook's) is disconnected
+    # and moved to the game channel.
+    sta = _joined_sta(13)
+    r = hr.EspNowRadio(channel=11, seed=1)
+    r._sta = sta
+    r.begin()
+    assert not r.associated and not sta.isconnected() and sta.cfg["channel"] == 11

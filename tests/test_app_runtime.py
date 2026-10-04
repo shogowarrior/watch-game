@@ -1655,6 +1655,98 @@ def test_bma423_feature_engine_pending_then_missing():
         assert imu.calls[1:] == (["on"] if ok else [])
 
 
+class FlakyChipIMU(ChipIMU):
+    """``ChipIMU`` whose first ``fails`` starts raise OSError, as a NACK
+    mid-upload does; ``starts`` holds the clock time of every start."""
+
+    def __init__(self, clock, ok, fails):
+        ChipIMU.__init__(self, clock, ok)
+        self.fails = fails
+        self.starts = []
+
+    def start_features(self):
+        self.starts.append(self.clock.now)
+        if self.fails:
+            self.fails -= 1
+            raise OSError(5)
+        return ChipIMU.start_features(self)
+
+
+def _imu_runtime(imu, clock):
+    from app.runtime import Runtime
+    return Runtime(Board(imu=imu), parts=("imu",), clock=clock, sleep_ms=clock.sleep,
+                   renderer=_renderer(), gc_collect=lambda: None)
+
+
+def _flaky_run(ok, fails):
+    fakes.install()
+    clock = Clock(0)
+    imu = FlakyChipIMU(clock, ok, fails)
+    rt = _imu_runtime(imu, clock)
+    rt.begin(0)
+    rt.run(max_ms=6000)
+    return rt, imu
+
+
+def test_a_start_that_works_after_a_bus_error_clears_it():
+    # the second start goes through but brings no engine (no blob, or its init fails)
+    from app.runtime import CHIP_OFF
+    for ok in (None, False):
+        rt, imu = _flaky_run(ok, 1)
+        assert len(imu.starts) == 2 and rt._chip == CHIP_OFF, (ok, imu.starts, rt._chip)
+        assert not rt.errors, (ok, rt.errors)
+
+
+def test_starts_that_keep_failing_are_retried_by_the_poll_a_few_times():
+    from app.runtime import CHIP_MS, CHIP_OFF, CHIP_ON, CHIP_TRIES
+    rt, imu = _flaky_run(True, 3)
+    assert rt._chip == CHIP_ON and not rt.errors, (rt._chip, rt.errors)
+    assert len(imu.starts) == 4 and imu.calls[-1] == "on", (imu.starts, imu.calls)
+    rt, imu = _flaky_run(True, 99)          # the bus never recovers
+    st = imu.starts
+    assert rt._chip == CHIP_OFF and isinstance(rt.errors["imu_features"], OSError)
+    assert len(st) == CHIP_TRIES, st
+    assert all(st[i + 1] - st[i] >= CHIP_MS for i in range(len(st) - 1)), st
+
+
+def test_a_lost_ack_on_init_ctrl_brings_the_engine_up_without_a_second_upload():
+    # Real driver: INIT_CTRL=1 reaches the chip but its ACK is lost; the engine
+    # reports init_ok INIT_MIN_MS later. The retry must find it up, not upload again.
+    from tests.test_hal_bma423 import _imu, _tmp, _write, _blob, _rm, _w
+    from app.runtime import CHIP_ON
+    m, dev, bmod, imu = _imu()
+    p = _tmp("t_rt_bma423_ack.bin")
+    _write(p, _blob())
+    dev.init_status = 0
+    start = imu.start_features
+    imu.start_features = lambda: start(path=p, expect_sha256=None)
+    clock = Clock(0)
+    up = []                                 # when INIT_CTRL=1 landed
+    write = dev.write
+    read = dev.read
+
+    def lost_ack(reg, data):
+        write(reg, data)
+        if reg == 0x59 and data[0] == 1 and not up:
+            up.append(clock.now)
+            raise OSError(5)
+
+    def engine(reg, n):
+        if reg == 0x2A and up and clock.now - up[0] >= bmod.INIT_MIN_MS:
+            dev.regs[0x2A] = 1              # init_ok
+        return read(reg, n)
+    dev.write = lost_ack
+    dev.read = engine
+    rt = _imu_runtime(imu, clock)
+    try:
+        rt.begin(0)
+        rt.run(max_ms=3000)
+    finally:
+        _rm(p)
+    assert up and rt._chip == CHIP_ON and "imu_features" not in rt.errors, (rt._chip, rt.errors)
+    assert _w(dev, 0x59) == [0, 1], _w(dev, 0x59)   # INIT_CTRL=1 once per reset
+
+
 def test_stage_sums_stay_small_ints():
     from app.runtime import Runtime, S_RENDER, ACC_LIMIT_US
     us = [0]
@@ -1666,6 +1758,422 @@ def test_stage_sums_stay_small_ints():
     assert rt.st_us[S_RENDER] <= ACC_LIMIT_US < 2 ** 30
     s = rt.stats(reset=False)
     assert s["render"][0] == 40.0 and s["render"][1] == 40.0
+
+
+# ---- debug mode: the telemetry sink ---------------------------------------------------
+class Sink:
+    """Collects records as a hal/debuglink link gets them (and when); Wi-Fi's
+    ``rp_ms`` unless given."""
+
+    channel = None
+
+    def __init__(self, clock=None, rp_ms=200):
+        self.clock = clock
+        self.rp_ms = rp_ms
+        self.sent = []
+        self.at = []
+        self.pumps = 0
+        self.drains = 0
+
+    def send(self, s):
+        self.sent.append(s)
+        self.at.append(None if self.clock is None else self.clock.now)
+        return True
+
+    def pump(self, now):
+        self.pumps += 1
+
+    def drain(self):
+        self.drains += 1
+
+    def stats(self):
+        return {"tx": len(self.sent), "tx_err": 0}
+
+
+def _same_params(d, p):
+    """``d`` (an rp record's ``p``) holds RenderParams ``p`` (floats to 1e-6)."""
+    from finder.render_params import FIELDS, from_dict, to_dict
+    q = to_dict(from_dict(d))
+    w = to_dict(p)
+    for k in FIELDS:
+        a, b = q[k], w[k]
+        if isinstance(b, float):
+            assert abs(a - b) < 1e-6, (k, a, b)
+        else:
+            assert a == b, (k, a, b)
+
+
+def test_debug_sink_sends_state_and_screen_at_5hz():
+    """Every datagram carries dev, mac, t and ev and fits one Wi-Fi frame; each
+    5 Hz state record is followed by an ``rp`` with the frame's params, and
+    nothing is sent between records. ``rp`` never goes into the ring."""
+    fakes.install()
+    import json
+    from hal.radio import SimRadio
+    from app.telemetry import Telemetry, DGRAM_MAX
+    clock = Clock(0)
+    rt = _watch(clock, SimRadio(MAC_A).begin())
+    sink = Sink(clock)
+    tl = Telemetry(dev="A", sink=sink)
+    rt.tele = tl
+    rt.begin(clock.now)
+    hd = rt._hdisp
+    svc = hd.service
+    services = [0]
+
+    def counted():
+        services[0] += 1
+        svc()
+    hd.service = counted
+    rt.run(max_ms=3000)
+    recs = [json.loads(s) for s in sink.sent]
+    for s, d in zip(sink.sent, recs):
+        assert isinstance(s, bytes) and len(s) <= DGRAM_MAX, len(s)   # UTF-8, as sent
+        assert d["dev"] == "A" and d["mac"] == "10000a" and isinstance(d["t"], int), d
+    kinds = [d["ev"] for d in recs]
+    n = kinds.count("s")
+    assert 14 <= n <= 16 and kinds.count("rp") == n and set(kinds) == {"s", "rp"}, kinds
+    for i in range(len(recs)):
+        if kinds[i] == "rp":            # right after its state record, same time
+            assert kinds[i - 1] == "s" and recs[i - 1]["t"] == recs[i]["t"]
+            assert recs[i]["on"] is True and recs[i]["bl"] == recs[i - 1]["bl"] > 0
+    assert set(sink.at) == set(d["t"] for d in recs if d["ev"] == "s")   # the 5 Hz path only
+    assert services[0] > rt.display.pushes                # bands blitted and pushed, overlays
+    assert sink.pumps == rt.loops + services[0]           # once per pass and at every service
+    assert sink.drains == 1                               # once at loop exit
+    tl.record(clock.now + tl.period_ms, rt)     # the next state record
+    _same_params(json.loads(sink.sent[-1])["p"], rt.params)
+    ring = [json.loads(s) for s in tl.lines()]
+    assert ring and all(d["ev"] == "s" and d["mac"] == "10000a" for d in ring)
+    assert rt.stats()["debug_stats"]["tx"] == len(sink.sent)
+
+
+def test_debug_events_wait_for_the_state_record():
+    """A haptic event logged in the render stage is sent with the next 5 Hz
+    record, before it: never from the render loop."""
+    fakes.install()
+    import json
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    from finder.render_params import make_params
+    clock = Clock(0)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None)
+    rt.begin(0)
+    sink = Sink()
+    rt.tele = Telemetry(dev="B", sink=sink)
+    rt.params = make_params(t_ms=1000, haptic="CLOSER")
+    rt._fresh = True
+    rt._stage_render(1000)
+    assert sink.sent == [] and rt.tele.n == 1
+    rt._stage_logic(1100)
+    rt.tele.record(1100, rt)
+    recs = [json.loads(s) for s in sink.sent]
+    assert [d["ev"] for d in recs] == ["haptic", "s", "rp"], recs
+    assert recs[0]["pattern"] == "CLOSER" and recs[0]["dev"] == "B"
+    assert rt.tele.send() == 0                  # nothing left over
+
+
+def test_debug_crash_is_sent_on_the_way_out():
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    import json
+    clock = Clock(0)
+    sink = Sink()
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None, telemetry=Telemetry(dev="A", sink=sink))
+    rt.begin(0)
+    tick = rt.game.tick
+
+    def bad_tick(t):
+        if t >= 1500:
+            raise ValueError("boom")
+        return tick(t)
+    rt.game.tick = bad_tick
+    try:
+        rt.run(max_ms=5000)
+        assert False, "no crash"
+    except ValueError:
+        pass
+    d = json.loads(sink.sent[-1])
+    assert d["ev"] == "crash" and "boom" in d["e"] and d["dev"] == "A"
+
+
+def test_debug_power_off_is_sent():
+    fakes.install()
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    import json
+    clock = Clock(0)
+    sink = Sink()
+    rt = Runtime(Board(pmu=FakePMU(clock)), clock=clock, sleep_ms=clock.sleep,
+                 renderer=StubRenderer(), gc_collect=lambda: None,
+                 telemetry=Telemetry(dev="A", sink=sink))
+    rt.begin(0)
+    rt._power_off(500)
+    assert json.loads(sink.sent[-1])["ev"] == "pwr" and rt.pmu.off
+
+
+def test_debug_datagram_drops_optional_fields_to_fit():
+    import json
+    from app.telemetry import Telemetry, DGRAM_MAX
+    sink = Sink()
+    tl = Telemetry(dev="A", sink=sink)
+    tl.set_mac(MAC_A)
+    tl.event(7, "crash", ("e", "x" * 3000), ("where", "loop"))
+    assert tl.send() == 1
+    s = sink.sent[0]
+    assert len(s) <= DGRAM_MAX
+    assert json.loads(s) == {"t": 7, "ev": "crash", "where": "loop", "dev": "A", "mac": "10000a"}
+    assert "x" * 3000 in tl.lines(1)[0]         # the ring (and the file) keep it whole
+    tl.dev = "D" * 2000                         # even the required fields are too long
+    tl.event(8, "btn")
+    assert tl.send() == 1 and len(sink.sent) == 1
+
+
+def test_debug_datagram_counts_bytes_not_characters():
+    """MicroPython's json.dumps keeps non-ASCII text as UTF-8 (CPython escapes
+    it), so the limit is on the bytes that go out: a crash text of 600 three-
+    byte characters is dropped, a short one goes whole, on both runtimes."""
+    import json
+    from app.telemetry import Telemetry, DGRAM_MAX
+    sink = Sink()
+    tl = Telemetry(dev="A", sink=sink)
+    tl.set_mac(MAC_A)
+    tl.event(7, "crash", ("e", "\u20ac" * 600), ("where", "loop"))
+    tl.event(8, "crash", ("e", "\u00e9" * 100))
+    assert tl.send() == 2 and len(sink.sent) == 2
+    for b in sink.sent:
+        assert isinstance(b, bytes) and len(b) <= DGRAM_MAX, len(b)
+    a, b = [json.loads(x) for x in sink.sent]
+    assert "e" not in a and a["where"] == "loop" and a["ev"] == "crash" and a["dev"] == "A"
+    assert b["e"] == "\u00e9" * 100
+
+
+def test_debug_rp_names_the_wifi_channel():
+    """``rp`` carries the sink's Wi-Fi channel (``ch``), so the page can tell
+    two watches on different channels apart; null when the sink has none."""
+    fakes.install()
+    import json
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    from finder.render_params import make_params
+    clock = Clock(0)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None)
+    rt.begin(0)
+    rt._stage_logic(1000)
+    rt.params = make_params(t_ms=1000)
+    for ch in (11, None):
+        sink = Sink()
+        if ch is not None:
+            sink.channel = ch                  # DebugLink.channel: the access point's
+        rt.tele = Telemetry(dev="A", sink=sink)
+        rt.tele.record(1000, rt)
+        rp = json.loads(sink.sent[-1])
+        assert rp["ev"] == "rp" and "ch" in rp and rp["ch"] == ch, rp
+
+
+def test_debug_rp_rate_follows_the_link():
+    """``rp`` goes once the sink's ``rp_ms`` has passed: with every 5 Hz state
+    record on Wi-Fi (200) even when one is a few ms late, once a second on
+    USB (1000), and on USB at once when the screen, its sub-state or its
+    power changes."""
+    fakes.install()
+    import json
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    from finder.render_params import make_params, replace
+    clock = Clock(0)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None)
+    rt.begin(0)
+    rt._stage_logic(1000)
+    rt.params = make_params(t_ms=1000, screen="FAR", sub=None)
+    late = [1000 + 200 * i + (3 if i & 1 else 0) for i in range(16)]   # odd ones 3 ms late
+
+    def rp_times(rp_ms, times, change=None):
+        sink = Sink(rp_ms=rp_ms)
+        rt.tele = Telemetry(dev="A", sink=sink)
+        for t in times:
+            if change is not None:
+                change(t)
+            rt.tele.record(t, rt)
+        recs = [json.loads(s) for s in sink.sent]
+        return [d["t"] for d in recs if d["ev"] == "rp"]
+    assert rp_times(200, late) == late
+    assert rp_times(1000, late) == [1000, 2003, 3000, 4003]
+
+    def change(t):
+        if t == 1400:
+            rt.params = replace(rt.params, screen="MENU")
+        elif t == 1800:
+            rt.params = replace(rt.params, sub=1)
+        elif t == 2200:
+            rt.screen_is_on = False
+    assert rp_times(1000, late, change) == [1000, 1400, 1800, 2200, 3203]
+
+
+def test_debug_dropped_rp_goes_with_the_next_record():
+    """A screen change's ``rp`` that the full USB queue dropped goes with the
+    next state record once there is room, not ``rp_ms`` later."""
+    fakes.install()
+    import json
+    from tests.fakes.serial_port import Port
+    from hal.debuglink import SerialLink, SERIAL_QMAX
+    from app.runtime import Runtime
+    from app.telemetry import Telemetry
+    from finder.render_params import make_params, replace
+    clock = Clock(0)
+    rt = Runtime(Board(), clock=clock, sleep_ms=clock.sleep, renderer=StubRenderer(),
+                 gc_collect=lambda: None)
+    rt.begin(0)
+    rt._stage_logic(1000)
+    rt.params = make_params(t_ms=1000, screen="FAR")
+    port = Port()
+    link = SerialLink("A", port)
+    tl = Telemetry(dev="A", sink=link)
+    tl.record(1000, rt)
+    link.drain()
+    assert link.send('{"ev":"pad","x":"%s"}' % ("y" * (SERIAL_QMAX - 620)))
+    assert link.queued == SERIAL_QMAX - 599     # room for s (416 bytes), not for rp (635)
+    rt.params = replace(rt.params, screen="MENU")
+    tl.record(1200, rt)
+    assert link.drop == 1                       # the rp of the new screen
+    link.drain()
+    tl.record(1400, rt)
+    link.drain()
+    recs = [json.loads(ln[1:]) for ln in port.data().split(b"\n")[:-1]]
+    assert [d["t"] for d in recs if d["ev"] == "s"] == [1000, 1200, 1400]
+    rp = [d for d in recs if d["ev"] == "rp"]
+    assert [d["t"] for d in rp] == [1000, 1400] and rp[1]["p"]["screen"] == "MENU", rp
+
+
+def _usb_watch(clock, display=None):
+    """A watch whose telemetry goes through a ``SerialLink`` to a fake USB
+    port stamped by ``clock`` -> (runtime, link, port)."""
+    fakes.install()
+    from tests.fakes.serial_port import Port
+    from hal.radio import SimRadio
+    from hal.debuglink import SerialLink
+    from app.telemetry import Telemetry
+    port = Port(clock)
+    rt = _watch(clock, SimRadio(MAC_A).begin())
+    if display is not None:
+        rt.board.display = display
+    link = SerialLink("A", port)
+    rt.tele = Telemetry(dev="A", sink=link)
+    rt.begin(0)
+    return rt, link, port
+
+
+def _usb_run(rt, end):
+    """``Runtime.run``'s loop until ``end`` ms, without its exit flush;
+    returns the most bytes the link had waiting after a pass."""
+    link = rt.tele.sink
+    top = 0
+    while rt.clock() < end:
+        w = rt.step()
+        if link.queued > top:
+            top = link.queued
+        if w > 0:
+            rt.idle(w)
+    return top
+
+
+def test_debug_usb_link_writes_paced_lines_from_the_loop():
+    """The USB link in the loop: the telemetry stage pumps it, no write
+    overfills the UART's FIFO, and the laptop gets whole lines: the 5 Hz
+    state records and ``rp`` about once a second. Loop exit writes out what
+    still waits."""
+    import json
+    clock = Clock(0)
+    rt, link, port = _usb_watch(clock)
+    top = _usb_run(rt, 5000)
+    assert port.overfill() is None
+    assert link.drop == 0 and top < 1000, top
+    rt.tele.flush(force=True)
+    assert link.queued == 0
+    lines = port.data().split(b"\n")
+    assert lines[-1] == b""
+    recs = []
+    for ln in lines[:-1]:
+        assert ln[:1] == b"\x1e" and b'", "' not in ln and b'": ' not in ln, ln   # compact
+        recs.append(json.loads(ln[1:]))
+    kinds = [d["ev"] for d in recs]
+    assert 24 <= kinds.count("s") <= 26 and 5 <= kinds.count("rp") <= 7, kinds
+    assert link.n_tx == len(recs) and rt.stats()["debug_stats"]["tx"] == len(recs)
+
+
+def test_debug_usb_link_keeps_up_while_frames_render():
+    """On the watch a frame's push takes ~40 ms (4 bands of ~10 ms), so one
+    pump a pass would carry too little. The link is also pumped at every
+    mid-frame service: nothing is dropped, the queue stays short, and no
+    write overfills."""
+    clock = Clock(0)
+    rt, link, port = _usb_watch(clock, SlowDisplay(clock, 4))
+    top = _usb_run(rt, 60000)
+    assert rt.frames > 1000 and link.n_tx > 300, (rt.frames, link.n_tx)
+    assert link.drop == 0 and top < 1500, (link.drop, top)
+    assert port.overfill() is None
+
+
+def test_debug_usb_fps_line_rides_the_link():
+    """With the USB link on, the fps line goes through it as a whole text
+    line between records (a print could land inside one), not to log_line."""
+    clock = Clock(0)
+    rt, link, port = _usb_watch(clock, SlowDisplay(clock, 4))
+    rt.fps_log_ms = 2000
+    printed = []
+    rt.log_line = printed.append
+    _usb_run(rt, 4500)
+    link.drain()
+    assert printed == [] and port.overfill() is None
+    lines = port.data().split(b"\n")[:-1]
+    text = [ln for ln in lines if ln[:1] != b"\x1e"]
+    assert len(text) == 2 and all(ln.startswith(b"fps ") for ln in text), text
+    assert all(ln.count(b"\x1e") == 1 for ln in lines if ln[:1] == b"\x1e")
+
+
+def test_debug_usb_pump_reads_the_clock_after_the_record():
+    """Building and queueing the 5 Hz records takes a few ms on the watch:
+    the pump after them reads the clock again, so the FIFO model never
+    counts that time as drained and no write overfills."""
+    clock = Clock(0)
+    rt, link, port = _usb_watch(clock)
+    record = rt.tele.record
+
+    def slow_record(now, r):
+        record(now, r)
+        clock.now += 6
+    rt.tele.record = slow_record
+    _usb_run(rt, 30000)
+    assert link.n_tx > 150 and port.overfill() is None, port.overfill()
+
+
+def test_debug_send_errors_never_stop_the_loop():
+    fakes.install()
+    restore = fakes.install_socket()
+    try:
+        import socket
+        from hal.debuglink import DebugLink
+        from hal.radio import SimRadio
+        from app.telemetry import Telemetry
+        link = DebugLink("A", "192.168.1.23")
+        assert link.open()
+        socket.fail[0] = 113                    # EHOSTUNREACH: the Wi-Fi dropped
+        clock = Clock(0)
+        rt = _watch(clock, SimRadio(MAC_A).begin())
+        rt.tele = Telemetry(dev="A", sink=link)
+        rt.run(max_ms=2000)
+        assert rt.frames >= 35 and link.n_tx == 0 and link.tx_err >= 20, (rt.frames, link.tx_err)
+        socket.fail[0] = None                   # back on the Wi-Fi
+        rt.run(max_ms=1000)
+        assert link.n_tx >= 10
+        assert rt.stats()["debug_stats"]["tx_err"] == link.tx_err
+        assert not any(rt.io_errors)
+    finally:
+        restore()
 
 
 class CostDisplay(SlowDisplay):

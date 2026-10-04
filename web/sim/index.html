@@ -93,19 +93,60 @@ dl.tele dd { margin: 0; font-family: var(--mono); font-size: 12.5px; font-varian
 .posture select { height: 30px; }
 .note { color: var(--faint); font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { .bezel { transition: none; } }
+/* Simulator | Real watches (docs/design/debug-mode.md) */
+.head-side { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.seg.mode button { padding: 0 14px; font-weight: 500; }
+.seg.mode button[aria-disabled="true"] { color: var(--faint); cursor: help; }
+.wrap[data-mode="real"] .sim-only, .wrap[data-mode="sim"] .real-only { display: none !important; }
+.wrap[data-mode="real"] .screen { cursor: default; }
+.mode-note { margin: 0; padding: 10px 14px; border-radius: var(--radius); background: var(--panel); border: 1px solid var(--line); color: var(--muted); font-size: 13px; transition: border-color 200ms; }
+.mode-note.flash { border-color: var(--warn); }
+code.cmd { font-family: var(--mono); font-size: 12px; color: var(--text); background: var(--panel-2); border: 1px solid var(--grid-2); border-radius: 4px; padding: 0 4px; overflow-wrap: anywhere; }
+.real-card { display: flex; flex-direction: column; overflow: hidden; }
+.real-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px; padding: 12px 14px; }
+.real-head h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.bridge { display: inline-flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--muted); }
+.bridge .dot { flex: none; margin-top: 6px; }
+.bridge.ok .dot { background: var(--glow); box-shadow: 0 0 8px var(--glow); }
+.bridge.err .dot { background: var(--bad); }
+.howto { padding: 12px 14px 14px; border-top: 1px solid var(--line); font-size: 13.5px; color: var(--muted); display: flex; flex-direction: column; gap: 8px; }
+.howto[hidden] { display: none; }
+.howto h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text); }
+.howto p { margin: 0; }
+.howto ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 5px; }
+#rchart { display: block; width: 100%; height: 300px; max-width: 100%; }
+.rawlog { border-top: 1px solid var(--line); padding: 10px 14px 12px; }
+.rawlog summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+.rawlog summary span { color: var(--muted); font-weight: 400; }
+.rawlog-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 14px; margin: 8px 0 6px; color: var(--muted); font-size: 12px; }
+.rawlog-bar label { display: inline-flex; align-items: center; gap: 6px; }
+.rawlog pre { margin: 0; max-height: 280px; overflow: auto; padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.screen-wait { position: absolute; inset: 18px; display: flex; align-items: center; justify-content: center; padding: 30px; text-align: center; color: var(--muted); font-size: 13px; pointer-events: none; }
+.screen-wait[hidden] { display: none; }
+.screen.stale { opacity: 0.45; }
+dl.rtele dd { white-space: normal; overflow-wrap: anywhere; }
+.nw { white-space: nowrap; }
 </style>
 
-<div class="wrap">
+<div class="wrap" data-mode="sim">
   <header>
     <div>
       <h1>Two-Watch Field Sim</h1>
-      <p class="sub">The real watch code (game logic and screen renderer, MicroPython 1.29) running in your browser against a simulated radio. Drag the watches around and both screens react as the firmware would. Mockups: <a href="https://claude.ai/code/artifact/6fa68c10-ec92-4dbc-9fdc-a45a0d5aa3a1" target="_blank" rel="noopener">Sheikah Finder watch UI</a>.</p>
+      <p class="sub sim-only">The real watch code (game logic and screen renderer, MicroPython 1.29) running in your browser against a simulated radio. Drag the watches around and both screens react as the firmware would. Mockups: <a href="https://claude.ai/code/artifact/6fa68c10-ec92-4dbc-9fdc-a45a0d5aa3a1" target="_blank" rel="noopener">Homing watch UI</a> <span class="nw">(opens in your browser)</span>.</p>
+      <p class="sub real-only">What your two real watches are doing right now. Each watch sends its screen and readings over its USB cable (or Wi-Fi) to the bridge on this computer, and this page draws the screens with the watch's own screen code.</p>
     </div>
-    <div class="status" id="status" role="status"><span class="dot"></span><span id="status-text">Loading MicroPython…</span></div>
+    <div class="head-side">
+      <span class="seg mode" role="group" aria-label="What this page shows">
+        <button type="button" id="mode-sim" aria-pressed="true">Simulator</button>
+        <button type="button" id="mode-real" aria-pressed="false">Real watches</button>
+      </span>
+      <div class="status" id="status" role="status"><span class="dot"></span><span id="status-text">Loading MicroPython…</span></div>
+    </div>
   </header>
+  <p class="mode-note" id="real-note" role="note" hidden></p>
 
   <main>
-    <section class="card field-card" aria-label="Top-down field">
+    <section class="card field-card sim-only" aria-label="Top-down field">
       <ol class="guide">
         <li id="guide-pair"><b>Wait about 15 s.</b> The watches pair and calibrate themselves, then play starts.</li>
         <li><b>Drag A toward B.</b> A walks there at a real pace. Use 4× or 8× to fast-forward.</li>
@@ -131,7 +172,7 @@ dl.tele dd { margin: 0; font-family: var(--mono); font-size: 12.5px; font-varian
             <option value="indoor">Indoors, walls</option>
           </select>
         </label>
-        <span class="seg" role="group" aria-label="Speed">
+        <span class="seg speed" role="group" aria-label="Speed">
           <button type="button" data-speed="1" aria-pressed="true">1×</button>
           <button type="button" data-speed="2" aria-pressed="false">2×</button>
           <button type="button" data-speed="4" aria-pressed="false">4×</button>
@@ -169,42 +210,78 @@ dl.tele dd { margin: 0; font-family: var(--mono); font-size: 12.5px; font-varian
       </div>
     </section>
 
+    <section class="card real-card real-only" aria-label="Real watches">
+      <div class="real-head">
+        <h2>Real watches</h2>
+        <span class="bridge" id="bridge" role="status"><span class="dot"></span><span id="bridge-text">Connecting to the bridge…</span></span>
+      </div>
+      <div class="howto" id="howto">
+        <h3>Waiting for the watches</h3>
+        <p id="howto-lead">Nothing has arrived from a watch yet. To show both watches here over their USB cables:</p>
+        <ol>
+          <li>Plug both watches into this computer.</li>
+          <li>Stop the bridge (Ctrl-C in its terminal): loading a watch needs its USB port. Load each watch in debug mode, with P its port (<code class="cmd">mpremote devs</code> lists them): <code class="cmd">python3 tools/deploy.py --port P --debug A</code> for one and <code class="cmd">python3 tools/deploy.py --port P --debug B</code> for the other.</li>
+          <li>Start the bridge again with <code class="cmd">python3 tools/debug_server.py --serial</code> and open <code class="cmd">http://localhost:8765/local.html</code>. Each screen shows up here a few seconds after its watch starts.</li>
+        </ol>
+        <p>Over Wi-Fi instead: save the Wi-Fi name and password once with <code class="cmd">python3 tools/wifi_setup.py</code>, load the watches with <code class="cmd">--debug A --wifi</code> and <code class="cmd">--debug B --wifi</code>, and keep both on this computer's Wi-Fi (a network with one access point works best).</p>
+        <p>No watches at hand? Stop the bridge and start it again with <code class="cmd">python3 tools/debug_server.py --demo --serial</code> to see two pretend watches play.</p>
+      </div>
+      <div class="chart-wrap">
+        <div class="chart-head">
+          <h2>What each watch measured, last 90 seconds</h2>
+          <div class="keys">
+            <span><i class="line-key" style="border-color: var(--a)"></i>Watch A</span>
+            <span><i class="line-key" style="border-color: var(--b)"></i>Watch B</span>
+          </div>
+        </div>
+        <canvas id="rchart" width="1200" height="600" aria-label="Chart over the last 90 seconds. Top: how far each watch thinks the other one is, with the range it thinks likely shaded. Bottom: how strongly each watch hears the other one."></canvas>
+        <p class="note">Top: how far each watch thinks the other one is; the shading is the range it thinks likely. Bottom: how strongly it hears the other watch (smoothed; nearer zero is stronger). Point at the chart to read the values.</p>
+      </div>
+      <details class="rawlog" id="rawlog">
+        <summary>Raw messages <span id="rawlog-count">(none yet)</span></summary>
+        <div class="rawlog-bar"><span>The last 50 messages from the watches, newest at the bottom: the time, where it came from (a USB port or a Wi-Fi address), then the message as the bridge received it. Text a watch printed on its USB port is marked "printed".</span><label><input type="checkbox" id="rawlog-pause"> Pause</label></div>
+        <pre id="rawlog-text"></pre>
+      </details>
+    </section>
+
     <section class="watches" aria-label="Watch screens">
       <article class="card watch" data-i="0">
         <div class="watch-head"><h2><span class="swatch" style="background: var(--a)"></span>Watch A</h2><span class="screen-name" id="name-0">–</span></div>
-        <div class="bezel" id="bezel-0"><canvas class="screen" id="screen-0" width="240" height="240" aria-label="Watch A screen. Click to tap, drag up or down (or scroll) to swipe."></canvas></div>
-        <div class="btns">
+        <div class="bezel" id="bezel-0"><canvas class="screen" id="screen-0" width="240" height="240" aria-label="Watch A screen. Click to tap, drag up or down (or scroll) to swipe."></canvas><div class="screen-wait real-only" id="wait-0">Waiting for watch A</div></div>
+        <div class="btns sim-only">
           <button type="button" data-act="tap" data-i="0">Tap screen</button>
           <button type="button" data-act="hold" data-i="0">Hold (menu)</button>
           <button type="button" data-act="button" data-i="0">Side button</button>
         </div>
         <p class="why" id="why-0">Starting…</p>
-        <label class="posture" for="posture-0">Watch position (what its accelerometer feels)
+        <label class="posture sim-only" for="posture-0">Watch position (what its accelerometer feels)
           <select id="posture-0" data-i="0">
             <option value="flat" selected>held flat</option>
             <option value="tilted">tilted 50°</option>
             <option value="down">wrist down</option>
           </select>
         </label>
-        <dl class="tele" id="tele-0"></dl>
+        <dl class="tele sim-only" id="tele-0"></dl>
+        <dl class="tele rtele real-only" id="rtele-0"></dl>
       </article>
       <article class="card watch" data-i="1">
         <div class="watch-head"><h2><span class="swatch" style="background: var(--b)"></span>Watch B</h2><span class="screen-name" id="name-1">–</span></div>
-        <div class="bezel" id="bezel-1"><canvas class="screen" id="screen-1" width="240" height="240" aria-label="Watch B screen. Click to tap, drag up or down (or scroll) to swipe."></canvas></div>
-        <div class="btns">
+        <div class="bezel" id="bezel-1"><canvas class="screen" id="screen-1" width="240" height="240" aria-label="Watch B screen. Click to tap, drag up or down (or scroll) to swipe."></canvas><div class="screen-wait real-only" id="wait-1">Waiting for watch B</div></div>
+        <div class="btns sim-only">
           <button type="button" data-act="tap" data-i="1">Tap screen</button>
           <button type="button" data-act="hold" data-i="1">Hold (menu)</button>
           <button type="button" data-act="button" data-i="1">Side button</button>
         </div>
         <p class="why" id="why-1">Starting…</p>
-        <label class="posture" for="posture-1">Watch position (what its accelerometer feels)
+        <label class="posture sim-only" for="posture-1">Watch position (what its accelerometer feels)
           <select id="posture-1" data-i="1">
             <option value="flat" selected>held flat</option>
             <option value="tilted">tilted 50°</option>
             <option value="down">wrist down</option>
           </select>
         </label>
-        <dl class="tele" id="tele-1"></dl>
+        <dl class="tele sim-only" id="tele-1"></dl>
+        <dl class="tele rtele real-only" id="rtele-1"></dl>
       </article>
     </section>
   </main>
@@ -214,7 +291,11 @@ dl.tele dd { margin: 0; font-family: var(--mono); font-size: 12.5px; font-varian
 const $ = (id) => document.getElementById(id);
 const statusEl = $('status'), statusText = $('status-text'), boot = $('boot');
 function setStatus(kind, text) { statusEl.className = 'status' + (kind ? ' ' + kind : ''); statusText.textContent = text; }
+// The message shown in #boot. #boot sits in the Simulator card, which Real watches hides, so
+// the Real watch cards show it too (realWhy, waitText): their screens cannot be drawn without it.
+let pageError = null;
 function fail(msg, detail) {
+  pageError = msg;
   setStatus('err', 'Stopped');
   boot.hidden = false;
   boot.innerHTML = '';
@@ -278,6 +359,7 @@ async function start() {
     M = mp._module;
     useConstants(JSON.parse(SIM.constants_json()));
     pairGuide();
+    if (mode === 'real') engineMode();                 // Real watches was picked while it loaded
   } catch (e) { return fail('The watch code failed to start.', e && e.message); }
   boot.hidden = true;
   setStatus('ok', 'Running · MicroPython ' + (bundle.mpy || '1.29'));
@@ -295,11 +377,15 @@ function loop(now) {
   requestAnimationFrame(loop);
   const dt = last ? Math.min(100, now - last) : 16;
   last = now;
-  frame(Math.round(dt * speed), now);
+  frame(Math.round(dt * (mode === 'real' ? 1 : speed)), now);
 }
 function frame(simMs, now) {
   call('step', simMs);
   if (!running) return;
+  if (mode === 'real') {                               // the world is stopped: draw the shown params
+    for (let i = 0; i < 2; i++) drawScreen(i, now);
+    return;
+  }
   const js = call('telemetry_json');
   if (!running) return;
   try { tele = JSON.parse(js); world = tele.world; }
@@ -400,7 +486,10 @@ function pairGuide() {
 window.fieldSim = {
   advance(ms, stepMs = 50) { for (let t = 0; t < ms; t += stepMs) frame(stepMs, performance.now()); return tele; },
   call: (name, ...args) => call(name, ...args),
-  get telemetry() { return tele; }
+  get telemetry() { return tele; },
+  get mode() { return mode; },
+  setMode: (m) => chooseMode(m),                       // 'sim' | 'real'; resolves to the mode in effect
+  get real() { return realSummary(); }
 };
 
 function drawScreen(i, now) {
@@ -411,15 +500,21 @@ function drawScreen(i, now) {
   const s = screens[i], px = s.px;
   for (let k = 0; k < 57600; k++) px[k] = LUT[src[k]];
   s.ctx.putImageData(s.img, 0, 0);
-  const t = tele && tele.watches ? tele.watches[i] : null;
-  if (t && t.haptic && t.haptic.length) {
-    const ms = t.haptic.reduce((a, n) => a + (HAPTIC_MS[n] || 80), 0);
-    s.buzzUntil = now + Math.min(900, ms);
-    const w = world && world.walkers ? world.walkers[i] : null;
-    if (w) pings.push({ i, x: w.x, y: w.y, t0: now });
+  let bl;
+  if (mode === 'real') {
+    bl = realBacklight(i);
+    s.cv.classList.toggle('stale', realSilent(real[i], now));
+  } else {
+    const t = tele && tele.watches ? tele.watches[i] : null;
+    if (t && t.haptic && t.haptic.length) {
+      const ms = t.haptic.reduce((a, n) => a + (HAPTIC_MS[n] || 80), 0);
+      s.buzzUntil = now + Math.min(900, ms);
+      const w = world && world.walkers ? world.walkers[i] : null;
+      if (w) pings.push({ i, x: w.x, y: w.y, t0: now });
+    }
+    bl = t && t.backlight != null ? t.backlight : 0.6;          // screen off / dimmed like the real panel
   }
   s.bezel.classList.toggle('buzz', now < s.buzzUntil);
-  const bl = t && t.backlight != null ? t.backlight : 0.6;      // screen off / dimmed like the real panel
   const f = bl <= 0 ? 'brightness(0)' : `brightness(${(0.55 + 0.45 * Math.min(1, bl)).toFixed(2)})`;
   if (s.cv.style.filter !== f) s.cv.style.filter = f;
 }
@@ -515,6 +610,397 @@ function renderTele() {
 }
 function fmtClock(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
 
+// ---------- Real watches (docs/design/debug-mode.md) ----------
+// tools/debug_server.py serves this page and relays the watches' records, read from their USB
+// serial ports or UDP datagrams, as Server-Sent Events on ./events: {src, rx, rec}, src being the
+// port's name or the sender's IP address; a line a watch printed on its USB port comes as
+// {src, rx, line}. An "rp" record carries the RenderParams the watch drew (SIM.show_params draws
+// them with the same renderer; over USB about once a second, and the renderer keeps animating
+// them in between), an "s" record its 5 Hz readings. The mode is offered only when
+// ./debug/status answers, so never in the artifact or from a plain http.server.
+const wrapEl = document.querySelector('.wrap'), MODE_KEY = 'fieldSim.mode';
+const LOG_N = 50, SILENT_MS = 3000, CLASH_MS = 10000, RHIST_MS = 90000, GAP_MS = 2000;
+const ZONE_WORDS = ['far', 'near', 'warm', 'hot'];
+const ACT_WORDS = { still: 'still', walk: 'walking', run: 'running', unknown: 'not sure' };
+const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
+const RCOL = ['#7FD6FF', '#FFB86B'], RFILL = ['rgba(127,214,255,0.14)', 'rgba(255,184,107,0.14)'];
+let mode = 'sim', realOK = null, es = null, everOpen = false, anyHeard = false, others = 0, rawDirty = false;
+let printedOn = null;                                  // the USB port a watch last printed text on
+const rawLog = [];
+const real = [0, 1].map(() => ({ mac: null, src: null, heard: null, n: 0, s: null, rp: null, shown: false, bad: null, clash: null, hist: [], html: '' }));
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function setText(id, t) { const el = $(id); if (el.textContent !== t) el.textContent = t; }
+function savedMode() { try { return localStorage.getItem(MODE_KEY); } catch (_) { return null; } }
+function saveMode(m) { try { localStorage.setItem(MODE_KEY, m); } catch (_) {} }
+
+async function bridgeUp() {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 2000);
+  try {
+    const r = await fetch('./debug/status', { cache: 'no-store', signal: ctl.signal });
+    const j = r.ok ? await r.json() : null;
+    return !!(j && j.ok === true);
+  } catch (_) { return false; }                        // no bridge, the artifact sandbox, not JSON
+  finally { clearTimeout(timer); }
+}
+function markReal() {
+  const b = $('mode-real'), note = $('real-note'), off = realOK === false;
+  b.setAttribute('aria-disabled', String(off));
+  b.title = off ? 'Not available in this page: see the note below' : '';
+  note.hidden = !off;
+  if (!off) return;
+  const cmd = '<code class="cmd">python3 tools/debug_server.py --serial</code>', url = '<code class="cmd">http://localhost:8765/local.html</code>';
+  note.innerHTML = LOCAL_HOSTS.includes(location.hostname)
+    ? `Real watches need the debug bridge, which is not running for this page: in the project folder run ${cmd}, then open ${url}.`
+    : `Real watches work only in the copy of this page on your own computer, because a page on the web cannot reach watches on your USB ports or Wi-Fi: in the project folder run ${cmd}, then open ${url}.`;
+}
+async function chooseMode(m) {
+  if (m === 'real' && !realOK) {
+    realOK = await bridgeUp();                         // the bridge may have started since the page loaded
+    markReal();
+    if (!realOK) {
+      const note = $('real-note');
+      note.classList.add('flash');
+      setTimeout(() => note.classList.remove('flash'), 1200);
+      return mode;
+    }
+  }
+  saveMode(m);
+  setMode(m);
+  return mode;
+}
+function setMode(m) {
+  if (m === mode) return;
+  mode = m;
+  wrapEl.dataset.mode = m;
+  $('mode-sim').setAttribute('aria-pressed', String(m === 'sim'));
+  $('mode-real').setAttribute('aria-pressed', String(m === 'real'));
+  screens.forEach((s, i) => {
+    s.buzzUntil = 0;
+    s.cv.classList.remove('stale');
+    s.cv.setAttribute('aria-label', m === 'real' ? `Watch ${'AB'[i]} screen, as the real watch shows it.`
+      : `Watch ${'AB'[i]} screen. Click to tap, drag up or down (or scroll) to swipe.`);
+  });
+  if (SIM) engineMode();
+  if (m === 'real') { openStream(); layoutRealChart(); realTick(); }
+  else { closeStream(); layoutField(); layoutChart(); }
+}
+function engineMode() {                                // SIM follows the page: world stopped or running
+  call('real_mode', mode === 'real');
+  real.forEach((w, i) => { w.shown = false; if (mode === 'real' && w.rp && w.rp.p) showParams(i, w.rp.p); });
+}
+
+function openStream() {
+  if (es) return;
+  everOpen = false;
+  es = new EventSource('./events');
+  es.onopen = () => { everOpen = true; };
+  es.onmessage = (e) => {
+    let msg = null;
+    try { msg = JSON.parse(e.data); } catch (_) { return; }
+    if (msg && msg.rec && typeof msg.rec === 'object') onRecord(msg, heardAt(msg.rx));
+    else if (msg && typeof msg.line === 'string') onPrinted(msg);
+  };
+}
+// When the bridge received the record (rx: this computer's clock, ms since 1970), on this page's
+// performance.now() clock. "Last heard" counts from there, never from the watch's own 't' (its
+// ticks since boot; the fake watches all start at 0).
+function heardAt(rx) {
+  const now = performance.now();
+  return num(rx) == null ? now : now - Math.max(0, Math.min(60000, Date.now() - rx));
+}
+function closeStream() { if (es) { es.close(); es = null; } }
+function bridgeState() {
+  if (!es) return 'off';
+  if (es.readyState === EventSource.OPEN) return 'open';
+  if (es.readyState === EventSource.CLOSED) return 'closed';    // the server answered with an error
+  return everOpen ? 'lost' : 'connecting';
+}
+function onRecord(msg, now) {
+  const rec = msg.rec, i = rec.dev === 'A' ? 0 : rec.dev === 'B' ? 1 : -1;
+  logLine(msg.src, rec);
+  if (i < 0) { others++; return; }
+  const w = real[i];
+  if (w.mac && rec.mac && rec.mac !== w.mac && w.heard != null && now - w.heard < SILENT_MS) w.clash = now;
+  if (rec.mac) w.mac = rec.mac;
+  w.src = msg.src; w.heard = now; w.n++;
+  anyHeard = true;
+  if (rec.ev === 's') { w.s = rec; addPoint(w, now, rec); }
+  else if (rec.ev === 'rp') { w.rp = rec; if (rec.p && typeof rec.p === 'object') showParams(i, rec.p); }
+  else if (rec.ev === 'haptic') screens[i].buzzUntil = now + Math.min(900, HAPTIC_MS[rec.pattern] || 80);
+}
+function showParams(i, p) {
+  const w = real[i];
+  if (!SIM || mode !== 'real') return;                 // engineMode hands the latest over once SIM runs
+  try { SIM.show_params(i, JSON.stringify(p)); w.shown = true; w.bad = null; }
+  catch (e) { w.bad = pyError(e); }
+}
+function pyError(e) {                                  // the ValueError text, not the traceback
+  const m = String((e && e.message) || e), k = m.lastIndexOf('params: ');
+  return (k >= 0 ? m.slice(k + 8) : m.trim().split('\n').pop()).trim().slice(0, 160);
+}
+function addPoint(w, now, s) {
+  const h = w.hist;
+  h.push({ t: now, d: num(s.d_est), lo: num(s.d_lo), hi: num(s.d_hi), r: num(s.rssi_f) });
+  while (h.length && now - h[0].t > RHIST_MS) h.shift();
+}
+function onPrinted(msg) {                              // a boot message or traceback: raw log only
+  printedOn = String(msg.src);
+  pushLog(msg.src, 'printed: ' + msg.line);
+}
+function logLine(src, rec) {
+  let body;
+  try { body = JSON.stringify(rec); } catch (_) { body = String(rec); }
+  pushLog(src, body);
+}
+function pushLog(src, body) {
+  const d = new Date(), p2 = (v) => String(v).padStart(2, '0');
+  rawLog.push(`${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}  ${src}  ${body.length > 400 ? body.slice(0, 400) + ' …' : body}`);
+  if (rawLog.length > LOG_N) rawLog.shift();
+  rawDirty = true;
+}
+// The bridge names a USB source by its port (cu.usbserial-022152D1, ttyUSB0) and a Wi-Fi one by its IPv4 address.
+const viaWifi = (src) => /^\d{1,3}(\.\d{1,3}){3}$/.test(String(src));
+const sentFrom = (src) => (!src ? '–' : viaWifi(src) ? 'Wi-Fi ' + esc(src) : 'USB port ' + esc(src));
+
+// ---------- real readouts ----------
+const realSilent = (w, now) => w.heard != null && now - w.heard >= SILENT_MS;
+function realBacklight(i) {                            // the record's screen state, as the sim's backlight
+  const rp = real[i].rp;
+  if (!rp) return 0.6;
+  return rp.on === false ? 0 : num(rp.bl) == null ? 0.6 : rp.bl / 100;
+}
+function ago(ms) { return ms < 10000 ? (ms / 1000).toFixed(1) + ' s' : ms < 120000 ? Math.round(ms / 1000) + ' s' : Math.round(ms / 60000) + ' min'; }
+const heardAgo = (ms) => (ms < 1000 ? 'just now' : ago(ms) + ' ago');     // records come 5 times a second
+function zoneText(z) {
+  if (num(z) == null || !ZONE_WORDS[z]) return '–';
+  if (!K) return ZONE_WORDS[z];
+  const e = K.enter_m;
+  return ZONE_WORDS[z] + ' (' + [`${e[0]} m or more`, `${e[1]}–${e[0]} m`, `${e[2]}–${e[1]} m`, `under ${e[2]} m`][z] + ')';
+}
+// Both watches live, and their latest rp records name different Wi-Fi channels (rp.ch: the access
+// point's; null on the fake watches): ESP-NOW follows the channel, so they cannot hear each other.
+function chSplit(now) {
+  const ch = real.map((w) => (w.heard != null && !realSilent(w, now) && w.rp ? num(w.rp.ch) : null));
+  return ch[0] != null && ch[1] != null && ch[0] !== ch[1];
+}
+function realWhy(i, w, now, linked) {
+  const L = 'AB'[i];
+  if (w.heard == null) return `Waiting for watch ${L}: nothing has arrived from it yet.`;
+  const age = now - w.heard;
+  if (w.clash != null && now - w.clash < CLASH_MS) return `Two different watches both call themselves ${L}. Load one of them again with --debug ${'BA'[i]}.`;
+  if (age >= SILENT_MS) return !linked ? `Last heard ${heardAgo(age)}, before the page lost the bridge (see above).`
+    : viaWifi(w.src) ? `Last heard ${heardAgo(age)}. Is the watch on, and on the same Wi-Fi as this computer?`
+    : `Last heard ${heardAgo(age)}. Is the watch on, and its USB cable plugged in? Raw messages below show anything it printed.`;
+  if (chSplit(now)) return 'The two watches joined different parts of your Wi-Fi (different channels), so they cannot hear each other. Use a network with one access point.';
+  if (pageError) return `Last heard ${heardAgo(age)}, but this page could not run its screen code: ${pageError} Reload the page; the readings below still update.`;
+  if (w.bad) return `Last heard ${heardAgo(age)}, but its screen could not be drawn (${w.bad}). The readings below still update.`;
+  if (w.rp && w.rp.on === false) return `Last heard ${heardAgo(age)}. Its screen is off (wrist down or timed out), so it is dark here too.`;
+  return `Live: last heard ${heardAgo(age)}.`;
+}
+function waitText(i, w) {                              // over the screen, or null when it shows the watch
+  if (pageError) return 'This page could not run its screen code';   // a drawn screen stopped following too
+  if (w.shown) return null;
+  return w.heard == null ? `Waiting for watch ${'AB'[i]}` : w.bad ? 'This screen could not be drawn' : 'The screen comes with its next message';
+}
+function renderRealWatch(i, now, linked) {
+  const w = real[i], s = w.s || {}, p = (w.rp && w.rp.p) || {};
+  const scr = typeof p.screen === 'string' ? p.screen : typeof s.ui === 'string' ? s.ui : null;
+  const sub = scr === p.screen ? p.sub : s.sub;
+  setText('name-' + i, scr ? scr + (typeof sub === 'string' && sub ? ' · ' + sub : '') : '–');
+  setText('why-' + i, realWhy(i, w, now, linked));
+  const wait = $('wait-' + i), wt = waitText(i, w);
+  wait.hidden = wt == null;
+  if (wt != null) setText('wait-' + i, wt);
+  const trend = s.trend > 0 ? '<span class="good">getting warmer</span>' : s.trend < 0 ? '<span class="warnc">getting colder</span>' : s.trend === 0 ? 'steady' : '–';
+  const lo = num(s.d_lo), hi = num(s.d_hi);
+  const guess = num(s.d_est) == null ? 'none yet' : fmt(s.d_est, 1, ' m') + (lo != null && hi != null ? `, likely <span class="nw">${fmt(lo, 1)}–${fmt(hi, 1)}</span>` : '');
+  const act = typeof s.act === 'string' && Object.hasOwn(ACT_WORDS, s.act) ? ACT_WORDS[s.act] : '–';
+  const html =
+    `<dt>Last heard</dt><dd>${w.heard == null ? 'not yet' : heardAgo(now - w.heard)}</dd>` +
+    `<dt>Sent from</dt><dd>${sentFrom(w.src)}</dd>` +
+    `<dt>Distance shown</dt><dd>${typeof p.dist_band === 'string' ? esc(p.dist_band) : 'none on screen'}</dd>` +
+    `<dt>Zone</dt><dd>${zoneText(s.zone)}</dd>` +
+    `<dt>Trend</dt><dd>${trend}</dd>` +
+    `<dt>Distance guess</dt><dd>${guess}</dd>` +
+    `<dt>Signal now / smoothed</dt><dd>${fmt(num(s.rssi), 0)} / ${fmt(num(s.rssi_f), 1)} dBm</dd>` +
+    `<dt>Steps</dt><dd>${fmt(num(s.steps))} · ${act}</dd>` +
+    `<dt>Battery</dt><dd>${fmt(num(s.batt_pct), 0, ' %')}${s.chg ? ' · charging' : ''}</dd>` +
+    `<dt>Missed signals</dt><dd>${fmt(num(s.loss), 0, ' %')}${num(s.rx) != null ? ` (${s.rx} heard)` : ''}</dd>`;
+  if (html !== w.html) { $('rtele-' + i).innerHTML = html; w.html = html; }
+}
+function realTick() {
+  if (mode !== 'real') return;
+  const now = performance.now(), st = bridgeState();
+  const live = real.filter((w) => w.heard != null && !realSilent(w, now)).length;
+  const [kind, text] =
+    st === 'open' ? ['ok', live === 2 ? 'Bridge connected · both watches live' : live ? 'Bridge connected · one watch live' : 'Bridge connected · no watch live']
+      : st === 'lost' ? ['err', 'Lost the bridge, trying again. Is tools/debug_server.py still running?']
+      : st === 'closed' ? ['err', 'The bridge stopped answering: start tools/debug_server.py again, then reload this page.']
+      : ['', 'Connecting to the bridge…'];
+  $('bridge').className = 'bridge' + (kind ? ' ' + kind : '');
+  setText('bridge-text', text + (others ? ` · ${others} messages from watches not called A or B (raw log only)` : ''));
+  $('howto').hidden = anyHeard;
+  if (!anyHeard) setText('howto-lead', howtoLead(printedOn));
+  for (let i = 0; i < 2; i++) renderRealWatch(i, now, st === 'open');
+  drawRealChart(now);
+  setText('rawlog-count', rawLog.length ? `(last ${rawLog.length})` : '(none yet)');
+  const pre = $('rawlog-text');
+  if (rawDirty && $('rawlog').open && !$('rawlog-pause').checked) {
+    const atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;    // follow the end unless scrolled up
+    pre.textContent = rawLog.join('\n');
+    rawDirty = false;
+    if (atEnd) pre.scrollTop = pre.scrollHeight;
+  }
+}
+function howtoLead(port) {                             // text from a USB port, but no record yet
+  return port == null ? 'Nothing has arrived from a watch yet. To show both watches here over their USB cables:'
+    : `USB port ${port} sends text but no watch records yet, so that watch may not be in debug mode: Raw messages below show what it printed. To show both watches here over their USB cables:`;
+}
+function realSummary() {                               // for fieldSim (headless checks)
+  const now = performance.now();
+  return { available: realOK, bridge: bridgeState(), watches: real.map((w) => ({
+    heard_ms: w.heard == null ? null : Math.round(now - w.heard), n: w.n, shown: w.shown, bad: w.bad, src: w.src,
+    screen: w.rp && w.rp.p ? w.rp.p.screen : null, d_est: w.s ? num(w.s.d_est) : null })) };
+}
+
+// ---------- real chart: distance guess (top) and smoothed signal (bottom), one shared time axis ----------
+const rchart = $('rchart'), rctx = rchart.getContext('2d');
+let rDpr = 1, rHover = null;                           // pointer x in canvas px, or null
+function layoutRealChart() {
+  const r = rchart.getBoundingClientRect();
+  if (!r.width) return;
+  rDpr = Math.min(2, window.devicePixelRatio || 1);
+  rchart.width = Math.round(r.width * rDpr); rchart.height = Math.round(r.height * rDpr);
+}
+function rLine(c, hist, key, x, y, color, lw) {
+  c.strokeStyle = color; c.lineWidth = lw; c.beginPath();
+  let pen = false, prev = -Infinity;
+  for (const h of hist) {
+    const v = h[key], gap = h.t - prev > GAP_MS;     // a silent watch leaves a gap, not a ramp
+    prev = h.t;
+    if (v == null) { pen = false; continue; }
+    if (pen && !gap) c.lineTo(x(h.t), y(v)); else c.moveTo(x(h.t), y(v));
+    pen = true;
+  }
+  c.stroke();
+}
+function rBand(c, hist, x, y, fill) {
+  c.fillStyle = fill;
+  let run = [], prev = -Infinity;
+  const flush = () => {
+    if (run.length > 1) {
+      c.beginPath();
+      run.forEach((h, k) => (k ? c.lineTo(x(h.t), y(h.lo)) : c.moveTo(x(h.t), y(h.lo))));
+      for (let k = run.length - 1; k >= 0; k--) c.lineTo(x(run[k].t), y(run[k].hi));
+      c.closePath(); c.fill();
+    }
+    run = [];
+  };
+  for (const h of hist) {
+    if (h.lo == null || h.hi == null || h.t - prev > GAP_MS) flush();
+    prev = h.t;
+    if (h.lo != null && h.hi != null) run.push(h);
+  }
+  flush();
+}
+function rNearest(hist, t) {
+  let best = null;
+  for (const h of hist) if (Math.abs(h.t - t) <= 1500 && (!best || Math.abs(h.t - t) < Math.abs(best.t - t))) best = h;
+  return best;
+}
+function drawRealChart(now) {
+  const c = rctx, k = rDpr, Wc = rchart.width, Hc = rchart.height;
+  if (!Wc || !Hc) return;
+  const x0 = 46 * k, x1 = Wc - 10 * k, dTop = 22 * k, padB = 22 * k, gap = 34 * k;
+  const dBot = dTop + (Hc - dTop - padB - gap) * 0.62, sTop = dBot + gap, sBot = Hc - padB;
+  const x = (t) => x0 + (x1 - x0) * (1 - (now - t) / RHIST_MS);
+  const lo = Math.log(1), hi = Math.log(80);
+  const yd = (m) => dTop + (dBot - dTop) * (1 - (Math.log(Math.max(1, Math.min(80, m))) - lo) / (hi - lo));
+  let rmin = Infinity, rmax = -Infinity, any = false;  // signal scale: the data in whole 10 dB, >= 30 dB
+  for (const w of real) for (const h of w.hist) {
+    if (now - h.t > RHIST_MS) continue;
+    any = true;
+    if (h.r != null) { rmin = Math.min(rmin, h.r); rmax = Math.max(rmax, h.r); }
+  }
+  if (rmin > rmax) { rmin = -75; rmax = -55; }
+  const sHi = Math.ceil((rmax + 3) / 10) * 10, sLo = Math.min(Math.floor((rmin - 3) / 10) * 10, sHi - 30);
+  const ys = (v) => sTop + (sBot - sTop) * (sHi - v) / (sHi - sLo);
+  let step = 10;                                       // grid labels at least 18 px apart
+  while ((sBot - sTop) * step / (sHi - sLo) < 18 * k) step *= 2;
+  c.setTransform(1, 0, 0, 1, 0, 0); c.fillStyle = '#0E1512'; c.fillRect(0, 0, Wc, Hc);
+  c.font = `${Math.round(11 * k)}px 'IBM Plex Mono', monospace`; c.textBaseline = 'middle';
+  c.fillStyle = '#8BA096'; c.textAlign = 'left';
+  c.fillText('distance guess', x0, dTop - 11 * k);
+  c.fillText('signal strength, dBm', x0, sTop - 11 * k);
+  if (K) {
+    for (const [a, b, name, fill] of ZBANDS) {
+      c.fillStyle = fill; c.fillRect(x0, yd(b), x1 - x0, yd(a) - yd(b));
+      c.fillStyle = '#8BA096'; c.textAlign = 'right'; c.fillText(name, x0 - 6 * k, (yd(a) + yd(Math.min(b, 80))) / 2);
+    }
+    c.fillStyle = '#5C6E65'; c.textAlign = 'left';
+    for (const m of K.band_edges_m) c.fillText(m + ' m', x0 + 4 * k, yd(m) - 7 * k);
+  }
+  c.strokeStyle = '#1B2B23'; c.lineWidth = 1; c.fillStyle = '#8BA096'; c.textAlign = 'right';
+  for (let v = Math.ceil(sLo / step) * step; v <= sHi; v += step) {
+    const py = Math.round(ys(v)) + 0.5;
+    c.beginPath(); c.moveTo(x0, py); c.lineTo(x1, py); c.stroke();
+    c.fillText(String(v), x0 - 6 * k, py);
+  }
+  c.fillStyle = '#5C6E65';
+  for (let s = 0; s <= 90; s += 30) { c.textAlign = s ? 'center' : 'right'; c.fillText(s ? '-' + s + ' s' : 'now', x(now - s * 1000), Hc - padB / 2); }
+  if (!any) { c.fillStyle = '#8BA096'; c.textAlign = 'center'; c.fillText('no readings yet', (x0 + x1) / 2, (dTop + dBot) / 2); }
+  c.save(); c.beginPath(); c.rect(x0, 0, x1 - x0, Hc); c.clip();
+  real.forEach((w, i) => rBand(c, w.hist, x, yd, RFILL[i]));
+  real.forEach((w, i) => { rLine(c, w.hist, 'd', x, yd, RCOL[i], 2 * k); rLine(c, w.hist, 'r', x, ys, RCOL[i], 2 * k); });
+  c.restore();
+  if (rHover == null || rHover < x0 || rHover > x1) return;
+  // hover: crosshair, the nearest reading per watch, and their values
+  const t = now - (1 - (rHover - x0) / (x1 - x0)) * RHIST_MS, hx = Math.round(rHover) + 0.5;
+  c.strokeStyle = 'rgba(213,227,218,0.35)'; c.lineWidth = 1;
+  c.beginPath(); c.moveTo(hx, dTop); c.lineTo(hx, sBot); c.stroke();
+  const rows = [[null, ago(now - t) + ' ago']];
+  real.forEach((w, i) => {
+    const h = rNearest(w.hist, t);
+    if (!h) return;
+    for (const [v, y] of [[h.d, yd], [h.r, ys]]) {
+      if (v == null) continue;
+      c.fillStyle = RCOL[i]; c.strokeStyle = '#0E1512'; c.lineWidth = 2 * k;
+      c.beginPath(); c.arc(x(h.t), y(v), 4 * k, 0, Math.PI * 2); c.fill(); c.stroke();
+    }
+    rows.push([RCOL[i], `${'AB'[i]}  ${h.d == null ? '–' : h.d.toFixed(1) + ' m'}${h.lo != null && h.hi != null ? ` (${h.lo.toFixed(1)} to ${h.hi.toFixed(1)})` : ''}  ${h.r == null ? '–' : h.r.toFixed(1) + ' dBm'}`]);
+  });
+  const lh = 16 * k, pad = 8 * k, bw = Math.max(...rows.map((r) => c.measureText(r[1]).width)) + pad * 2 + 14 * k, bh = rows.length * lh + pad * 2 - 4 * k;
+  const bx = hx + 10 * k + bw <= x1 ? hx + 10 * k : Math.max(x0, hx - 10 * k - bw);
+  c.fillStyle = 'rgba(10,15,13,0.92)'; c.strokeStyle = '#1E2B25'; c.lineWidth = 1;
+  c.fillRect(bx, dTop, bw, bh); c.strokeRect(bx + 0.5, dTop + 0.5, bw - 1, bh - 1);
+  c.textAlign = 'left';
+  rows.forEach(([col, text], r) => {
+    const ty = dTop + pad + lh * r + lh / 2 - 2 * k;
+    if (col) { c.fillStyle = col; c.beginPath(); c.arc(bx + pad + 4 * k, ty, 4 * k, 0, Math.PI * 2); c.fill(); }
+    c.fillStyle = col ? '#D5E3DA' : '#8BA096'; c.fillText(text, bx + pad + (col ? 14 * k : 0), ty);
+  });
+}
+function initModes() {
+  $('mode-sim').addEventListener('click', () => chooseMode('sim'));
+  $('mode-real').addEventListener('click', () => chooseMode('real'));
+  $('rawlog').addEventListener('toggle', realTick);
+  const hover = (e) => {
+    const r = rchart.getBoundingClientRect();
+    rHover = e ? (e.clientX - r.left) * (rchart.width / r.width) : null;
+    if (mode === 'real') drawRealChart(performance.now());
+  };
+  rchart.addEventListener('pointermove', hover);
+  rchart.addEventListener('pointerdown', hover);
+  rchart.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') hover(null); });   // a tap keeps its read-out
+  setInterval(realTick, 200);
+  bridgeUp().then((ok) => {
+    if (realOK === null) realOK = ok;                  // a click on Real may have checked already
+    markReal();
+    if (realOK && savedMode() === 'real') setMode('real');
+  });
+}
+
 // ---------- input ----------
 let drag = null;
 function pos(e) { const r = field.getBoundingClientRect(); return { x: (e.clientX - r.left) * (W / r.width), y: (e.clientY - r.top) * (H / r.height) }; }
@@ -557,19 +1043,19 @@ screens.forEach((s, i) => {
   let y0 = null, swiped = false, lastWheel = 0;
   s.cv.addEventListener('pointerdown', (e) => { y0 = e.clientY; swiped = false; });
   s.cv.addEventListener('pointerup', (e) => {
-    if (y0 == null || !SIM) { y0 = null; return; }
+    if (y0 == null || !SIM || mode === 'real') { y0 = null; return; }
     const dy = e.clientY - y0; y0 = null;
     if (Math.abs(dy) >= SWIPE_PX) { swiped = true; call('swipe', i, dy < 0); }
   });
   s.cv.addEventListener('click', (e) => {
     if (swiped) { swiped = false; return; }
-    if (!SIM) return;
+    if (!SIM || mode === 'real') return;                 // real watches are not driven from here
     const r = s.cv.getBoundingClientRect();                  // tap where clicked (menu rows, iris)
     const x = Math.round((e.clientX - r.left) * 240 / r.width), y = Math.round((e.clientY - r.top) * 240 / r.height);
     call('tap', i, Math.max(0, Math.min(239, x)), Math.max(0, Math.min(239, y)));
   });
   s.cv.addEventListener('wheel', (e) => {
-    if (!SIM || !e.deltaY) return; e.preventDefault();
+    if (!SIM || mode === 'real' || !e.deltaY) return; e.preventDefault();
     const now = performance.now(); if (now - lastWheel < WHEEL_GAP_MS) return; lastWheel = now;
     call('swipe', i, e.deltaY > 0);
   }, { passive: false });
@@ -594,13 +1080,16 @@ $('auto-pair').addEventListener('change', () => {
   mp.runPython('SIM.auto_pair = ' + pyBool('auto-pair'));
   resetSim();                                          // a fresh pairing: no calibration mixes both channels
 });
-document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => {
-  speed = +b.dataset.speed; document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+document.querySelectorAll('.seg.speed button').forEach((b) => b.addEventListener('click', () => {
+  speed = +b.dataset.speed; document.querySelectorAll('.seg.speed button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
 }));
 document.querySelectorAll('.posture select').forEach((sel) => sel.addEventListener('change', () => SIM && call('set_posture', +sel.dataset.i, sel.value)));
-window.addEventListener('resize', () => { layoutField(); layoutChart(); });
+window.addEventListener('resize', () => {
+  if (mode === 'real') { layoutRealChart(); drawRealChart(performance.now()); } else { layoutField(); layoutChart(); }
+});
 layoutField();
 layoutChart();
 drawField(0);
+initModes();
 start();
 </script>

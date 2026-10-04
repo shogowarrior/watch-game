@@ -4,8 +4,8 @@
 //   node tools/mpy/run.mjs tests/runner.py [args...]
 //   node tools/mpy/run.mjs tools/bakeoff.py --quick
 //
-// The repo's Python packages (app/, finder/, hal/, native/, sim/, ui/, tests/, tools/) are copied
-// into the WebAssembly filesystem at /repo and cwd is /repo, and sys.argv is set
+// The repo's Python packages (app/, finder/, hal/, native/, sim/, ui/, tests/, tools/) and
+// main.py, boot.py are copied into the WebAssembly filesystem at /repo and cwd is /repo, and sys.argv is set
 // as CPython would set it.
 import { loadMicroPython } from "./node_modules/@micropython/micropython-webassembly-pyscript/micropython.mjs";
 import fs from "node:fs";
@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const DIRS = ["app", "finder", "hal", "native", "sim", "ui", "tests", "tools"];
+const FILES = ["main.py", "boot.py"];   // the watch's entry points (never secrets.py)
 const [script, ...args] = process.argv.slice(2);
 if (!script) {
   console.error("usage: node tools/mpy/run.mjs <file.py> [args...]");
@@ -38,6 +39,7 @@ function copyTree(src, dst) {
 }
 mp.FS.mkdir("/repo");
 for (const d of DIRS) if (fs.existsSync(path.join(repo, d))) copyTree(path.join(repo, d), "/repo/" + d);
+for (const f of FILES) if (fs.existsSync(path.join(repo, f))) mp.FS.writeFile("/repo/" + f, fs.readFileSync(path.join(repo, f)));
 
 mp.globals.set("__argv", [script, ...args]);
 try {
