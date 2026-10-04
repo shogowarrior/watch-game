@@ -53,6 +53,12 @@ in one message with the current default marked. Don't build on an assumption.
   flashed one watch with stock MicroPython 1.29 (`tools/flash.sh`). Next is
   `python3 tools/deploy.py --port <port> --noapp` and the checklist in
   docs/hardware-setup.md.
+- **Themes** (ui-spec §4A): six looks for the field (Ripple, Sonar, Tide,
+  Warp, Arcade, Fireflies) are built in `ui/themes/` with their tokens
+  (`tokens.json` "themes") and previews in docs/design/themes/. They are not
+  wired yet: next is the renderer hook (`ui/renderer.py` takes over what
+  `ThemedRenderer` does), the MENU row `THEME: <NAME>`, a saved choice, a
+  `theme` field in RenderParams and a theme picker in the web simulator.
 - **Beacon format is version 3.** Both watches must run the same code; a watch
   on older code ignores the other.
 

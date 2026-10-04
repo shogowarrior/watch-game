@@ -12,6 +12,9 @@ haptic queue) must match their whole template: if their wording changes this
 script fails loudly instead of emitting a stale number.
 Tokens that repeat a value (backlight, sweep rate, breathing, crossfade, link
 bars, preset wavelengths, FOUND glow_r) must agree.
+The themes block (ui-spec section 4A) must list every theme in ``order``,
+ripple first, each label as its upper-case name; theme colours must be
+RGB565-exact.
 """
 
 import hashlib
@@ -240,6 +243,68 @@ def _fmt(v, ind=0):
             return one
         return "{\n" + "".join(pad + x + ",\n" for x in items) + " " * ind + "}"
     raise TypeError("cannot emit %r" % (v,))
+
+
+def _lut_stepped(stops_rgb, size):
+    """64-entry LUT that holds each stop flat: LUT[j] = stop round(j*7/63)."""
+    n = len(stops_rgb) - 1
+    out = []
+    for j in range(size):
+        r, g, b = stops_rgb[int(math.floor(j * n / (size - 1) + 0.5))]
+        out.append(Hex(_swap(_rgb565(r, g, b))))
+    return tuple(out)
+
+
+def _exact(name, hexstr):
+    """RGB565 int of an RGB565-exact hex colour (bit-replicated channels)."""
+    r, g, b = _rgb(hexstr)
+    if (r, g, b) != ((r >> 3) << 3 | r >> 5, (g >> 2) << 2 | g >> 6, (b >> 3) << 3 | b >> 5):
+        raise ValueError("colour %s %s is not RGB565-exact" % (name, hexstr))
+    return _rgb565(r, g, b)
+
+
+def _themes(th, size, rgb565):
+    """Rows for the themes block: names, labels, ramp LUTs, lens colours, params."""
+    order = tuple(th["order"])
+    if order[0] != "ripple" or th["default"] not in order or sorted(order) != sorted(
+            k for k in th if k not in ("order", "default", "rule")):
+        raise ValueError("themes: order, default and the theme entries disagree")
+    labels = {}
+    luts = {}
+    iris = {}
+    params = {}
+    for n in order:
+        t = th[n]
+        lab = t["label"]
+        if lab != n.upper() or len("THEME: " + lab) > 16:
+            raise ValueError("themes.%s.label must be %r and fit THEME: <label> in 16 chars" % (n, n.upper()))
+        labels[n] = lab
+        if n == "ripple":
+            iris[n] = Hex(_swap(rgb565["bg.iris"]))
+            continue
+        kind = t["lut"]
+        if kind not in ("linear", "stepped"):
+            raise ValueError("themes.%s.lut: %r" % (n, kind))
+        ramps = {}
+        for r in RAMPS:
+            stops = t["ramp"][r]
+            if len(stops) != 8:
+                raise ValueError("themes.%s.ramp.%s needs 8 stops" % (n, r))
+            for k, c in enumerate(stops):
+                _exact("themes.%s.ramp.%s[%d]" % (n, r, k), c)
+            rgb = [_rgb(c) for c in stops]
+            ramps[r] = _lut(rgb, size) if kind == "linear" else _lut_stepped(rgb, size)
+        luts[n] = ramps
+        iris[n] = Hex(_swap(_exact("themes.%s.iris" % n, t["iris"])))
+        params[n] = {k: _tup(v) for k, v in t["params"].items()}
+    return [
+        ("THEME_NAMES", order, "MENU order; ripple first"),
+        ("THEME_DEFAULT", th["default"], None),
+        ("THEME_LABELS", labels, "MENU row THEME: <label>"),
+        ("THEME_IRIS", iris, "lens colour, byte-swapped (ripple: bg.iris)"),
+        ("THEME_RAMP_LUT", luts, "like RAMP_LUT; ripple uses RAMP_LUT"),
+        ("THEME_PARAMS", params, "ui-spec section 4A numbers"),
+    ]
 
 
 # ---- build -----------------------------------------------------------------
@@ -523,6 +588,9 @@ def build(tok):
     rows.append(("RAMP_LUT", {r: _lut([_rgb(col[t]["hex"]) for t in rp[r]], size) for r in RAMPS},
                  "LUT[j] = ramp position j/63*7, byte-swapped"))
     sec("Ramps (ramp)", rows)
+
+    # themes (ui-spec section 4A)
+    sec("Themes (themes): ramps, lens colour and section 4A numbers per theme", _themes(tok["themes"], size, rgb565))
 
     # layout
     ir = lay["iris_radius_px"]

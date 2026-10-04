@@ -210,6 +210,42 @@ Full-field brightness may not change by more than 2 ramp steps in 333 ms (`motio
 
 ---
 
+## 4A. Themes
+
+A theme changes how the field looks, never what it tells the player. Ripple (§4) is the default; the others are Sonar, Tide, Warp, Arcade and Fireflies, in that order (`tokens.themes.order`). Status: built in `ui/themes/` and drawn by `ui.themes.ThemedRenderer` (previews, tests), not yet chosen from the MENU or wired into the game and the web simulator.
+
+**Shared rules (every theme)**
+
+1. **Same inputs, same timing.** A theme reads only `RenderParams` and the field state the renderer already keeps: the ring schedule, the crossfaded levels, the iris, the hue crossfade, the menu dim, the calibrate fill and the standing-wave weight. The field still schedules rings in every theme, so heartbeats stay locked to ring spawns, and a theme's beat *is* the ring spawn.
+2. **Five moments.** *Live*: `speed_px_s > 0` (FAR–HOT, PAIRING `split`, SCANNING `ready`). *Listening*: `speed_px_s < 0` (SEARCHING, LINK-LOST, PAIRING `looking`). *Still*: `speed_px_s = 0` (PAIRING `seen`, `confirmed`, `calibrate`). *Scan*: SCANNING `sweep` / `result` and the DIRECTION turn pacer, where the halo is the live mirror (§5.7). *Found*: FOUND. MENU freezes a theme's motion and dims it exactly like the field.
+3. **Same meaning.** Four tempos (the zone periods) carry the zone; intensity `I` sets brightness and size within a zone; green means live, gold FOUND and grey no data, with the §4 crossfade times. A beat whose ring is a ghost (`ring_live` false) is drawn grey. Inward or backward motion means listening.
+4. **Same layout.** Every theme draws the lens (iris disc in the theme's lens colour, rim as §2, same open and close) and the core dot (§4 rule 2), and shows the PAIRING calibrate fill disc (§6). Overlays, chips and glyphs sit on top and keep today's colours in this version.
+5. **Calm.** Motion is time-based on the frame lock (§4 rule 6). At 10 fps nothing moves more than about 4 px (or 6° of rotation) a frame unless it is drawn as a streak or trail that covers the step. No full-field flashes: the flash limit (§4) holds. Arcade's 10 Hz block steps are deliberate.
+6. **Changed regions.** Each drawn frame, a theme reports which 24-row strips of its field changed since the previous drawn frame (bit k = rows 24k to 24k+23; reporting more is allowed, less never) and a column span per strip, so a partial redraw can send only those.
+7. **Cost.** A theme's field (palette, blit and its own drawing) costs about what Ripple's does on the watch and allocates nothing per frame (AGENTS.md hard rule 2).
+8. **Colours.** Each theme has its own green, gold and grey ramps (8 stops each, RGB565-exact, expanded to 64-entry LUTs like `ramp`; Arcade's LUT is stepped, not interpolated) and its own lens colour (`tokens.themes`). Sun mode lifts and the battery saver caps a theme's levels exactly as they do Ripple's.
+
+| Theme | Picture | Closer | Arrow | Found | No signal |
+|---|---|---|---|---|---|
+| Ripple | Rings travel out from the centre (§4) | Faster, brighter rings at four tempos | Dart and cone in the dark lens | The rings stop and the field breathes gold | Grey rings drift inward |
+| Sonar | A phosphor beam sweeps the dish over faint range rings | More beams with longer, brighter trails | Same dart and cone | One gold ping, then the range rings breathe | One beam turns slowly backwards |
+| Tide | Water fills the dish | The water rises a step per distance band; waves, swell and bubbles quicken | Same dart and cone, above the water | The dish fills and turns gold and glassy | Still water and a slow drip |
+| Warp | Stars stream out of the centre | More stars, faster, with a surge on every beat | Same dart and cone | The stars slow to a stop and twinkle gold | A few stars drift back to the centre |
+| Arcade | Diamonds step outward in 8 px blocks, 10 steps a second | Diamonds come closer together and their front heats to white | Same dart and cone | Gold confetti falls around the check | Diamonds march inward |
+| Fireflies | Blinking fireflies drift around the lens | More fireflies, closer in, blinking more in step | Same dart and cone | They circle the check in gold | Three specks drift in from the edge |
+
+**Per theme** (`z` = zone 0–3, FAR to HOT; `I` = intensity; P = the zone's ring period)
+
+- **Sonar.** Base: floor and centre glow as §4 rule 1, plus range rings at r 40, 80 and 120 at level 1 + 0.8·I. *Live:* 2/3/4/6 beams (FAR–HOT), evenly spaced, turning clockwise so that one beam crosses 12 o'clock on every ring spawn (one turn takes beams × P: 4.8/4.8/4.0/3.0 s). Each beam leaves a trail that fades over 30 + 70·I degrees behind it, peak 3 + 4·I levels above the floor. *Listening:* one beam turning anticlockwise at 60°/s with a short trail. *Still:* the range rings breathe over 2.4 s. *Scan:* the beams stop; the live-mirror halo shows. *Found:* one ping ring runs out at 240 px/s, then the range rings breathe over 2.4 s.
+- **Tide.** The water surface sits at a fraction of the screen height set by the band: `<3` 0.86, `~5` 0.74, `~10` 0.62, `~20` 0.50, `~40` 0.38, `60+` 0.26; FOUND 0.92; listening with no band 0.20; otherwise the last level. It eases toward a new level with a 450 ms time constant (a band change is one visible step, never a drift between bands). *Live:* two sine waves of amplitude 1.5 + 1.1·z and 0.6 + 0.5·z px moving at 14 + 12·z px/s; on each live beat a swell of 5 + 3·z px rises in the middle and falls back with a 240 ms time constant; 2 + 2·z bubbles rise at 22 + 12·z px/s. *Listening:* calm water and a drop that falls from the top every 3 s. *Found:* gold, glassy water with a slow shimmer limited to a 24 px band under the surface.
+- **Warp.** Base: dark floor and centre glow. Each star is a streak from where it was on the last frame to where it is now (dim tail, bright head), so speed reads as blur, not as jumps; stars never draw inside the lens. *Live:* 18/30/46/70 stars at 0.45/0.65/0.95/1.45 trips a second, surging ×(1 + 1.3·e^(−t/170 ms)) after each live beat. *Listening:* 14 stars drift back toward the centre (−0.22). *Still:* 30 stars twinkle in place. *Scan:* 24 stars hold still. *Found:* 56 stars slow from 1.6 to a stop (e^(−t/400 ms)), then twinkle gold.
+- **Arcade.** The screen is 8 px cells; a cell's ring number is its diamond (Manhattan) distance from the centre. It changes only on a 100 ms tick, which divides every zone period. *Live:* a diamond front three cells deep (levels 7, 4.6, 2.6, × (0.62 + 0.38·I)) leaves the lens on each ring spawn and moves out one cell a tick; the cells next to the lens glow 1 + 3·I cells deep. *Listening:* grey diamonds march inward one cell every 2 ticks. *Still:* random cells twinkle. *Found:* gold confetti blocks fall around the check. The LUT steps between the 8 ramp stops.
+- **Fireflies.** Base: dark floor and a soft halo of 0.9·I. *Live:* 5/9/14/22 fireflies (FAR–HOT) drift around the lens, closer in as I rises (orbit × (1 − 0.45·I)); each blinks once per P (rise 90 ms, fall 260 ms) with a phase spread of 1 − sync, sync 0.25/0.5/0.8/1.0, so in HOT they all flash together on the beat. *Listening:* three specks drift in from the edge over 7 s. *Still:* nine fireflies glow softly. *Scan:* they freeze, dim. *Found:* 22 fireflies circle the check in gold, breathing over 2.4 s.
+
+**Choosing a theme.** A MENU row `THEME: <NAME>` (labels RIPPLE, SONAR, TIDE, WARP, ARCADE, FIREFLIES; the longest, `THEME: FIREFLIES`, is 16 characters) steps to the next theme on select. The choice stays set across rounds and is saved on the watch. `RenderParams` will carry it as `theme`. None of this is wired yet (see Status above).
+
+---
+
 ## 5. Mapping functions
 
 ### 5.1 Distance → proximity `p` → intensity `I`

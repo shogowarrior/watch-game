@@ -339,6 +339,10 @@ A shape-based code comparison that doesn't rely on reading text.
 
 ---
 
+### 4.10 Themes
+
+A theme redraws the RippleField in another style (Sonar, Tide, Warp, Arcade, Fireflies; Ripple is the default) with the same inputs and meaning: four tempos locked to the ring spawn, intensity within a zone, green/gold/grey, the lens and core dot, the calibrate fill. Behaviour: ui-spec §4A. **Tokens:** `themes.order`, `themes.<name>.ramp` (8 RGB565-exact stops per ramp, `lut` linear or stepped), `themes.<name>.iris` (lens colour) and `themes.<name>.params` (the §4A numbers). Overlays keep the base colours for now.
+
 ## 5. States
 
 Which values each screen uses, how the screens change and what the inputs do is behaviour, so it lives in [`ui-spec.md`](./ui-spec.md): zones, hysteresis and dwell (§5.2), zone tempo (§5.3), arrow σ (§5.6), screens and transitions (§6), haptics (§7) and input (§8). `tokens.json` `states` holds only the field presets those tables use (glyphs, texts and haptics are in ui-spec §6/§7).
