@@ -589,6 +589,85 @@ def test_page_follows_the_debug_contract():
     for name in ("real_mode", "show_params"):
         assert ("call('%s'" % name in page or "SIM.%s(" % name in page), name
         assert callable(getattr(TwoWatchSim, name)), name
+    # a line a watch printed on its USB port: {src, rx, line}
+    assert '"line": data.decode' in server and "typeof msg.line === 'string') onPrinted(msg)" in page
+
+
+def test_page_waiting_and_unavailable_name_the_usb_commands():
+    """The waiting how-to is USB first (plug in, deploy with --port and --debug, the bridge with
+    --serial, the local page), then one paragraph on Wi-Fi; the unavailable note names the
+    bridge with --serial."""
+    if MPY:
+        raise Skip("reads web/sim/index.html (CPython)")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    k = page.index('<div class="howto" id="howto">')
+    howto = page[k:page.index("</div>", k)]
+    steps = howto[howto.index("<ol>"):howto.index("</ol>")]
+    order = [steps.index(s) for s in (
+        "Plug both watches", "python3 tools/deploy.py --port P --debug A",
+        "python3 tools/deploy.py --port P --debug B", "python3 tools/debug_server.py --serial",
+        "http://localhost:8765/local.html")]
+    assert order == sorted(order), order
+    wifi = howto[howto.index("</ol>"):]
+    for s in ("Over Wi-Fi instead", "python3 tools/wifi_setup.py", "--debug A --wifi",
+              "--debug B --wifi"):
+        assert s in wifi, s
+    assert "secrets.py" not in howto and "--demo --serial" in wifi
+    k = page.index("\nfunction markReal(")
+    mark = page[k:page.index("\n}\n", k)]
+    assert "python3 tools/debug_server.py --serial</code>" in mark and "USB ports or Wi-Fi" in mark
+
+
+def test_page_real_mode_shows_usb_ports_and_printed_text():
+    """Text a watch printed on its USB port goes to the raw log, marked with the port, and is
+    not a record; "Sent from" names the USB port or the Wi-Fi address; a silent USB watch is
+    asked about its cable, a Wi-Fi one about the Wi-Fi."""
+    if MPY:
+        raise Skip("runs the page's own functions in node (CPython)")
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        raise Skip("needs node")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    stubs = "let pageError = null, printedOn = null, rawDirty = false;\n"   # LOG_N's line has CLASH_MS
+    script = stubs + _page_js(page, ("LOG_N", "rawLog", "esc", "num", "real", "realSilent", "ago",
+                                     "heardAgo", "chSplit", "viaWifi", "sentFrom", "realWhy",
+                                     "pushLog", "logLine", "onPrinted", "howtoLead")) + """
+const out = { lead0: howtoLead(printedOn) };
+onPrinted({ src: 'cu.usbserial-022152D1', rx: 1, line: 'Traceback (most recent call last):' });
+logLine('cu.usbserial-022152D1', { dev: 'A', ev: 's' });
+logLine('192.168.1.40', { dev: 'B', ev: 's' });
+out.log = rawLog.map((l) => l.slice(10));                     // without the time
+out.printedOn = printedOn;
+out.lead1 = howtoLead(printedOn);
+out.from = [sentFrom('cu.usbserial-022152D1'), sentFrom('192.168.1.40'), sentFrom('pts/3'),
+            sentFrom(null), sentFrom('<b>')];
+out.why = [realWhy(0, { heard: 0, src: 'cu.usbserial-1', clash: null }, 5000, true),
+           realWhy(1, { heard: 0, src: '10.0.0.7', clash: null }, 5000, true)];
+for (let k = 0; k < 60; k++) onPrinted({ src: 'ttyUSB0', line: 'n' + k });
+out.kept = [rawLog.length, rawLog[0].slice(10), rawLog[rawLog.length - 1].slice(10)];
+console.log(JSON.stringify(out));
+"""
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["log"] == ["cu.usbserial-022152D1  printed: Traceback (most recent call last):",
+                          'cu.usbserial-022152D1  {"dev":"A","ev":"s"}',
+                          '192.168.1.40  {"dev":"B","ev":"s"}'], out["log"]
+    assert out["printedOn"] == "cu.usbserial-022152D1"
+    assert out["lead0"].startswith("Nothing has arrived from a watch yet."), out["lead0"]
+    assert out["lead1"].startswith("USB port cu.usbserial-022152D1 sends text but no watch "
+                                   "records yet"), out["lead1"]
+    assert out["from"] == ["USB port cu.usbserial-022152D1", "Wi-Fi 192.168.1.40", "USB port pts/3",
+                           "–", "USB port &lt;b&gt;"], out["from"]
+    assert "USB cable plugged in" in out["why"][0] and "Wi-Fi" not in out["why"][0], out["why"]
+    assert "same Wi-Fi" in out["why"][1] and "USB" not in out["why"][1], out["why"]
+    assert out["kept"] == [50, "ttyUSB0  printed: n10", "ttyUSB0  printed: n59"], out["kept"]
 
 
 def _page_js(page, names):
@@ -628,7 +707,7 @@ def test_page_real_mode_shows_a_failed_start():
         "const boot = { hidden: true, innerHTML: '', appendChild() {} };\n"
         "const document = { createElement: () => ({ appendChild() {} }) };\n")
     script = stubs + _page_js(page, ("fail", "num", "real", "realSilent", "ago", "heardAgo",
-                                     "chSplit", "realWhy", "waitText")) + """
+                                     "chSplit", "viaWifi", "realWhy", "waitText")) + """
 const w = { heard: 0, clash: null, bad: null, rp: null, shown: false };
 const out = { before: [realWhy(0, w, 400, true), waitText(0, w)] };
 w.shown = true; out.drawn = waitText(0, w); w.shown = false;
@@ -671,7 +750,7 @@ def test_page_real_mode_names_a_channel_split():
         page = f.read()
     stubs = "let pageError = null; const SILENT_MS = 3000, CLASH_MS = 10000;\n"
     script = stubs + _page_js(page, ("num", "real", "realSilent", "ago", "heardAgo",
-                                     "chSplit", "realWhy")) + """
+                                     "chSplit", "viaWifi", "realWhy")) + """
 const why = () => [realWhy(0, real[0], 400, true), realWhy(1, real[1], 400, true)];
 Object.assign(real[0], { heard: 0, rp: { ev: 'rp', ch: 1 } });
 Object.assign(real[1], { heard: 100, rp: { ev: 'rp', ch: 6 } });

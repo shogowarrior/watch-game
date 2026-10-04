@@ -1,8 +1,10 @@
 """tools/debug_server.py: the UDP -> SSE relay, /debug/status, the session
 log and the static files, over real localhost sockets (free ports, short
-timeouts). No Wi-Fi and no watches.
+timeouts); the USB serial reader on pseudo-terminals. No Wi-Fi, no serial
+port and no watches.
 
-A CPython host tool (threads, http.server): skipped under MicroPython."""
+A CPython host tool (threads, http.server, pty): skipped under MicroPython,
+and the serial tests where there is no pty."""
 
 import json
 import os
@@ -22,16 +24,63 @@ def _ds():
     return ds
 
 
-def _start(ds, tmp, log=None):
-    """A started DebugServer on free ports, serving ``tmp``/www."""
+def _www(tmp):
+    """``tmp``/www with a page and a module script in it."""
     www = os.path.join(tmp, "www")
     os.makedirs(os.path.join(www, "mpy"))
     with open(os.path.join(www, "local.html"), "w") as f:
         f.write("<p>page</p>")
     open(os.path.join(www, "mpy", "micropython.mjs"), "w").close()
-    srv = ds.DebugServer(www, 0, 0, log)
+    return www
+
+
+def _start(ds, tmp, log=None, serial=None):
+    """A started DebugServer on free ports, serving ``tmp``/www."""
+    srv = ds.DebugServer(_www(tmp), 0, 0, log, serial)
     srv.start()
     return srv
+
+
+def _serial_ds():
+    """The bridge module where serial ports can be faked (pty, termios)."""
+    ds = _ds()
+    try:
+        import pty  # noqa: F401
+    except ImportError:
+        raise Skip("needs pseudo-terminals (macOS or Linux)")
+    if ds.termios is None:
+        raise Skip("needs termios (macOS or Linux)")
+    return ds
+
+
+def _pty():
+    """A pseudo-terminal standing in for a watch on USB -> (the watch's end:
+    its master fd, the port's path). The port is closed and keeps the
+    terminal settings the OS gave it (echo on), as a port nobody opened yet."""
+    import pty
+    m, s = pty.openpty()
+    path = os.ttyname(s)
+    os.close(s)
+    return m, path
+
+
+def _framed(rec):
+    """A record as the watch's USB link writes it."""
+    return b"\x1e" + json.dumps(rec, separators=(",", ":")).encode() + b"\n"
+
+
+class _Fast:
+    """Shorter serial retry and rescan periods for the duration of a test."""
+
+    def __init__(self, ds):
+        self.ds = ds
+
+    def __enter__(self):
+        self.saved = (self.ds.REOPEN_S, self.ds.SCAN_S)
+        self.ds.REOPEN_S = self.ds.SCAN_S = 0.05
+
+    def __exit__(self, *exc):
+        self.ds.REOPEN_S, self.ds.SCAN_S = self.saved
 
 
 def _get(port, path):
@@ -142,6 +191,7 @@ def test_relay_to_events_status_and_log():
             assert st["watches"] == {
                 "A": {"src": "127.0.0.1", "last_rx": msgs[2]["rx"], "n": 2},
                 "B": {"src": "127.0.0.1", "last_rx": msgs[1]["rx"], "n": 1}}, st
+            assert st["serial"] == {}, st                 # no --serial
             with open(log) as f:          # the same lines the page got, one per record
                 assert [json.loads(x) for x in f.read().splitlines()] == msgs
             r.close()
@@ -338,18 +388,34 @@ def test_banner_warns_when_the_watches_cannot_reach_the_bridge():
     ds = _ds()
     import types
 
-    def srv(udp_port, log=None):
-        return types.SimpleNamespace(http_port=8765, udp_port=udp_port,
+    def srv(udp_port, log=None, ports=None):
+        return types.SimpleNamespace(http_port=8765, udp_port=udp_port, ports=ports,
                                      bridge=types.SimpleNamespace(log=log))
     lines = ds.banner(srv(ds.UDP_PORT), False)
     assert "http://localhost:8765/local.html" in lines[0], lines
     assert not any("will not reach" in x for x in lines), lines
     assert not any("Saving" in x for x in lines), lines           # --no-log
+    assert not any("USB" in x for x in lines), lines              # no --serial
     lines = ds.banner(srv(47299, os.path.join(ds.ROOT, "logs", "debug-x.jsonl")), True)
     warn = [x for x in lines if "will not reach" in x]
     assert len(warn) == 1 and "UDP port %d" % ds.UDP_PORT in warn[0], lines
     assert "Saving what the watches send to logs/debug-x.jsonl" in lines, lines
+    assert "Listening for the watches on UDP port 47299 (two simulated watches are sending)." \
+        in lines, lines
     assert lines[-1] == "Press Ctrl-C to stop.", lines
+    # --serial: which ports, and that they are held
+    lines = ds.banner(srv(ds.UDP_PORT, ports=ds.SerialPorts(None, [])), False)
+    assert "Reading every USB serial port plugged in, and looking for new ones every 2 s." \
+        in lines, lines
+    assert any("stop it (Ctrl-C) before deploy.py" in x for x in lines), lines
+    lines = ds.banner(srv(ds.UDP_PORT, ports=ds.SerialPorts(
+        None, ["/dev/tty.usbserial-1", "/dev/ttyUSB0"])), False)
+    assert "Reading the watches on USB serial ports cu.usbserial-1, ttyUSB0." in lines, lines
+    lines = ds.banner(srv(ds.UDP_PORT, ports=ds.SerialPorts(None, ["/dev/pts/3", "/dev/pts/4"])),
+                      True)                                       # --demo --serial
+    assert ("Reading the watches on USB serial ports pts/3, pts/4 (two simulated watches are "
+            "writing).") in lines, lines
+    assert "Listening for the watches on UDP port %d." % ds.UDP_PORT in lines, lines
 
 
 def test_demo_runs_the_fake_watches():
@@ -396,8 +462,417 @@ def test_defaults_and_log_name():
     assert ds.UDP_PORT == DEBUG_PORT
     a = ds.parse_args([])
     assert (a.http_port, a.udp_port, a.no_log, a.demo) == (8765, DEBUG_PORT, False, False)
-    assert a.root == os.path.join(ds.ROOT, "dist", "sim")
+    assert a.root == os.path.join(ds.ROOT, "dist", "sim") and a.serial is None
     a = ds.parse_args(["--http-port", "8799", "--udp-port", "47299", "--no-log", "--demo"])
     assert (a.http_port, a.udp_port, a.no_log, a.demo) == (8799, 47299, True, True)
+    assert ds.parse_args(["--serial"]).serial == []                  # find the ports
+    a = ds.parse_args(["--serial", "/dev/ttyUSB0", "/dev/tty.usbserial-1", "--no-log"])
+    assert a.serial == ["/dev/ttyUSB0", "/dev/tty.usbserial-1"] and a.no_log, a
+    a = ds.parse_args(["--serial", "--demo"])
+    assert (a.serial, a.demo) == ([], True)
+    import contextlib
+    import io
+    try:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            ds.parse_args(["--demo", "--serial", "/dev/ttyUSB0"])
+        assert False, "--demo makes its own ports"
+    except SystemExit:
+        assert "give it no PORT" in err.getvalue(), err.getvalue()
     shown = ds._shown(ds.log_path())             # as /debug/status shows it
     assert re.match(r"logs/debug-\d{8}-\d{6}\.jsonl$", shown), shown
+
+
+def test_launch_config_runs_the_bridge_on_usb():
+    ds = _ds()
+    with open(os.path.join(ds.ROOT, ".claude", "launch.json")) as f:
+        web = [c for c in json.load(f)["configurations"] if c["name"] == "web-sim"][0]
+    args = web["runtimeArgs"]
+    assert args[0] == "tools/debug_server.py" and "--serial" in args, args
+    a = ds.parse_args(args[1:])
+    assert a.serial == [] and a.http_port == web["port"] == 8765, args
+
+
+# ---- USB serial ------------------------------------------------------------------------
+
+def test_lines_split_trim_and_limit():
+    ds = _ds()
+    lines = ds.Lines()
+    rec = _framed(REC_A)
+    assert lines.feed(b'"t": 9, "ev": "s"}\r\n' + rec[:15]) == []    # opened mid-line: dropped
+    assert lines.feed(rec[15:-1] + b"\r\nboot ok\n\r\n\n" + b"x") == [rec[:-1], b"boot ok"]
+    big = b"y" * (ds.LINE_MAX + 1)
+    assert lines.feed(b"\n" + big[:5000]) == [b"x"]
+    assert lines.feed(big[5000:]) == [None]                         # too long: once, no \n needed
+    assert lines.feed(b"the rest of it\nnext\n") == [b"next"]
+    exact = b"z" * ds.LINE_MAX
+    assert lines.feed(exact + b"\n" + big + b"\nafter\n") == [exact, None, b"after"]
+    first = ds.Lines()                                               # a long cut first line
+    assert first.feed(big) == [] and first.feed(b"tail\nok\n") == [b"ok"]
+
+
+def test_port_lines_are_records_or_text():
+    """A 0x1E line is checked and relayed exactly like a datagram; any other line
+    is text for the page's raw log and the session log."""
+    ds = _ds()
+    import tempfile
+    port = "cu.usbserial-022152D1"
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "debug-x.jsonl")
+        b = ds.Bridge(47268, log)
+        q = b.subscribe()
+        rec = b.port_line(port, _framed(REC_A)[:-1], 5)
+        txt = b.port_line(port, b"Traceback (most recent call last): \xe9", 6)
+        for bad in (b"\x1e{not json", b'\x1e{"dev": "A", "ev": "s", "d_est": 1e400}',
+                    b'\x1e{"ev": "s"}', b"\x1e", None):                # None: over LINE_MAX
+            assert b.port_line(port, bad, 7) is None, bad
+        wifi = b.handle(json.dumps(REC_B).encode(), "10.0.0.2", 8)      # the Wi-Fi link, alongside
+        b.close()
+        assert b.port_line(port, b"after close", 9) is None
+        assert json.loads(rec) == {"src": port, "rx": 5, "rec": REC_A}
+        assert json.loads(txt) == {"src": port, "rx": 6,
+                                   "line": "Traceback (most recent call last): �"}
+        st = b.status()
+        assert (st["packets"], st["bad"]) == (2, 5), st
+        assert st["watches"] == {"A": {"src": port, "last_rx": 5, "n": 1},
+                                 "B": {"src": "10.0.0.2", "last_rx": 8, "n": 1}}, st
+        assert st["serial"] == {port: {"open": False, "err": None, "records": 1, "lines": 1}}, st
+        sent = []
+        while True:
+            x = q.get_nowait()
+            if x is None:
+                break
+            sent.append(x)
+        assert sent == [rec, txt, wifi], sent
+        with open(log) as f:
+            assert f.read().splitlines() == [rec, txt, wifi]
+
+
+def test_port_names_and_paths():
+    ds = _ds()
+    import tempfile
+    assert ds.callout("/dev/tty.usbserial-022152D1") == "/dev/cu.usbserial-022152D1"
+    for path in ("/dev/cu.usbserial-1", "/dev/ttyUSB0", "/dev/ttyACM1", "/dev/pts/3"):
+        assert ds.callout(path) == path, path
+    assert ds.port_name("/dev/cu.usbserial-022152D1") == "cu.usbserial-022152D1"
+    assert ds.port_name("/dev/ttyUSB0") == "ttyUSB0" and ds.port_name("/dev/pts/3") == "pts/3"
+    assert ds.port_name("/tmp/x/ttyFAKE") == "ttyFAKE"
+    for pat in ("/dev/cu.usbserial-*", "/dev/cu.SLAB_USBtoUART*", "/dev/cu.wchusbserial*",
+                "/dev/cu.usbmodem*", "/dev/ttyUSB*", "/dev/ttyACM*"):
+        assert pat in ds.PORT_GLOBS, pat
+    with tempfile.TemporaryDirectory() as tmp:
+        for n in ("ttyUSB1", "ttyUSB0", "ttyS0", "cu.usbmodem3"):
+            open(os.path.join(tmp, n), "w").close()
+        pats = (os.path.join(tmp, "ttyUSB*"), os.path.join(tmp, "cu.usbmodem*"),
+                os.path.join(tmp, "ttyUSB0"))                         # found twice: listed once
+        assert ds.find_ports(pats) == [os.path.join(tmp, n)
+                                       for n in ("cu.usbmodem3", "ttyUSB0", "ttyUSB1")]
+    import errno
+    for code, words in ((errno.ENOENT, "not found"), (errno.EBUSY, "busy"),
+                        (errno.EAGAIN, "busy"), (errno.EACCES, "dialout")):
+        assert words in ds.port_reason(OSError(code, os.strerror(code))), code
+    assert ds.port_reason(OSError(errno.EIO, "Input/output error")) == "Input/output error"
+    assert ds.port_news("ttyUSB0", {"open": True, "err": None}) == "USB port ttyUSB0 is open."
+    assert ds.port_news("ttyUSB0", {"open": False, "err": None}) is None   # not tried yet
+    assert ds.port_news("ttyUSB0", {"open": False, "err": "busy: x"}) == \
+        "USB port ttyUSB0: busy: x. Trying again every second."
+
+
+def test_open_port_is_raw_exclusive_and_quiet():
+    ds = _serial_ds()
+    import termios
+    m, path = _pty()
+    fd = ds.open_port(path)
+    try:
+        a = termios.tcgetattr(fd)
+        assert a[3] & (termios.ECHO | termios.ICANON | termios.ISIG) == 0, a[3]
+        assert a[0] & (termios.IXON | termios.IXOFF | termios.ICRNL | termios.INLCR) == 0, a[0]
+        assert a[2] & termios.CSIZE == termios.CS8 and not a[2] & (termios.PARENB | termios.CSTOPB)
+        assert a[2] & termios.CLOCAL and a[2] & termios.CREAD, a[2]
+        assert a[4] == a[5] == termios.B115200
+        try:                                     # mpremote, deploy.py or a second bridge
+            ds.open_port(path)
+            assert False, "opened twice"
+        except OSError as e:
+            assert ds.port_reason(e).startswith("busy"), e
+        os.write(m, b"echo me?\n")               # raw: nothing goes back to the watch
+        import fcntl
+        import time
+        time.sleep(0.1)                          # the tty echoes from a worker, not at once
+        fcntl.fcntl(m, fcntl.F_SETFL, os.O_NONBLOCK)
+        try:
+            assert os.read(m, 64) == b"", "the bridge wrote to the port"
+        except BlockingIOError:
+            pass
+    finally:
+        os.close(fd)
+        os.close(m)
+    try:
+        ds.open_port(path)
+        assert False, "the pty is gone"
+    except OSError as e:
+        assert ds.port_reason(e) == "not found (unplugged?)", e
+
+
+def test_open_port_shuts_out_programs_that_take_no_flock():
+    """TIOCEXCL: screen, cat or an IDE serial monitor get "busy" too."""
+    ds = _serial_ds()
+    import errno
+    import fcntl
+    import struct
+    import sys
+    import termios
+    root = os.geteuid() == 0                     # root opens a TIOCEXCL port anyway
+    if root and not sys.platform.startswith("linux"):
+        raise Skip("TIOCEXCL: run as a normal user on macOS")
+    m, path = _pty()
+    fd = ds.open_port(path)
+    try:
+        if root:                                 # so ask Linux
+            got = fcntl.ioctl(fd, getattr(termios, "TIOCGEXCL", 0x80045440), b"\0" * 4)
+            assert struct.unpack("i", got)[0] == 1, "not in TIOCEXCL mode"
+        else:
+            try:
+                os.close(os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK))
+                assert False, "opened by a program that takes no flock"
+            except OSError as e:
+                assert e.errno == errno.EBUSY, e
+    finally:
+        os.close(fd)
+        os.close(m)
+
+
+def test_serial_reader_on_a_pty():
+    """Records, text, CRLF, a record split across reads, an over-long line, then
+    the port going away: closed, the reason in the status, tried again."""
+    ds = _serial_ds()
+    import fcntl
+    import time
+    m, path = _pty()
+    port = path[len("/dev/"):]
+    b = ds.Bridge(47268)
+    q = b.subscribe()
+    ports = ds.SerialPorts(b, [path])
+    try:
+        with _Fast(ds):
+            ports.start()
+            _wait(lambda: b.status()["serial"].get(port, {}).get("open"))
+            os.write(m, b"the tail of a line sent before the bridge opened\r\n")
+            rec = _framed(REC_A)
+            os.write(m, rec[:20])
+            time.sleep(0.05)                     # the reader takes the first part alone
+            os.write(m, rec[20:-1] + b"\r\nMicroPython v1.29.0 boot\r\n\r\n")
+            os.write(m, b"x" * (ds.LINE_MAX + 100) + b"\n")
+            os.write(m, _framed(REC_B))
+            got = [json.loads(q.get(timeout=T)) for _ in range(3)]
+            assert [g["src"] for g in got] == [port] * 3, got
+            assert [g.get("rec") or g.get("line") for g in got] == [
+                REC_A, "MicroPython v1.29.0 boot", REC_B], got
+            st = b.status()
+            assert (st["packets"], st["bad"]) == (2, 1), st
+            assert st["serial"] == {port: {"open": True, "err": None, "records": 2, "lines": 1}}
+            fcntl.fcntl(m, fcntl.F_SETFL, os.O_NONBLOCK)
+            try:
+                assert os.read(m, 64) == b"", "the bridge wrote to the port"
+            except BlockingIOError:
+                pass
+            os.close(m)                          # unplugged
+            m = None
+            _wait(lambda: b.status()["serial"][port]["err"] == "not found (unplugged?)")
+            assert b.status()["serial"][port]["open"] is False
+    finally:
+        b.close()
+        ports.join(T)
+        if m is not None:
+            os.close(m)
+    assert not any(t.is_alive() for t in ports._readers.values())
+    p = b.status()["serial"][port]
+    assert (p["open"], p["records"], p["lines"]) == (False, 2, 1), p
+
+
+def test_serial_port_comes_back():
+    """A port that went away is opened again once it is back (here: a link that
+    points at a new pseudo-terminal, as a watch plugged in again)."""
+    ds = _serial_ds()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        link = os.path.join(tmp, "ttyUSB0")
+        m, path = _pty()
+        os.symlink(path, link)
+        b = ds.Bridge(47268)
+        ports = ds.SerialPorts(b, [link])
+        m2 = None
+
+        def state():
+            return b.status()["serial"].get("ttyUSB0", {})
+        try:
+            with _Fast(ds):
+                ports.start()
+                _wait(lambda: state().get("open"))
+                os.close(m)
+                m = None
+                _wait(lambda: state().get("err") is not None)
+                assert state()["open"] is False, state()
+                m2, path2 = _pty()
+                os.symlink(path2, link + ".new")
+                os.replace(link + ".new", link)  # plugged in again
+                _wait(lambda: state().get("open"))
+                os.write(m2, b"\n" + _framed(REC_B))
+                _wait(lambda: state()["records"] == 1)
+                assert b.status()["watches"]["B"]["src"] == "ttyUSB0"
+        finally:
+            b.close()
+            ports.join(T)
+            for fd in (m, m2):
+                if fd is not None:
+                    os.close(fd)
+
+
+def test_port_that_hangs_up_while_opening_is_tried_again():
+    """A watch unplugged while its port is set up (termios.error EIO, not an
+    OSError): the port is closed, the reason shown, and opened again."""
+    ds = _serial_ds()
+    import errno
+    import fcntl
+    import termios
+    m, path = _pty()
+    port = path[len("/dev/"):]
+    b = ds.Bridge(47268)
+    ports = ds.SerialPorts(b, [path])
+    set_raw, errs = ds.set_raw, []               # the status err at each set_raw
+
+    def hangs_up_once(fd):
+        errs.append(b.status()["serial"][port]["err"])
+        if len(errs) == 1:
+            fcntl.ioctl(fd, termios.TIOCNXCL)    # as a USB tty's last close does (a pty's does not)
+            raise termios.error(errno.EIO, "Input/output error")
+        set_raw(fd)
+    ds.set_raw = hangs_up_once
+    try:
+        with _Fast(ds):
+            ports.start()
+            _wait(lambda: b.status()["serial"].get(port, {}).get("open"))
+            os.write(m, b"\n" + _framed(REC_A))  # read: the first fd and its flock were closed
+            _wait(lambda: b.status()["packets"] == 1)
+        assert errs == [None, "Input/output error"], errs
+    finally:
+        ds.set_raw = set_raw
+        b.close()
+        ports.join(T)
+        os.close(m)
+
+
+def test_auto_detect_finds_ports_plugged_in_later():
+    ds = _serial_ds()
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ends = []
+        b = ds.Bridge(47268)
+        pats = (os.path.join(tmp, "ttyUSB*"), os.path.join(tmp, "cu.usbmodem*"))
+        ports = ds.SerialPorts(b, [], pats)
+        try:
+            with _Fast(ds):
+                for name in ("ttyUSB0", "ttyS0"):                  # ttyS0 matches no pattern
+                    m, path = _pty()
+                    ends.append(m)
+                    os.symlink(path, os.path.join(tmp, name))
+                ports.start()
+                _wait(lambda: b.status()["serial"].get("ttyUSB0", {}).get("open"))
+                m, path = _pty()                                   # the second watch, later
+                ends.append(m)
+                os.symlink(path, os.path.join(tmp, "cu.usbmodem1"))
+                _wait(lambda: b.status()["serial"].get("cu.usbmodem1", {}).get("open"))
+                os.write(ends[0], b"\n" + _framed(REC_A))
+                os.write(ends[2], b"\n" + _framed(REC_B))
+                _wait(lambda: len(b.status()["watches"]) == 2)
+                st = b.status()
+                assert {k: w["src"] for k, w in st["watches"].items()} == {
+                    "A": "ttyUSB0", "B": "cu.usbmodem1"}, st
+                assert sorted(st["serial"]) == ["cu.usbmodem1", "ttyUSB0"], st
+        finally:
+            b.close()
+            ports.join(T)
+            for fd in ends:
+                os.close(fd)
+        assert not ports._scan.is_alive()
+        assert not any(t.is_alive() for t in ports._readers.values())
+
+
+def test_status_lists_the_serial_ports():
+    ds = _serial_ds()
+    import tempfile
+    m, path = _pty()
+    try:
+        with tempfile.TemporaryDirectory() as tmp, _Fast(ds):
+            srv = _start(ds, tmp, serial=[path, "/dev/ttyNOPE-test"])
+            try:
+                def ready():
+                    s = _status(srv.http_port)["serial"]
+                    return len(s) == 2 and s[path[5:]]["open"] and s["ttyNOPE-test"]["err"]
+                _wait(ready)
+                st = _status(srv.http_port)["serial"]
+                assert st == {path[5:]: {"open": True, "err": None, "records": 0, "lines": 0},
+                              "ttyNOPE-test": {"open": False, "err": "not found (unplugged?)",
+                                               "records": 0, "lines": 0}}, st
+            finally:
+                srv.stop()
+            assert not any(t.is_alive() for t in srv.ports._readers.values())
+    finally:
+        os.close(m)
+
+
+def test_demo_serial_runs_the_fake_watches_on_ptys():
+    """main() with --demo --serial: the fake watches write framed lines into two
+    pseudo-terminals, which the bridge reads like USB ports; Ctrl-C stops it all."""
+    ds = _serial_ds()
+    import contextlib
+    import io
+    import sys
+    import tempfile
+    import types
+    seen = []
+
+    def run(host="127.0.0.1", port=47268, seconds=None, speed=1.0, stop=None, serial=None):
+        seen.append(serial)
+        n = 0
+        while not stop.is_set():
+            for f, rec in zip(serial, (REC_A, REC_B)):
+                f.write(b"boot %d\r\n" % n + _framed(rec))
+            n += 1
+            stop.wait(0.02)
+        seen.append("returned")
+
+    def follow(srv):                             # main's loop, until both watches were heard
+        def both():
+            st = srv.bridge.status()
+            return len(st["watches"]) == 2 and all(p["lines"] for p in st["serial"].values())
+        _wait(both)
+        seen.append(srv.bridge.status())
+    fake = types.ModuleType("tools.fake_watches")
+    fake.run = run
+    saved = sys.modules.get("tools.fake_watches"), ds._follow
+    sys.modules["tools.fake_watches"] = fake
+    ds._follow = follow
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                ds.main(["--root", _www(tmp), "--http-port", "0", "--udp-port", "0", "--no-log",
+                         "--demo", "--serial"])
+    finally:
+        ds._follow = saved[1]
+        if saved[0] is None:
+            del sys.modules["tools.fake_watches"]
+        else:
+            sys.modules["tools.fake_watches"] = saved[0]
+    ends, st, done = seen
+    assert done == "returned"                    # stopped with the bridge
+    assert all(isinstance(f, io.FileIO) and f.mode == "wb" and f.closed for f in ends), ends
+    srcs = {k: w["src"] for k, w in st["watches"].items()}
+    assert sorted(srcs) == ["A", "B"] and srcs["A"] != srcs["B"], srcs
+    for k in ("A", "B"):
+        assert srcs[k].startswith("pts/") or srcs[k].startswith("ttys"), srcs
+        p = st["serial"][srcs[k]]
+        assert p["open"] and p["records"] >= 1 and p["lines"] >= 1, st["serial"]
+    text = out.getvalue()
+    assert "(two simulated watches are writing)" in text, text
+    assert "Stopped. Heard" in text, text

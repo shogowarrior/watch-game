@@ -124,7 +124,7 @@ code.cmd { font-family: var(--mono); font-size: 12px; color: var(--text); backgr
 .screen-wait { position: absolute; inset: 18px; display: flex; align-items: center; justify-content: center; padding: 30px; text-align: center; color: var(--muted); font-size: 13px; pointer-events: none; }
 .screen-wait[hidden] { display: none; }
 .screen.stale { opacity: 0.45; }
-dl.rtele dd { white-space: normal; }
+dl.rtele dd { white-space: normal; overflow-wrap: anywhere; }
 .nw { white-space: nowrap; }
 </style>
 
@@ -133,7 +133,7 @@ dl.rtele dd { white-space: normal; }
     <div>
       <h1>Two-Watch Field Sim</h1>
       <p class="sub sim-only">The real watch code (game logic and screen renderer, MicroPython 1.29) running in your browser against a simulated radio. Drag the watches around and both screens react as the firmware would. Mockups: <a href="https://claude.ai/code/artifact/6fa68c10-ec92-4dbc-9fdc-a45a0d5aa3a1" target="_blank" rel="noopener">Sheikah Finder watch UI</a>.</p>
-      <p class="sub real-only">What your two real watches are doing right now. Each watch sends its screen and readings over Wi-Fi to the bridge on this computer, and this page draws the screens with the watch's own screen code.</p>
+      <p class="sub real-only">What your two real watches are doing right now. Each watch sends its screen and readings over its USB cable (or Wi-Fi) to the bridge on this computer, and this page draws the screens with the watch's own screen code.</p>
     </div>
     <div class="head-side">
       <span class="seg mode" role="group" aria-label="What this page shows">
@@ -217,13 +217,14 @@ dl.rtele dd { white-space: normal; }
       </div>
       <div class="howto" id="howto">
         <h3>Waiting for the watches</h3>
-        <p>Nothing has arrived from a watch yet. To send their screens here:</p>
+        <p id="howto-lead">Nothing has arrived from a watch yet. To show both watches here over their USB cables:</p>
         <ol>
-          <li>Copy <code class="cmd">secrets.example.py</code> to <code class="cmd">secrets.py</code> and put your Wi-Fi name and password in it. It stays on this computer and the watches.</li>
-          <li>Load each watch in debug mode: <code class="cmd">python3 tools/deploy.py --debug A</code> for one and <code class="cmd">python3 tools/deploy.py --debug B</code> for the other.</li>
-          <li>Both watches must use the same Wi-Fi as this computer. A mesh system or a range extender can put the two watches on different channels even though the network has one name, so if both show up here but never find each other, use a network with a single access point. Each screen shows up here a few seconds after its watch starts. If the computer asks whether Python may accept incoming connections, allow it.</li>
+          <li>Plug both watches into this computer.</li>
+          <li>Stop the bridge (Ctrl-C in its terminal): loading a watch needs its USB port. Load each watch in debug mode, with P its port (<code class="cmd">mpremote devs</code> lists them): <code class="cmd">python3 tools/deploy.py --port P --debug A</code> for one and <code class="cmd">python3 tools/deploy.py --port P --debug B</code> for the other.</li>
+          <li>Start the bridge again with <code class="cmd">python3 tools/debug_server.py --serial</code> and open <code class="cmd">http://localhost:8765/local.html</code>. Each screen shows up here a few seconds after its watch starts.</li>
         </ol>
-        <p>No watches at hand? Stop the bridge (Ctrl-C) and start it again with <code class="cmd">python3 tools/debug_server.py --demo</code> to see two pretend watches play.</p>
+        <p>Over Wi-Fi instead: save the Wi-Fi name and password once with <code class="cmd">python3 tools/wifi_setup.py</code>, load the watches with <code class="cmd">--debug A --wifi</code> and <code class="cmd">--debug B --wifi</code>, and keep both on this computer's Wi-Fi (a network with one access point works best).</p>
+        <p>No watches at hand? Stop the bridge and start it again with <code class="cmd">python3 tools/debug_server.py --demo --serial</code> to see two pretend watches play.</p>
       </div>
       <div class="chart-wrap">
         <div class="chart-head">
@@ -238,7 +239,7 @@ dl.rtele dd { white-space: normal; }
       </div>
       <details class="rawlog" id="rawlog">
         <summary>Raw messages <span id="rawlog-count">(none yet)</span></summary>
-        <div class="rawlog-bar"><span>The last 50 messages from the watches, newest at the bottom: the time, the sender's address, then the message as the bridge received it.</span><label><input type="checkbox" id="rawlog-pause"> Pause</label></div>
+        <div class="rawlog-bar"><span>The last 50 messages from the watches, newest at the bottom: the time, where it came from (a USB port or a Wi-Fi address), then the message as the bridge received it. Text a watch printed on its USB port is marked "printed".</span><label><input type="checkbox" id="rawlog-pause"> Pause</label></div>
         <pre id="rawlog-text"></pre>
       </details>
     </section>
@@ -610,11 +611,13 @@ function renderTele() {
 function fmtClock(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
 
 // ---------- Real watches (docs/design/debug-mode.md) ----------
-// tools/debug_server.py serves this page and relays the watches' UDP records as Server-Sent
-// Events on ./events: {src, rx, rec}. An "rp" record carries the RenderParams the watch drew
-// (SIM.show_params draws them with the same renderer), an "s" record its 5 Hz readings. The
-// mode is offered only when ./debug/status answers, so never in the artifact or from a plain
-// http.server.
+// tools/debug_server.py serves this page and relays the watches' records, read from their USB
+// serial ports or UDP datagrams, as Server-Sent Events on ./events: {src, rx, rec}, src being the
+// port's name or the sender's IP address; a line a watch printed on its USB port comes as
+// {src, rx, line}. An "rp" record carries the RenderParams the watch drew (SIM.show_params draws
+// them with the same renderer; over USB about once a second, and the renderer keeps animating
+// them in between), an "s" record its 5 Hz readings. The mode is offered only when
+// ./debug/status answers, so never in the artifact or from a plain http.server.
 const wrapEl = document.querySelector('.wrap'), MODE_KEY = 'fieldSim.mode';
 const LOG_N = 50, SILENT_MS = 3000, CLASH_MS = 10000, RHIST_MS = 90000, GAP_MS = 2000;
 const ZONE_WORDS = ['far', 'near', 'warm', 'hot'];
@@ -622,6 +625,7 @@ const ACT_WORDS = { still: 'still', walk: 'walking', run: 'running', unknown: 'n
 const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 const RCOL = ['#7FD6FF', '#FFB86B'], RFILL = ['rgba(127,214,255,0.14)', 'rgba(255,184,107,0.14)'];
 let mode = 'sim', realOK = null, es = null, everOpen = false, anyHeard = false, others = 0, rawDirty = false;
+let printedOn = null;                                  // the USB port a watch last printed text on
 const rawLog = [];
 const real = [0, 1].map(() => ({ mac: null, src: null, heard: null, n: 0, s: null, rp: null, shown: false, bad: null, clash: null, hist: [], html: '' }));
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -645,10 +649,10 @@ function markReal() {
   b.title = off ? 'Not available in this page: see the note below' : '';
   note.hidden = !off;
   if (!off) return;
-  const cmd = '<code class="cmd">python3 tools/debug_server.py</code>', url = '<code class="cmd">http://localhost:8765/local.html</code>';
+  const cmd = '<code class="cmd">python3 tools/debug_server.py --serial</code>', url = '<code class="cmd">http://localhost:8765/local.html</code>';
   note.innerHTML = LOCAL_HOSTS.includes(location.hostname)
     ? `Real watches need the debug bridge, which is not running for this page: in the project folder run ${cmd}, then open ${url}.`
-    : `Real watches work only in the copy of this page on your own computer, because a page on the web cannot reach watches on your Wi-Fi: in the project folder run ${cmd}, then open ${url}.`;
+    : `Real watches work only in the copy of this page on your own computer, because a page on the web cannot reach watches on your USB ports or Wi-Fi: in the project folder run ${cmd}, then open ${url}.`;
 }
 async function chooseMode(m) {
   if (m === 'real' && !realOK) {
@@ -695,6 +699,7 @@ function openStream() {
     let msg = null;
     try { msg = JSON.parse(e.data); } catch (_) { return; }
     if (msg && msg.rec && typeof msg.rec === 'object') onRecord(msg, heardAt(msg.rx));
+    else if (msg && typeof msg.line === 'string') onPrinted(msg);
   };
 }
 // When the bridge received the record (rx: this computer's clock, ms since 1970), on this page's
@@ -739,14 +744,24 @@ function addPoint(w, now, s) {
   h.push({ t: now, d: num(s.d_est), lo: num(s.d_lo), hi: num(s.d_hi), r: num(s.rssi_f) });
   while (h.length && now - h[0].t > RHIST_MS) h.shift();
 }
+function onPrinted(msg) {                              // a boot message or traceback: raw log only
+  printedOn = String(msg.src);
+  pushLog(msg.src, 'printed: ' + msg.line);
+}
 function logLine(src, rec) {
   let body;
   try { body = JSON.stringify(rec); } catch (_) { body = String(rec); }
+  pushLog(src, body);
+}
+function pushLog(src, body) {
   const d = new Date(), p2 = (v) => String(v).padStart(2, '0');
   rawLog.push(`${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}  ${src}  ${body.length > 400 ? body.slice(0, 400) + ' …' : body}`);
   if (rawLog.length > LOG_N) rawLog.shift();
   rawDirty = true;
 }
+// The bridge names a USB source by its port (cu.usbserial-022152D1, ttyUSB0) and a Wi-Fi one by its IPv4 address.
+const viaWifi = (src) => /^\d{1,3}(\.\d{1,3}){3}$/.test(String(src));
+const sentFrom = (src) => (!src ? '–' : viaWifi(src) ? 'Wi-Fi ' + esc(src) : 'USB port ' + esc(src));
 
 // ---------- real readouts ----------
 const realSilent = (w, now) => w.heard != null && now - w.heard >= SILENT_MS;
@@ -774,8 +789,9 @@ function realWhy(i, w, now, linked) {
   if (w.heard == null) return `Waiting for watch ${L}: nothing has arrived from it yet.`;
   const age = now - w.heard;
   if (w.clash != null && now - w.clash < CLASH_MS) return `Two different watches both call themselves ${L}. Load one of them again with --debug ${'BA'[i]}.`;
-  if (age >= SILENT_MS) return linked ? `Last heard ${heardAgo(age)}. Is the watch on, and on the same Wi-Fi as this computer?`
-    : `Last heard ${heardAgo(age)}, before the page lost the bridge (see above).`;
+  if (age >= SILENT_MS) return !linked ? `Last heard ${heardAgo(age)}, before the page lost the bridge (see above).`
+    : viaWifi(w.src) ? `Last heard ${heardAgo(age)}. Is the watch on, and on the same Wi-Fi as this computer?`
+    : `Last heard ${heardAgo(age)}. Is the watch on, and its USB cable plugged in? Raw messages below show anything it printed.`;
   if (chSplit(now)) return 'The two watches joined different parts of your Wi-Fi (different channels), so they cannot hear each other. Use a network with one access point.';
   if (pageError) return `Last heard ${heardAgo(age)}, but this page could not run its screen code: ${pageError} Reload the page; the readings below still update.`;
   if (w.bad) return `Last heard ${heardAgo(age)}, but its screen could not be drawn (${w.bad}). The readings below still update.`;
@@ -802,7 +818,7 @@ function renderRealWatch(i, now, linked) {
   const act = typeof s.act === 'string' && Object.hasOwn(ACT_WORDS, s.act) ? ACT_WORDS[s.act] : '–';
   const html =
     `<dt>Last heard</dt><dd>${w.heard == null ? 'not yet' : heardAgo(now - w.heard)}</dd>` +
-    `<dt>Sent from</dt><dd>${w.src ? esc(w.src) : '–'}</dd>` +
+    `<dt>Sent from</dt><dd>${sentFrom(w.src)}</dd>` +
     `<dt>Distance shown</dt><dd>${typeof p.dist_band === 'string' ? esc(p.dist_band) : 'none on screen'}</dd>` +
     `<dt>Zone</dt><dd>${zoneText(s.zone)}</dd>` +
     `<dt>Trend</dt><dd>${trend}</dd>` +
@@ -825,6 +841,7 @@ function realTick() {
   $('bridge').className = 'bridge' + (kind ? ' ' + kind : '');
   setText('bridge-text', text + (others ? ` · ${others} messages from watches not called A or B (raw log only)` : ''));
   $('howto').hidden = anyHeard;
+  if (!anyHeard) setText('howto-lead', howtoLead(printedOn));
   for (let i = 0; i < 2; i++) renderRealWatch(i, now, st === 'open');
   drawRealChart(now);
   setText('rawlog-count', rawLog.length ? `(last ${rawLog.length})` : '(none yet)');
@@ -836,10 +853,14 @@ function realTick() {
     if (atEnd) pre.scrollTop = pre.scrollHeight;
   }
 }
+function howtoLead(port) {                             // text from a USB port, but no record yet
+  return port == null ? 'Nothing has arrived from a watch yet. To show both watches here over their USB cables:'
+    : `USB port ${port} sends text but no watch records yet, so that watch may not be in debug mode: Raw messages below show what it printed. To show both watches here over their USB cables:`;
+}
 function realSummary() {                               // for fieldSim (headless checks)
   const now = performance.now();
   return { available: realOK, bridge: bridgeState(), watches: real.map((w) => ({
-    heard_ms: w.heard == null ? null : Math.round(now - w.heard), n: w.n, shown: w.shown, bad: w.bad,
+    heard_ms: w.heard == null ? null : Math.round(now - w.heard), n: w.n, shown: w.shown, bad: w.bad, src: w.src,
     screen: w.rp && w.rp.p ? w.rp.p.screen : null, d_est: w.s ? num(w.s.d_est) : null })) };
 }
 
