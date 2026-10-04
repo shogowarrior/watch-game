@@ -7,5 +7,7 @@ secrets.py
 webrepl_cfg.py
 .serena/
 dist/
+logs/
 firmware/*.bin
 bma423conf.bin
+.claude/worktrees/

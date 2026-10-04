@@ -3,7 +3,7 @@
 Pure-Python drivers for the **LILYGO T-Watch 2020 V1** on **stock MicroPython
 v1.29.0** (`ESP32_GENERIC-SPIRAM`). The stock firmware has no `st7789` C module
 and no frozen `axp202c`, so everything here is plain `.py`. Only `hal/` may
-import `machine`, `network` or `espnow`. Game logic in `finder/` stays pure and
+import `machine`, `network`, `espnow` or `socket`. Game logic in `finder/` stays pure and
 gets its data from these drivers. The drivers take `const` and the tick helpers
 from `finder/compat.py`, and the radio its send schedule from `finder/link.py`,
 so `hal/` alone does not run on a watch: deploy `finder/` with it. Every driver
@@ -30,8 +30,8 @@ You draw into RGB565 `framebuf` strips (usually a GS8 buffer blitted through a
 palette), then push them with `push_strip(y0, h, buf)` (a full-width strip)
 or `push_frame(fb)` (115,200 B sent as strip-sized writes in one CS-low burst;
 the slice list is cached, so it allocates nothing). A strip that starts where
-the last one ended continues its window (CS stays low, no new command), so 10
-strips top to bottom cost what `push_frame` does (44.1 ms on the watch, against
+the last one ended continues its window (CS stays low, no new command), so
+strips top to bottom (the renderer sends 4 bands of 240x60) cost what `push_frame` does (44.1 ms on the watch, against
 52.4 ms with a window per strip and 37.3 ms as one write; the wire alone takes
 34.6 ms at 26.67 MHz). Every write is copied from the PSRAM heap into an
 internal DMA buffer by ESP-IDF, so a write costs about 0.7 ms on top of the
@@ -128,10 +128,14 @@ and then call `begin()` and poll `ready()`.
   loop uses `start_features()` (a non-blocking `load_config`) and then polls
   `poll_features()`: the first FEAT_OK after each reset switches on the step
   counter, activity and wrist-wear, latched on INT1 (a soft reset wipes them).
-  A bus error mid-upload leaves INIT_CTRL unset, so `app/runtime.py` retries
-  `start_features()` up to 3 times at boot; a bus error in `poll_features()` is
-  retried by the 1 s poll. The wrist-wear gesture runs with Bosch's default axes
-  remap, which is unverified on the T-Watch (`docs/hardware-setup.md` §6).
+  A bus error mid-upload leaves INIT_CTRL unset, so `app/runtime.py` starts it
+  again from its 1 s poll, one period after the failed start, 5 starts in all
+  (`CHIP_TRIES`; after that, software steps only). A lost ACK on INIT_CTRL=1
+  has brought the engine up by then, so that retry uploads nothing. A bus
+  error in `poll_features()` is retried by the 1 s poll. A start that goes
+  through, or the engine coming up, clears the error from `errors`. The
+  wrist-wear gesture runs with Bosch's default axes remap, which is
+  unverified on the T-Watch (`docs/hardware-setup.md` §6).
   `load_config()` alone starts the engine but switches no feature on, so
   `steps()` reads 0 until `poll_features()` runs. `Board()` soft-resets the
   chip, so nothing loads the blob until one of these runs.
@@ -182,9 +186,93 @@ link in `sim/radio.py`).
   copy anything you keep. Driver timestamps that are stale, or more than 1 s
   off, are replaced by `now`.
 - `stats()` returns the tx/rx/error counters.
+- **Associated mode (debug mode over Wi-Fi only).** `begin(sta=link.sta)`,
+  with the STA interface that `debuglink` joined to the Wi-Fi access point,
+  keeps that connection and runs ESP-NOW on the access point's channel, any of
+  1 to 13 (`channel` is ignored; a channel outside 1-13 raises). `pm=PM_NONE` is still
+  set: modem sleep would make the watch miss ESP-NOW frames between the access
+  point's beacons. `associated` stays True for the radio's lifetime. Normal play
+  never joins an access point, so it never takes this path.
 
 `network` and `espnow` are imported inside `begin()`, so the module also loads
 on CPython.
+
+**`debuglink.py`: debug mode's link to the laptop, over USB serial or Wi-Fi.**
+Debug mode (`docs/design/debug-mode.md`) shows the real watches in the web sim
+page. `main.py` calls `debuglink.start()` before `board.init()`:
+
+- Without `/debug` it returns `(None, None)` and nothing changes.
+- With `/debug` `{"dev": "A", "link": "usb"}` (written by
+  `tools/deploy.py --debug A`; no `link` also means USB) it returns a
+  `SerialLink` at once and a message naming the laptop command
+  (`USB_MSG`). It reads no `/secrets.py`, never touches the Wi-Fi, and leaves
+  the radio as in normal play (`link.sta` is None).
+- With `{"dev": "A", "link": "wifi", "host": "192.168.1.23", "port": 47268}`
+  (`--debug A --wifi`) it reads `WIFI_SSID` and `WIFI_PASSWORD` from
+  `/secrets.py` (the file `tools/wifi_setup.py` saved on the laptop) and joins
+  that access point. It waits at most 10 s (`JOIN_MS`), with the screen still
+  dark. Then it opens a non-blocking UDP socket to `host:port`, or to the
+  subnet broadcast address when `/debug` has no `host` (broadcast is
+  unreliable on the ESP32: a fallback only). Any other `link` makes `/debug`
+  invalid.
+- Whatever fails (no `/secrets.py`, a name or password not in quotes, a wrong
+  password, no access point in range), it returns `(None, why)`: `main.py`
+  prints the reason and the game plays normally. A reason about the Wi-Fi
+  file or the join ends with what to run on the laptop (`WIFI_FIX`:
+  `python3 tools/wifi_setup.py`, then `deploy.py --debug A --wifi` again). A
+  wrong password and an unknown or out-of-range network give the same message
+  after 10 s (the ESP32 keeps retrying both, so the watch cannot tell them
+  apart). `main.py` also turns any unexpected error from `start()` into
+  `debug mode off: it could not start (<type>). Playing normally.` A failed
+  join is disconnected again, so the STA cannot pull ESP-NOW off its channel.
+  The Wi-Fi name and password are never printed, logged or sent.
+- On success `main.py` sets `board.debug = link`. On Wi-Fi, `Board._make_radio`
+  then starts `EspNowRadio` in its associated mode on `link.sta`.
+  `app/telemetry.py` hands its records to `link.send()` from its 5 Hz path
+  (never from the render loop). Send errors are counted in `tx_err` and never
+  raised. `Runtime.stats()` shows the counters as `debug_stats`.
+
+`SerialLink` (USB) writes each record as one line on the REPL's UART
+(`sys.stdout.buffer`): the byte `0x1E`, the compact JSON, `\n`. It never reads
+the port, so Ctrl-C still works. The UART sends about 11.5 bytes per ms
+through a 128-byte transmit FIFO, and a write to a full FIFO waits (as `print`
+does), so the link paces itself:
+
+- `send` queues the record, cut into pieces at every 128 bytes of the queued
+  stream (`SERIAL_FIFO`). A record that would leave more than 4096 bytes
+  waiting (`SERIAL_QMAX`) is dropped whole and counted in `drop`.
+- `pump(now)` writes whole pieces only while a model of the FIFO has room
+  (refilling at 11 bytes per ms since the last write), so a write never waits,
+  and it allocates nothing. `app/runtime.py` calls it once per loop pass and
+  at each mid-frame service (after each band the renderer blits or pushes,
+  and after its overlays, ~5-15 ms apart); once per pass was too slow while
+  frames render.
+- `drain()` (a forced telemetry flush at loop exit and power off) writes out
+  whatever waits, waiting on the port like `print`.
+- `stats()` gives `tx`, `drop`, `queued` (bytes waiting), `tx_err` and `err`.
+  At bring-up, `drop` and `queued` should stay near 0.
+- The screen record (`rp`) goes once a second (`rp_ms` 1000, against 200 on
+  Wi-Fi) and at once when the screen, its sub-state or its power changes, so
+  the records need about a quarter of the line.
+
+Gotchas:
+
+- ESP-NOW and the Wi-Fi association share one radio, so **both watches must
+  join the same access point**: the access point picks the channel, and two
+  watches on different channels never hear each other. A watch whose join
+  failed stays on channel 6 while a joined partner uses the access point's
+  channel, so the pair cannot find each other until both have joined. A mesh
+  or extender network (one name, several access points) can split two
+  watches the same way. Each `rp` record carries the channel (`ch`), so the
+  page can say when the two watches differ.
+- If the Wi-Fi drops in the middle of a game, the ESP32 keeps trying to
+  reconnect. That can make it scan other channels and disturb ESP-NOW until
+  the access point is back in reach. Debug mode is for the desk and the field
+  test, not for normal play.
+- `network` and `socket` are imported only when used, so the module also loads
+  on CPython: `tools/fake_watches.py` sends through `DebugLink.open()` and
+  `send()`, or through `SerialLink` into a pseudo-terminal
+  (`debug_server.py --demo --serial`).
 
 **`watchdog.py`: loop watchdog.** `Watchdog(timeout_ms=8000, usb=False)`
 reboots the watch if the game loop stops calling `feed()`. `app.run(board,
@@ -219,7 +307,7 @@ creates the parts in `ORDER`:
 | `imu` | `BMA423(i2c0)` | `i2c0` |
 | `touch` | `FT6336(i2c1, int_pin=38, rotation=touch_rotation)` (default 0) | `i2c1` |
 | `haptics` | `Motor()` | GPIO4 PWM |
-| `radio` | `EspNowRadio(channel=...)` then `.begin()` | Wi-Fi STA |
+| `radio` | `EspNowRadio(channel=...)` then `.begin()`; in debug mode over Wi-Fi `EspNowRadio().begin(sta=board.debug.sta)` | Wi-Fi STA |
 
 - `board.i2c0` is the **one** `machine.I2C(0)` on pins 21/22 at 400 kHz, shared
   by the AXP202, the BMA423 and the PCF8563 RTC. Never open a second I2C on
@@ -312,7 +400,12 @@ picks 1, 6 or 11; both watches must match.
 `tests/test_hal_*.py` run the drivers against `tests/fakes/`. Call
 `fakes.install()` before importing anything from `hal`. The fakes record I2C
 register writes, SPI traffic and ESP-NOW frames, so tests can assert on what a
-driver did.
+driver did. The fake `network` also joins a pretend access point (`set_ap`:
+connect, `isconnected`, `config('channel')`, `ifconfig`), and the fake `socket`
+(`fakes.install_socket()`) records UDP datagrams for `tests/test_debuglink.py`;
+`tests/fakes/serial_port.py` stands in for the USB serial port and checks
+`SerialLink`'s writes against the 115200-baud line. No test uses real Wi-Fi or
+a real serial port.
 
 ```sh
 python3 tests/runner.py                  # CPython

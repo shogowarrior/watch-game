@@ -344,8 +344,8 @@ def build_quadrant(full):
     return q
 
 
-# ---- strip blit kernel --------------------------------------------------------
-# Strip rows y0..y0+h-1 through the palette into ``dst``, from the map's
+# ---- band blit kernel ---------------------------------------------------------
+# Field rows y0..y0+h-1 through the palette into ``dst`` (the band's buffer), from the map's
 # quadrant ``q`` (build_quadrant): row y reads quadrant row y (y < 120) or
 # 239 - y, and each palette colour lands at x and its mirror 239 - x. Four
 # map bytes per pass (one 32-bit load, four palette lookups) give eight
@@ -409,16 +409,16 @@ def _aligned(b):
 
 
 class RingMap:
-    """Ring-index map (240x240 GS8, 57.6 KB) blitted into RGB565 strips
-    through a palette, top to bottom: with the viper ``blit_kernel`` (``kind``
-    "viper", reading the map's quadrant) once it matches the framebuf path on
-    ``bufs`` (the strip buffers it will write), else a framebuf palette blit
-    (``kind`` "framebuf").
+    """Ring-index map (240x240 GS8, 57.6 KB) blitted into RGB565 bands of
+    ``band_h`` rows through a palette: with the viper ``blit_kernel``
+    (``kind`` "viper", reading the map's quadrant) once it matches the
+    framebuf path on ``bufs`` (the band buffers it will write), else a
+    framebuf palette blit (``kind`` "framebuf").
     """
 
-    def __init__(self, strip_h, bufs, kernel=None):
+    def __init__(self, band_h, bufs, kernel=None):
         self.idx = build_map(W)
-        self.h = strip_h
+        self.h = band_h
         self.kern = None
         self.q = None
         self.kind = "framebuf"
@@ -440,7 +440,7 @@ class RingMap:
                 self.kind = "framebuf (kernel self-check failed)"
 
     def agrees(self, kern, buf):
-        """True if ``kern`` writes the same strips into ``buf`` as the
+        """True if ``kern`` writes the same bands into ``buf`` as the
         framebuf path, at the top, across the middle row and at the bottom,
         through a palette of distinct colours. Leaves ``buf`` dirty (the
         next frame redraws it)."""
@@ -462,7 +462,7 @@ class RingMap:
             self.kern = k
 
     def blit(self, y0, pal, arr, buf, fb):
-        """Field rows y0..y0+h-1 into the strip ``buf`` (``fb`` its
+        """Field rows y0..y0+h-1 into the band ``buf`` (``fb`` its
         FrameBuffer). ``pal``: the palette as a framebuf, ``arr``: its array."""
         k = self.kern
         if k is not None:
