@@ -59,6 +59,15 @@ in one message with the current default marked. Don't build on an assumption.
   wired yet: next is the renderer hook (`ui/renderer.py` takes over what
   `ThemedRenderer` does), the MENU row `THEME: <NAME>`, a saved choice, a
   `theme` field in RenderParams and a theme picker in the web simulator.
+  The hook must keep two things `ThemedRenderer` already does: switch with
+  `queue_theme` (a theme loads in steps while the old one draws; loading one
+  whole takes 10-30 ms on desktop MicroPython, seconds on the watch, under the
+  8 s watchdog) and load the saved theme whole before `app.run` arms the
+  watchdog; and remember the moment and params under the MENU (`m_live`,
+  `p_live`). One step, the theme module's own compile, cannot be split (5-9 ms
+  on desktop, roughly 1-2 s on the watch): precompiling the theme modules to
+  .mpy with mpy-cross at deploy would remove it, but the watch runs pure .py
+  today, so that is the owner's call.
 - **Beacon format is version 3.** Both watches must run the same code; a watch
   on older code ignores the other.
 

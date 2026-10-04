@@ -2,6 +2,7 @@
 
     python3 tools/render_themes.py [theme ...]          # docs/design/themes/<theme>.png
     python3 tools/render_themes.py --bench [theme ...]  # ms per frame, per theme and moment
+    python3 tools/render_themes.py --load [theme ...]   # staged load: steps, longest step
     python3 tools/render_themes.py --mp PATH ...        # run under another MicroPython
                                                         # (a 32-bit unix build runs viper)
     node tools/mpy/run.mjs tools/render_themes.py --emit [theme ...]
@@ -16,12 +17,18 @@ point writes the files.
 ``--bench`` times ``ThemedRenderer.frame`` per fixture (no display push; the
 overlays included) and prints each theme's ms/frame next to Ripple's, which
 is the budget (ui-spec §4A rule 7). Desktop MicroPython is far faster than
-the watch, so read the ratios, not the ms (a 32-bit unix build runs about
-200x faster than the watch, uniformly: /mnt/project-files/ports/
-micropython-learnings.md). The wasm port has no viper, so there every
+the watch, so read the ratios, not the ms (a 32-bit unix build runs the
+frame about 150-200x faster than the watch, where the field and overlays
+take about 30 ms of a frame). The wasm port has no viper, so there every
 kernel runs as plain Python on both sides.
 
-``FIXTURES`` (theme moments) is what tests/test_themes.py runs every theme on.
+``FIXTURES`` (theme moments, each from a reset) and ``TRANSITIONS`` (moment
+changes, crossfades, the MENU, toggles and frame gaps, each from a reset,
+with their own frame times) are what tests/test_themes.py runs every theme
+on.
+
+``--load`` runs each theme's staged load (ui/themes ``stages``) and prints
+its steps and the longest one, against the STEP_US budget (ui/themes/base.py).
 """
 
 import sys
@@ -78,8 +85,72 @@ if rs is not None:
         ("saver", [(0, _hunt(1, glyph="battery", word="SAVER ON",
                              status=(10, 64, 3, True, False)))], 1500),
     ]
+    def _kw(name):
+        for f in FIXTURES:
+            if f[0] == name:
+                return f[1][0][1]
+        raise KeyError(name)
+
+    def _times(run_ms, step=STEP_MS, skip=()):
+        return tuple(t for t in range(0, run_ms + 1, step) if t not in skip)
+
+    _menu_found = dict(rs._menu, ramp="gold", zone=3, intensity=1.0, speed_px_s=0,
+                       pulse_period_ms=1200, glow_r_px=90, sub="1v", menu_rows=rs.MENU_ROWS)
+    _menu_scan = dict(rs._menu, sub="1v", menu_rows=rs.MENU_ROWS, intensity=0.6, glow_r_px=12)
+    _split = _hunt(1, screen="PAIRING", sub="split", glyph="countdown", countdown=24,
+                   top_text="NO PEEKING", word="SPLIT UP", heartbeat=None)
+    _saver = (10, 64, 3, True, False)
+    # name -> (phases, frame offsets ms)
+    TRANSITIONS = [
+        ("hot_to_found", [(0, _hunt(3, dist_band="<3")),
+                          (800, dict(rs._found, sub="celebrate", word="FOUND", burst=True)),
+                          (900, dict(rs._found, sub="celebrate", word="FOUND")),
+                          (1400, dict(rs._found, sub="result", word="TAP=AGAIN"))], _times(2600)),
+        ("found_to_far", [(0, dict(rs._found, sub="result", word="TAP=AGAIN")),
+                          (800, _hunt(0, dist_band="~40"))], _times(2800)),
+        ("far_to_searching", [(0, _hunt(0, dist_band="~40")),
+                              (800, _kw("searching"))], _times(2800)),
+        ("searching_to_hot", [(0, _kw("searching")),
+                              (800, _hunt(3, dist_band="~5"))], _times(2400)),
+        ("zones_up_down", [(0, _hunt(0, dist_band="~40")), (700, _hunt(1, dist_band="~20")),
+                           (1400, _hunt(2, dist_band="~10", intensity=0.45)),
+                           (1800, _hunt(2, dist_band="~10", intensity=0.65)),
+                           (2300, _hunt(3, dist_band="<3")), (3000, _hunt(1, dist_band="~20"))],
+         _times(3600)),
+        ("glow_arrow_glow", [(0, _hunt(2, dist_band="~10")), (600, _kw("warm_arrow")),
+                             (1500, _hunt(2, dist_band="~10"))], _times(2400)),
+        ("hot_scan_hot", [(0, _hunt(3, dist_band="~5")), (600, _kw("scan_sweep")),
+                          (1600, _kw("direction_turn")), (2400, _hunt(3, dist_band="~5"))],
+         _times(3200)),
+        ("calibrate_to_split", [(0, dict(rs._cal, countdown=1)), (700, _split)], _times(2400)),
+        ("ghost_beats", [(0, _hunt(2, dist_band="~10")),
+                         (500, _hunt(2, dist_band="~10", ring_live=False)),
+                         (1900, _hunt(2, dist_band="~10"))], _times(3000)),
+        ("menu_over_hunt", [(0, _hunt(2, dist_band="~10")),
+                            (600, dict(rs._menu, sub="1v", menu_rows=rs.MENU_ROWS)),
+                            (1600, _hunt(2, dist_band="~10"))], _times(2400)),
+        ("menu_over_found", [(0, dict(rs._found, sub="result", word="TAP=AGAIN")),
+                             (600, _menu_found),
+                             (1600, dict(rs._found, sub="result", word="TAP=AGAIN"))],
+         _times(2400)),
+        ("menu_over_scan", [(0, _kw("scan_sweep")),
+                            (600, dict(_menu_scan, screen="MENU")),
+                            (1400, _kw("scan_sweep"))], _times(2000)),
+        ("sun_and_saver", [(0, _hunt(1, dist_band="~20")),
+                           (500, _hunt(1, dist_band="~20", sun=True)),
+                           (1100, _hunt(1, dist_band="~20", status=_saver)),
+                           (1700, _hunt(1, dist_band="~20"))], _times(2300)),
+        # frame gaps: one wake (a 700 ms gap), the 20 fps lock, a missed slot
+        # at the 7 fps lock (286 ms, not a wake)
+        ("gap_wake", [(0, _hunt(3, dist_band="~5")),
+                      (600, _hunt(1, dist_band="~20"))], _times(1800, skip=range(300, 1000))),
+        ("fast_20fps", [(0, _kw("hot_bump"))], _times(1200, 50)),
+        ("slow_7fps", [(0, _kw("searching")), (1100, _hunt(2, dist_band="~10"))],
+         tuple(t for t in range(0, 2300, 143) if t not in (572, 1430))),
+    ]
 else:
     FIXTURES = []
+    TRANSITIONS = []
 
 SHEET = ("far", "near", "warm_arrow", "hot_bump", "scan_sweep", "found_result", "searching",
          "link_lost")
@@ -167,6 +238,38 @@ def _bench(names):
     print("bench %-18s" % "x ripple" + "".join(" %10.2f" % (x / tot[0]) for x in tot))
 
 
+def _load(names):
+    """Each theme's staged load from a fresh renderer: step count, the
+    longest step and the total, in ms (a step's first run: module import,
+    kernel compiles, self-checks)."""
+    import time
+    from ui.themes import ThemedRenderer, stages
+    from ui.themes.base import STEP_US
+    print("load %-10s %6s %9s %9s  (budget %.1f ms a step; the import is one step)"
+          % ("theme", "steps", "max ms", "total ms", STEP_US / 1000))
+    r = ThemedRenderer("ripple")
+    for theme in names:
+        out = [None]
+        g = stages(theme, r, out)
+        n = 0
+        mx = 0
+        tot = 0
+        while True:
+            t0 = time.ticks_us()
+            try:
+                next(g)
+            except StopIteration:
+                tot += time.ticks_diff(time.ticks_us(), t0)
+                break
+            d = time.ticks_diff(time.ticks_us(), t0)
+            tot += d
+            n += 1
+            if d > mx:
+                mx = d
+        print("load %-10s %6d %9.2f %9.2f" % (theme, n, mx / 1000, tot / 1000))
+        out[0] = None
+
+
 def _mpy_main(args):
     import binascii
     import gc
@@ -177,6 +280,9 @@ def _mpy_main(args):
     names = [n for n in T.THEME_NAMES if not sel or n in sel]
     if "--bench" in args:
         _bench(names)
+        return
+    if "--load" in args:
+        _load(names)
         return
     for theme in names:
         rgb = _sheet(theme, FrameCapture, ThemedRenderer)
@@ -232,7 +338,7 @@ def _cpython_main(args):
             chunks.append(line.strip())
         elif line.strip():
             print(line)
-    if "--bench" not in rest and not seen:
+    if "--bench" not in rest and "--load" not in rest and not seen:
         print("render_themes: no previews written")
         sys.exit(1)
 

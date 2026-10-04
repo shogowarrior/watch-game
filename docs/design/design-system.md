@@ -341,7 +341,7 @@ A shape-based code comparison that doesn't rely on reading text.
 
 ### 4.10 Themes
 
-A theme redraws the RippleField in another style (Sonar, Tide, Warp, Arcade, Fireflies; Ripple is the default) with the same inputs and meaning: four tempos locked to the ring spawn, intensity within a zone, green/gold/grey, the lens and core dot, the calibrate fill. Behaviour: ui-spec §4A. **Tokens:** `themes.order`, `themes.<name>.ramp` (8 RGB565-exact stops per ramp, `lut` linear or stepped), `themes.<name>.iris` (lens colour) and `themes.<name>.params` (the §4A numbers). Overlays keep the base colours for now.
+A theme redraws the RippleField in another style (Sonar, Tide, Warp, Arcade, Fireflies; Ripple is the default) with the same inputs and meaning: four tempos locked to the ring spawn, intensity within a zone, green/gold/grey, the lens and core dot, the calibrate fill. Behaviour: ui-spec §4A. **Tokens:** `themes.order` (MENU order, Ripple first), `themes.default`, `themes.<name>.label` (the MENU row's `THEME: <label>`), `themes.<name>.ramp` (8 RGB565-exact stops per ramp, `lut` linear or stepped), `themes.<name>.iris` (lens colour) and `themes.<name>.params` (the §4A numbers). Overlays keep the base colours for now.
 
 ## 5. States
 

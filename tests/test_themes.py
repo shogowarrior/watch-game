@@ -4,10 +4,11 @@ Token checks run on CPython too; frames need framebuf (MicroPython):
 
     node tools/mpy/run.mjs tests/runner.py test_themes
 
-Each theme runs the theme fixtures of tools/render_themes.py at 10 fps with
-the overlays off (``ThemedRenderer(name, overlays=False)``), so every pixel
-compared is the theme's own field layer. Theme-specific behaviour is tested
-in tests/test_theme_<name>.py.
+Each theme runs the theme fixtures of tools/render_themes.py (FIXTURES at
+10 fps, TRANSITIONS at their own frame times) with the overlays off
+(``ThemedRenderer(name, overlays=False)``), so every pixel compared is the
+theme's own field layer. Theme-specific behaviour is tested in
+tests/test_theme_<name>.py.
 """
 
 import gc
@@ -26,7 +27,7 @@ if HAVE_FB:
     from tools import render_themes as rt
     from ui.renderer import FrameCapture, Renderer
     from ui.themes import NAMES, ThemedRenderer, make
-    from ui.themes.base import ALL, NS, SH, W, theme_luts
+    from ui.themes.base import ALL, M_FOUND, M_SCAN, NS, SH, W, WAKE_MS, theme_luts
 
 ROW = 480                    # bytes per frame row
 
@@ -134,45 +135,88 @@ def test_make_every_name():
     assert make("nope", r).name == "ripple"
 
 
+def _items():
+    """(name, phases, frame offsets) of every fixture and transition."""
+    out = []
+    for fx, phases, run_ms in rt.FIXTURES:
+        out.append((fx, phases, tuple(range(0, run_ms + 1, rt.STEP_MS))))
+    return out + rt.TRANSITIONS
+
+
+def _phase_of(phases, t):
+    k = 0
+    while k + 1 < len(phases) and phases[k + 1][0] <= t:
+        k += 1
+    return k
+
+
+_REF = {}                    # item -> Ripple's mean luma per frame (the flash reference)
+
+
+def _ripple_lumas(fx, phases, times):
+    if fx not in _REF:
+        r = ThemedRenderer("ripple", overlays=False)
+        cap = FrameCapture()
+        out = []
+        for t in times:
+            r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+            out.append(_mean_luma(cap.buf))
+        _REF[fx] = out
+    return _REF[fx]
+
+
 def _contract(name):
-    """Run every theme fixture on ``name``; check dirty, flash and allocation."""
+    """Run every theme fixture and transition on ``name``; check dirty,
+    flash and allocation."""
     r = ThemedRenderer(name, overlays=False)
     cap = FrameCapture()
+    _, phases, run_ms = rt.fixture("near")     # warm the renderer's one-off buffers
+    rt.run(r, cap, phases, run_ms)
     prev = bytearray(W * W * 2)
-    for fx, phases, run_ms in rt.FIXTURES:
-        ps = [rt.params_at(phases, t) for t in range(0, run_ms + 1, rt.STEP_MS)]
+    for fx, phases, times in _items():
+        ps = [rt.params_at(phases, t) for t in times]
+        ref = _ripple_lumas(fx, phases, times) if name != "ripple" else None
         r.reset()
         lum = -1
-        grown = 0
+        k_was = -1
+        age = 0
         for n in range(len(ps)):
-            t = n * rt.STEP_MS
+            t = times[n]
+            k = _phase_of(phases, t)
+            age = age + 1 if k == k_was else 0
+            k_was = k
+            gap = t - times[n - 1] if n > 0 else 0
             gc.collect()
             gc.disable()
             a0 = gc.mem_alloc()
             r.frame(ps[n], cap, rt.T0 + t)
-            if n >= 4:                       # a moment's first frames may build caches
-                grown += gc.mem_alloc() - a0
+            grown = gc.mem_alloc() - a0
             gc.enable()
             th = r.theme
-            if n > 0:
-                ch = _changed(prev, cap.buf)
-                for k in ch:
-                    x0, x1 = ch[k]
-                    assert th.dirty & (1 << k), (name, fx, t, "strip", k, "changed, not dirty")
-                    assert th.spans[2 * k] <= x0 and th.spans[2 * k + 1] >= x1, (
-                        name, fx, t, "strip", k, (x0, x1), (th.spans[2 * k], th.spans[2 * k + 1]))
+            wake = n == 0 or gap > WAKE_MS
+            # steady frames allocate nothing (hard rule 2); a moment's first
+            # frames may build caches
+            if age >= 3 and not wake:
+                assert grown == 0, (name, fx, t, grown, "bytes allocated")
+            if wake:
+                assert th.dirty == ALL, (name, fx, t, "a wake reports everything")
             else:
-                assert th.dirty == ALL, (name, fx, "first frame reports everything")
-            # no full-field flash (§4A rule 5): once a moment has settled (the
-            # iris opens and levels crossfade over the first 300-600 ms), the
-            # mean luma moves little per 100 ms frame
+                ch = _changed(prev, cap.buf)
+                for kk in ch:
+                    x0, x1 = ch[kk]
+                    assert th.dirty & (1 << kk), (name, fx, t, "strip", kk, "changed, not dirty")
+                    assert th.spans[2 * kk] <= x0 and th.spans[2 * kk + 1] >= x1, (
+                        name, fx, t, "strip", kk, (x0, x1),
+                        (th.spans[2 * kk], th.spans[2 * kk + 1]))
+            # no full-field flash (§4A rule 5): per frame the mean luma moves
+            # no more than Ripple's does on the same params, plus 12
             m = _mean_luma(cap.buf)
-            if n >= 7 and fx not in ("found_celebrate",):
-                assert abs(m - lum) <= 12, (name, fx, t, lum, m)
+            if ref is not None and not wake:
+                d = m - lum
+                dr = ref[n] - ref[n - 1]
+                assert abs(d) <= abs(dr) + 12, (name, fx, t, lum, m, "ripple", ref[n - 1], ref[n])
             lum = m
             prev[:] = cap.buf
-        # steady frames allocate nothing (hard rule 2)
-        assert grown < 512, (name, fx, grown)
 
 
 def test_contract_ripple():
@@ -284,3 +328,91 @@ def test_themes_differ_from_ripple():
             ref = bytes(cap.buf)
         else:
             assert cap.buf != ref, n
+
+
+def test_reset_is_fresh():
+    # after a renderer reset a theme draws as a fresh one: frames do not
+    # depend on what ran before (previews and tests stay order-free)
+    _need_fb()
+    ca = FrameCapture()
+    cb = FrameCapture()
+    for n in NAMES:
+        for fx in ("pairing_seen", "found_result", "searching", "far"):
+            _, phases, run_ms = rt.fixture(fx)
+            a = ThemedRenderer(n, overlays=False)
+            rt.run(a, ca, phases, run_ms)
+            b = ThemedRenderer(n, overlays=False)
+            _, ph2, run2 = rt.fixture("hot")
+            rt.run(b, cb, ph2, run2)
+            rt.run(b, cb, phases, run_ms)
+            assert ca.buf == cb.buf, (n, fx)
+
+
+def test_menu_keeps_the_moment():
+    # §4A rule 2: in the MENU a theme keeps the moment of the screen under
+    # it, also one chosen there (the MENU's params carry speed 0 over FOUND)
+    _need_fb()
+    cap = FrameCapture()
+    for fx, want in (("menu_over_found", M_FOUND), ("menu_over_scan", M_SCAN)):
+        phases, times = None, None
+        for it in rt.TRANSITIONS:
+            if it[0] == fx:
+                phases, times = it[1], it[2]
+        for n in NAMES:
+            r = ThemedRenderer("ripple", overlays=False)
+            for t in times:
+                if t > 1200:
+                    break
+                p = rt.params_at(phases, t)
+                if t == 1000:
+                    r.set_theme(n)
+                r.frame(p, cap, rt.T0 + t)
+            assert r.theme.name == n
+            assert r.theme.moment(p) == want, (n, fx, r.theme.moment(p))
+
+
+def test_queue_theme_swaps_when_loaded():
+    _need_fb()
+    cap = FrameCapture()
+    _, phases, run_ms = rt.fixture("hot")
+    for n in NAMES[1:]:
+        r = ThemedRenderer("ripple", overlays=False)
+        old = r.theme
+        r.queue_theme(n)
+        assert r.loading == n
+        t = 0
+        while r.loading is not None:
+            assert r.theme is old, n                # the old theme keeps drawing
+            r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+            t += 100
+            assert t < 10000, (n, "load never finished")
+        assert r.theme.name == n
+        r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+        assert r.theme.dirty == ALL, n              # the first frame is the new theme, whole
+        r.queue_theme(n)                            # same name: nothing to do
+        assert r.loading is None
+
+
+def test_unknown_name_is_ripple_once():
+    _need_fb()
+    r = ThemedRenderer("bogus")
+    th = r.theme
+    assert th.name == "ripple"
+    for name in ("bogus", None, "Sonar", "ripple"):
+        r.set_theme(name)
+        assert r.theme is th, name
+        r.queue_theme(name)
+        assert r.loading is None, name
+
+
+def test_dark_frames_wake_the_theme():
+    _need_fb()
+    cap = FrameCapture()
+    _, phases, run_ms = rt.fixture("hot")
+    for n in NAMES:
+        r = ThemedRenderer(n, overlays=False)
+        for t in range(0, 600, 100):
+            r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+        r.frame(rt.params_at(phases, 600), None, rt.T0 + 600)     # screen off
+        r.frame(rt.params_at(phases, 700), cap, rt.T0 + 700)
+        assert r.theme.dirty == ALL, n

@@ -30,11 +30,28 @@ Contract (tests/test_themes.py checks it for every theme):
   switch report everything (``everything()``).
 - Draws the lens (iris disc in the theme's lens colour, rim as ui-spec §2),
   the core dot (§4 rule 2) and the PAIRING calibrate fill (§6). The Radial
-  palette below does all three; a theme with its own map draws them with
-  ``draw_discs``.
-- Motion is time-based: ``dt`` (ms since the last drawn frame, 0 in MENU,
-  where the field is frozen) or the beat (``beat_age``: ms since the last
-  ring spawn the field scheduled, so heartbeats stay locked to it).
+  palette below does all three; Arcade and Tide burn them into their own
+  maps with ``_disc``.
+- Motion is time-based: ``dt`` (ms since the last drawn frame, at most
+  DT_MAX like the field's step, 0 in MENU, where the field is frozen) or the
+  beat (``beat_age``: ms since the last ring spawn the field scheduled, so
+  heartbeats stay locked to it). A wake (``clock``) shows the current state
+  with no catch-up: no ping, swell or slow-down replays.
+- Moments come from ``moment`` and the screen's params from ``live``: in
+  the MENU both are those of the screen under it (ui-spec §4A rule 2), also
+  for a theme made in the MENU.
+- ``reset()`` returns the theme to the state of a fresh one (frames after a
+  renderer reset do not depend on what was drawn before).
+
+Loading (ui/themes/__init__.py ``stages``): a module import does only cheap
+work (constants, small tables). One-time heavy work (kernel compiles and
+self-checks, big tables) goes in an optional module-level generator
+``load()`` that sets module globals, yields between steps and is idempotent
+(a step already done is skipped, also after a load abandoned half-way).
+``__init__`` only allocates; heavy construction (map builds, per-buffer
+kernel checks) goes in the generator ``prepare()``. Each step should take at
+most about STEP_US on a 32-bit desktop MicroPython (roughly 200x that on the
+watch), except a single compile, which cannot be split.
 - Levels go through the theme's ramps like the field's (``Ramps.color``):
   Q8 levels (256 = one ramp step), capped at ``vmax``, scaled by the menu
   dim, LUT index ((v * 9 + 128) >> 8) + lift.
@@ -45,8 +62,8 @@ import array
 from finder import tuning as T
 from finder.compat import const, ticks_diff
 from ui import swap16
-from ui.field import (COS32, EASE_IOC, EXPT, LUTS, LUT_N, MAXR, N_IDX, PROF, Q8, RIM_MIN, SB_A,
-                      SB_B, SIN, V7, VIG, AA_K, Lut, RingMap, build_quadrant, ease, pal_kernel)
+from ui.field import (COS32, EASE_IOC, EXPT, LUTS, LUT_N, N_IDX, PROF, Q8, RIM_MIN, SB_A,
+                      SB_B, SIN, V7, VIG, Lut, RingMap, build_quadrant, ease, pal_kernel)
 
 try:
     import framebuf
@@ -59,7 +76,10 @@ NB = const(4)
 SH = const(24)              # dirty-strip height
 NS = const(10)
 ALL = const(0x3FF)          # every dirty strip
-WAKE_MS = const(250)        # a longer gap between drawn frames is a wake: no catch-up
+WAKE_MS = const(450)        # a longer gap between drawn frames is a wake: no catch-up
+                            # (one missed slot at the slowest 5 fps lock is 400 ms)
+DT_MAX = const(250)         # motion advances at most this per frame (as the field's)
+STEP_US = const(1500)       # load step budget on a 32-bit desktop build (~0.3 s on the watch)
 
 # moments (ui-spec §4A rule 2)
 M_LIVE = const(0)
@@ -71,7 +91,6 @@ M_FOUND = const(4)
 S_FOUND = T.SCREENS.index("FOUND")
 S_SCANNING = T.SCREENS.index("SCANNING")
 S_MENU = T.SCREENS.index("MENU")
-S_PAIRING = T.SCREENS.index("PAIRING")
 
 # palette kernel layout (ui/field.py T_*, P_*): tab VIG @0 | EXPT @170 |
 # COS32 @426 | LUT @458 | grey LUT @522
@@ -81,7 +100,6 @@ _T_LUT = const(458)
 _T_GLUT = const(522)
 _T_N = const(586)
 _P_N = const(18)
-FILL_V = const(1024)        # calibrate fill floor: level 4 (ui/field.py FILL_V)
 
 
 def theme_luts(name):
@@ -109,8 +127,8 @@ class Ramps:
 
     def follow(self, f, t):
         """Track ``f`` (the RippleField): a ramp change starts the same
-        crossfade (read live from f.ramp_t0, so MENU holds it), a theme
-        made mid-way or after a wake snaps."""
+        crossfade (read live from f.ramp_t0, so MENU holds it); a new
+        theme, or one after ``snap()``, starts on the field's ramp."""
         if f.ramp != self.ramp:
             snap = self.ramp is None
             self.frm.copy_from(self.mix)
@@ -165,7 +183,7 @@ class Radial:
     entries 0..169 by radius. Floor, centre glow (or the halo outside the
     iris), FOUND standing wave, vignette, core dot, calibrate fill, lens and
     rim come from ``setup``; extra radial terms go into ``acc`` (Q8 levels per
-    ring index, ``add_ring`` / ``add_field_rings``) before ``run``. Blit the
+    ring index, ``add_ring``) before ``run``. Blit the
     result with the renderer's RingMap: ``r.map.blit(y0, rad.pal, rad.pal_arr,
     buf, fb)``."""
 
@@ -246,73 +264,6 @@ class Radial:
             if kk < 64:
                 acc[off + i] += (amp * prof[kk]) >> 8
 
-    def add_field_rings(self, f, t, scale=256):
-        """The field's travelling rings (exactly as RippleField.build draws
-        them: temporal AA lead, 12 px fade-in, ghost channel), amplitude
-        x ``scale`` / 256. Returns 1 if any ghost ring was added."""
-        acc = self.acc
-        dt = f.dt
-        prof = PROF
-        g = 0
-        for k in range(MAXR):
-            if not f.r_on[k]:
-                continue
-            rq = f.ring_r(k, t)
-            v = f.r_v[k]
-            av = v if v > 0 else -v
-            lead = f.r_lead[k] * Q8
-            aa = (AA_K * av * dt) // 1000
-            if aa > lead:
-                lead = aa
-            trail = f.r_trail[k] * Q8
-            if v > 0:
-                outer = lead
-                inner = trail
-            else:
-                outer = trail
-                inner = lead
-            dist = rq - f.r_r0[k]
-            if dist < 0:
-                dist = -dist
-            fade = dist // T.FADEIN_PX
-            if fade > 256:
-                fade = 256
-            w = (((f.r_amp[k] * fade) >> 8) * scale) >> 8
-            if w <= 0:
-                continue
-            i0 = (rq - inner + 255) >> 8
-            i1 = (rq + outer) >> 8
-            if i0 < 0:
-                i0 = 0
-            if i1 > N_IDX - 1:
-                i1 = N_IDX - 1
-            off = 0
-            if f.r_ghost[k]:
-                off = N_IDX
-                g = 1
-            for i in range(i0, i1 + 1):
-                dq = (i << 8) - rq
-                if dq >= 0:
-                    kk = (dq << 6) // outer
-                else:
-                    kk = ((-dq) << 6) // inner
-                if kk < 64:
-                    acc[off + i] += (w * prof[kk]) >> 8
-        return g
-
-    def hold_core(self):
-        """Ring term non-increasing outward over r 0..12 (RippleField.build:
-        a crest newly spawned at the centre must not ring the core dot)."""
-        acc = self.acc
-        m = 0
-        i = 12
-        while i >= 0:
-            if acc[i] > m:
-                m = acc[i]
-            else:
-                acc[i] = m
-            i -= 1
-
     def run(self):
         """Rebuild palette entries 0..169 (and clear ``acc``)."""
         pal_kernel(self.pal_arr, self.acc, self.tab, self.prm)
@@ -322,9 +273,12 @@ class QuadMap(RingMap):
     """A theme's own GS8 index map that is symmetric in x and y about
     (119.5, 119.5), blitted through a palette like the ring map (the same
     viper quadrant kernel on the watch once it matches the framebuf path,
-    else a framebuf palette blit). ``idx``: the full 240x240 map."""
+    else a framebuf palette blit). ``idx``: the full 240x240 map. With
+    ``keep=False`` the full map (57.6 KB) and its framebuf are dropped once
+    the kernel runs, which reads only the quadrant ``q``; draw into ``q``
+    then."""
 
-    def __init__(self, idx, band_h, bufs):
+    def __init__(self, idx, band_h, bufs, keep=True):
         self.idx = idx
         self.h = band_h
         self.kern = None
@@ -343,6 +297,9 @@ class QuadMap(RingMap):
             if ok and self.agrees(blit_kernel, bufs[0]):
                 self.kern = blit_kernel
                 self.kind = "viper"
+                if not keep:
+                    self.idx = None
+                    self.map_fb = None
             else:
                 self.q = None
                 self.kind = "framebuf (kernel self-check failed)"
@@ -378,6 +335,23 @@ def _disc(fb, r, c):
     fb.ellipse(120, 120, rr, rr, c, True, 8)       # Q4 bottom right
 
 
+def moment_of(r, p):
+    """The moment of params ``p`` as renderer ``r`` plans them (§4A rule 2),
+    ignoring the MENU (see Theme.moment)."""
+    scr = r._scr
+    if scr == S_FOUND:
+        return M_FOUND
+    sub = r._sub
+    if r.pacer or (scr == S_SCANNING and sub is not None and sub != "ready"):
+        return M_SCAN
+    v = p.speed_px_s
+    if v > 0:
+        return M_LIVE
+    if v < 0:
+        return M_LISTEN
+    return M_STILL
+
+
 class Theme:
     """Base class. Subclasses set ``name`` and implement ``build`` and
     ``blit`` (and ``draw`` with ``layer = True``). See the module docstring."""
@@ -403,15 +377,18 @@ class Theme:
     # ---- per-frame helpers ---------------------------------------------------
     def clock(self, p, t):
         """Advance the theme clock to ``t``: ``dt`` = ms since the last drawn
-        frame (0 in MENU, where the field is frozen); ``wake`` on the first
-        frame or after a gap over WAKE_MS (snap eased state, report
-        everything)."""
+        frame, at most DT_MAX (0 in MENU, where the field is frozen);
+        ``wake`` on the first frame (after ``__init__``, ``reset()`` or a
+        dark spell, ui/themes ThemedRenderer.frame) or after a gap over
+        WAKE_MS: snap eased state, report everything."""
         d = ticks_diff(t, self.t)
         if not self.started or d < 0 or d > WAKE_MS:
             self.wake = True
             d = 0
         else:
             self.wake = False
+            if d > DT_MAX:
+                d = DT_MAX
         if self.r._scr == S_MENU:
             d = 0
         self.t = t
@@ -420,20 +397,28 @@ class Theme:
         return d
 
     def moment(self, p):
-        """M_LIVE / M_LISTEN / M_STILL / M_SCAN / M_FOUND (ui-spec §4A rule 2)."""
+        """M_LIVE / M_LISTEN / M_STILL / M_SCAN / M_FOUND (ui-spec §4A rule 2).
+        In the MENU: the moment of the screen under it (the renderer's
+        ``m_live``), or with none yet FOUND if the params are gold (the game
+        sends gold only in FOUND), else by speed."""
         r = self.r
-        scr = r._scr
-        if scr == S_FOUND:
-            return M_FOUND
-        sub = r._sub
-        if r.pacer or (scr == S_SCANNING and sub is not None and sub != "ready"):
-            return M_SCAN
-        v = p.speed_px_s
-        if v > 0:
-            return M_LIVE
-        if v < 0:
-            return M_LISTEN
-        return M_STILL
+        if r._scr == S_MENU:
+            m = getattr(r, "m_live", -1)
+            if m >= 0:
+                return m
+            if p.ramp == "gold":
+                return M_FOUND
+        return moment_of(r, p)
+
+    def live(self, p):
+        """The RenderParams of the screen: in the MENU, those of the last
+        frame drawn under it (band, sub, glyph...), when there was one."""
+        r = self.r
+        if r._scr == S_MENU:
+            q = getattr(r, "p_live", None)
+            if q is not None:
+                return q
+        return p
 
     def zone(self, p):
         """Zone 0..3 (FAR..HOT), 0 when unknown."""
@@ -445,7 +430,9 @@ class Theme:
         return self.r._iq
 
     def beat_age(self, t):
-        """ms since the field's last ring spawn (the beat), 0..period."""
+        """ms since the field's last ring spawn (the beat): 0..period while
+        rings are scheduled, growing without bound when none are (Still,
+        FOUND, right after a reset)."""
         f = self.f
         a = ticks_diff(t, f.last_spawn)
         return 0 if a < 0 else a
@@ -487,27 +474,13 @@ class Theme:
                 sp[2 * k + 1] = x1
         self.dirty = d
 
-    def draw_discs(self, fb, ramps, core, rim, vmax, lift, fl, gl):
-        """Calibrate fill, lens with rim, and core dot over the frame, for a
-        theme with its own map (ui-spec §2, §4 rule 2, §6). ``fl`` + ``gl``
-        set the ramp-coloured rim level as the field's (clamped 5..7)."""
-        f = self.f
-        dim = f.dim
-        if f.fill_v and f.fill_r > 0:
-            _disc(fb, f.fill_r + 3, ramps.color(f.fill_v + (f.fill_v >> 1), vmax, dim, lift))
-            _disc(fb, f.fill_r, ramps.color(f.fill_v, vmax, dim, lift))
-        iris = f.iris
-        if iris > 0:
-            if rim < 0:
-                q = fl + gl
-                q = V7 if q > V7 else (RIM_MIN if q < RIM_MIN else q)
-                rim = ramps.color(q, vmax, dim, lift)
-            _disc(fb, iris + T.IRIS_RIM_PX, rim)
-            _disc(fb, iris, T.THEME_IRIS[self.name])
-        elif core:
-            _disc(fb, 7, ramps.color(core, vmax, dim, lift))
-
     # ---- the interface -------------------------------------------------------
+    def prepare(self):
+        """Heavy construction in steps of at most about STEP_US (a
+        generator: yield between steps). ``make`` runs it whole."""
+        return
+        yield
+
     def build(self, p, t, core, rim, vmax, lift):
         raise NotImplementedError
 
