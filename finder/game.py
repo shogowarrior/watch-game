@@ -696,19 +696,21 @@ class Game:
                     self._hint = None
                 if z == FAR or z == NEAR:
                     self._scan_hint(t_ms)
-        # hidden by the MENU or SAVER ON: the pacer must not run unseen (clock pauses)
-        self._update_arrow(t_ms, True, self.menu.is_open or self._inter_until is not None)
+        self._update_arrow(t_ms, True)
         self._update_bump_ready(t_ms)
         self._update_still_hint(t_ms)
         self._update_peer_scan(t_ms)
         self._check_found(t_ms)
 
-    def _update_arrow(self, t_ms, link_ok, hidden=False):
+    def _update_arrow(self, t_ms, link_ok):
         a = self.arrow
         if a is None:
             return
         was = a.phase
         pv = self.peer
+        # under the MENU or SAVER ON (a waiting one starts this tick) the clock
+        # pauses: the pacer must not run unseen, also on the tick the arrow comes back
+        hidden = self.menu.is_open or self._inter_until is not None or self._inter_pending
         a.update(t_ms, self.me.activity, self.me.steps, self.px.trend,
                  pv.fresh(t_ms) and pv.walking, link_ok, self.px.unreliable, hidden=hidden)
         if a.phase == A.PH_TURN and was != A.PH_TURN:
@@ -899,17 +901,15 @@ class Game:
             self.mode = M_HUNT
             self.mode_t = t_ms
             self._still_since = None
-            if self._unstash():
-                self._update_arrow(t_ms, True)
+            self._unstash()
+            self._update_arrow(t_ms, True)    # new or back: hidden if SAVER ON starts this tick
 
     def _unstash(self):
-        """Put the arrow hidden by a scan back; True if there was one."""
+        """Put the arrow hidden by a scan back (unless it expired meanwhile)."""
         st = self._stash
         self._stash = None
-        if st is None or st.done:
-            return False
-        self.arrow = st
-        return True
+        if st is not None and not st.done:
+            self.arrow = st
 
     # LINK_LOST
     def _enter_lost(self, t_ms):
