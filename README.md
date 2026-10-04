@@ -112,7 +112,8 @@ node tools/mpy/run.mjs tests/runner.py      # the same tests on real MicroPython
   `--debug B`), and start the bridge with `python3 tools/debug_server.py
   --serial`. The watches send their screens and readings over the USB cable.
   Flip the page's toggle to **Real watches** to see both screens live, with a
-  distance chart and the raw messages. Off the cable, the watches can send
+  distance chart, the knocks (which ones both watches felt within 0.4 s, and
+  why the others did not count) and the raw messages. Off the cable, the watches can send
   over your Wi-Fi instead: save its name and password once with
   `python3 tools/wifi_setup.py` (kept outside the repo, never committed) and
   add `--wifi` to the deploy. `--demo` on the bridge tries it with two

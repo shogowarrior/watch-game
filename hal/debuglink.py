@@ -138,7 +138,7 @@ class SerialLink:
     record, so a pump that finds the FIFO empty fills all of it. The runtime
     pumps once per loop pass and at each mid-frame service (after each band
     the renderer blits or pushes, and after its overlays: ~5-15 ms apart),
-    so the FIFO refills about once a service: well over the ~2.7 KB/s the
+    so the FIFO refills about once a service: well over the ~3.1 KB/s the
     records need, and the queue fills only in a burst. ``tx`` in ``stats()``
     counts the lines written out: records and fps lines."""
 

@@ -2125,7 +2125,7 @@ def test_debug_usb_link_writes_paced_lines_from_the_loop():
     rt, link, port = _usb_watch(clock)
     top = _usb_run(rt, 5000)
     assert port.overfill() is None
-    assert link.drop == 0 and top < 1000, top
+    assert link.drop == 0 and top < 1200, top    # less than one s and one rp (~490 + ~660 bytes)
     rt.tele.flush(force=True)
     assert link.queued == 0
     lines = port.data().split(b"\n")

@@ -270,7 +270,7 @@ flowchart LR
   L -- "UDP, Wi-Fi access point" --> B
   F["tools/fake_watches.py (--demo)"] -. "UDP, or pseudo-terminals with --serial" .-> B
   B -- "logs/debug-*.jsonl" --> G[(log)]
-  B -- "Server-Sent Events /events<br>{src, rx, rec}" --> P["web/sim/index.html, Real watches<br>TwoWatchSim.show_params -> Renderer"]
+  B -- "Server-Sent Events /events<br>{src, rx, rec} and {src, rx, knock}" --> P["web/sim/index.html, Real watches<br>TwoWatchSim.show_params -> Renderer"]
 ```
 
 1. `main.py` finds `/debug` and calls `debuglink.start()` before `board.init()`.
@@ -302,7 +302,10 @@ flowchart LR
    port, turns every valid record into one Server-Sent Event, and appends it to
    `logs/debug-*.jsonl` (gitignored). Other lines from a USB port (boot
    messages, tracebacks, the fps line) reach the page's raw log and the log
-   file as `{src, rx, line}`. `--demo` runs `tools/fake_watches.py` on a
+   file as `{src, rx, line}`. `tools/knocks.py` judges each bump spike a
+   watch sends (matched with the partner's spike within 0.4 s, as heard by
+   radio, or why not), and the bridge relays, logs and prints each judgement
+   as `{src: "bridge", rx, knock}`. `--demo` runs `tools/fake_watches.py` on a
    thread: the two-watch simulator plus the same `app/telemetry.py` and
    `hal/debuglink.py` code, sending to localhost (or, with `--serial`, writing
    into two pseudo-terminals the bridge reads).

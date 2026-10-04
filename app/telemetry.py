@@ -11,7 +11,7 @@ Field tests log to flash as they go: ``session("A")`` appends to
 (``tools/deploy.py --tele A``). Pull the files with ``mpremote fs cp
 :/log/0_A.jsonl .``. The RAM ring alone holds ~3 min (900 records at 5 Hz),
 and on battery the hardware WDT reboots the watch ~8 s after Ctrl-C, before
-any REPL dump. A state record is ~400 bytes (~120 KB a minute at 5 Hz), so
+any REPL dump. A state record is ~500 bytes (~150 KB a minute at 5 Hz), so
 check free flash (``os.statvfs("/")``) between sessions; a failed write ends
 the file (``err`` says why) and the ring carries on in RAM.
 
@@ -19,8 +19,13 @@ State records are ``{"ev": "s", ...}`` at ``hz`` (5 by default) with a
 subset of the §4.5 A fields (rssi, rssi_f, d_est/d_lo/d_hi, zone, trend,
 trend_c, lost_s, steps, act, steps_since_scan, arrow_deg, ui, scr, bl, fps,
 batt_pct, batt_mv, chg, p_batt) plus ``sub`` (screen sub-state), ``cone``,
-``hz`` (beacon rate), ``buzz`` and link counters (``seq``, ``peer_seq``,
-``rx``, ``loss``) for cross-watch alignment. Events (``btn``, ``touch``,
+``hz`` (beacon rate), ``buzz``, link counters (``seq``, ``peer_seq``,
+``rx``, ``loss``) for cross-watch alignment, and the bump readings that
+tools/knocks.py judges (docs/design/debug-mode.md "Knocks"): ``arm``
+(``bump_armed``), ``tap``/``tap_hot`` (own last spike and its HOT bit),
+``ptap``/``ptap_hot`` (the partner's, heard by radio, on our clock) and
+``spk`` (the accelerometer's counts: spikes, soft, odd, buzz; null without
+one). Events (``btn``, ``touch``,
 ``tap``, ``haptic``, ``pwr``, ``crash`` (``e``: the exception that stopped
 the loop; the ring is flushed then), and ``bcn_rx`` with ``beacons=True``)
 go in the same ring. Not logged: ``role``, ``fw``/``uiv``, ``arrow_c`` and the
@@ -57,6 +62,7 @@ import json
 
 from finder.compat import ticks_add, ticks_diff
 from finder.render_params import to_dict
+from finder.session import ST_TAP_HOT
 
 ACT_NAMES = ("unknown", "still", "walk", "run")
 DGRAM_MAX = 1400                          # bytes: one Wi-Fi frame, no IP fragments
@@ -70,6 +76,17 @@ def _r1(v):
 
 def _pct(level):
     return int((level or 0.0) * 100 + 0.5)
+
+
+def _spk(f):
+    """The accelerometer's counts (app/imu_feed.py ``ImuFeed``): spikes
+    handed to the game, soft bumps (under the spike peak), odd ones (too long
+    or short, or too soon after a spike) and ones the motor's buzz hid; None
+    without a feed."""
+    if f is None:
+        return None
+    b = f.n_blanked
+    return [f.n_taps, f.n_low, f.n_rejected - b, b]
 
 
 def _fit(s):
@@ -191,13 +208,15 @@ class Telemetry:
 
     def record(self, now, rt):
         """State record from a ``Runtime`` (call when ``due``). Reads its
-        ``game``, ``link``, ``tx``, ``params``, ``screen_is_on``, ``bl_level``,
-        ``fps``, ``batt_mv`` and ``batt_chg`` (tools/fake_watches.py has the same)."""
+        ``game``, ``link``, ``tx``, ``feed``, ``params``, ``screen_is_on``,
+        ``bl_level``, ``fps``, ``batt_mv`` and ``batt_chg``
+        (tools/fake_watches.py has the same)."""
         g = rt.game
         p = g.params
         a = g.arrow
         est = g.est
         link = rt.link
+        pv = g.peer
         age = link.age_ms(now)
         d = {
             "t": now, "ev": "s", "sid": self.sid, "dev": self.dev,
@@ -212,10 +231,12 @@ class Telemetry:
             "scr": rt.screen_is_on, "bl": _pct(rt.bl_level),
             "fps": _r1(rt.fps), "batt_pct": g.battery, "batt_mv": rt.batt_mv,
             "chg": rt.batt_chg,
-            "p_batt": g.peer.battery,
+            "p_batt": pv.battery,
             "seq": rt.tx.seq, "peer_seq": None if link.last_seq < 0 else link.last_seq,
             "rx": link.n_rx, "loss": link.loss_pct(),
             "hz": g.beacon_hz, "buzz": g.buzz,
+            "arm": g.bump_armed(), "tap": g.bump_t, "tap_hot": bool(g.state_byte & ST_TAP_HOT),
+            "ptap": pv.tap_t, "ptap_hot": pv.tap_hot, "spk": _spk(rt.feed),
         }
         self.add(d)
         if self.sink is not None:

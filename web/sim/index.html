@@ -124,6 +124,20 @@ code.cmd { font-family: var(--mono); font-size: 12px; color: var(--text); backgr
 .screen-wait { position: absolute; inset: 18px; display: flex; align-items: center; justify-content: center; padding: 30px; text-align: center; color: var(--muted); font-size: 13px; pointer-events: none; }
 .screen-wait[hidden] { display: none; }
 .screen.stale { opacity: 0.45; }
+.knocks { border-top: 1px solid var(--line); padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+.knocks p { margin: 0; }
+.kagree { font-size: 13px; color: var(--muted); }
+.kagree.good { color: var(--glow); }
+.kagree.warnc { color: var(--warn); }
+.ktot { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: var(--muted); }
+.ktot li { display: flex; align-items: baseline; gap: 8px; }
+.ktot .swatch { flex: none; }
+.krows { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.krows li { display: grid; grid-template-columns: 64px repeat(2, minmax(0, 1fr)); gap: 4px 12px; padding: 7px 10px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); font-size: 13px; }
+.krows .kt { font-family: var(--mono); font-size: 12px; color: var(--muted); padding-top: 1px; }
+.krows .kc { min-width: 0; color: var(--muted); }
+.krows .kc b { color: var(--text); font-weight: 600; }
+@media (max-width: 560px) { .krows li { grid-template-columns: minmax(0, 1fr); } }
 dl.rtele dd { white-space: normal; overflow-wrap: anywhere; }
 .nw { white-space: nowrap; }
 </style>
@@ -226,6 +240,15 @@ dl.rtele dd { white-space: normal; overflow-wrap: anywhere; }
         <p>Over Wi-Fi instead: save the Wi-Fi name and password once with <code class="cmd">python3 tools/wifi_setup.py</code>, load the watches with <code class="cmd">--debug A --wifi</code> and <code class="cmd">--debug B --wifi</code>, and keep both on this computer's Wi-Fi (a network with one access point works best).</p>
         <p>No watches at hand? Stop the bridge and start it again with <code class="cmd">python3 tools/debug_server.py --demo --serial</code> to see two pretend watches play.</p>
       </div>
+      <div class="knocks" id="knocks">
+        <div class="chart-head">
+          <h2>Knocks</h2>
+          <span class="kagree" id="kagree" role="status"></span>
+        </div>
+        <p class="note" id="knocks-lead">No knocks yet. Knock the watches together, screen to screen, when both show HOT (or once the runes show in PAIRING). Each knock shows up here: whether the other watch felt it within 0.4 s too, and if not, why. A matched knock ends the round when both watches were in HOT.</p>
+        <ul class="ktot" id="ktot"></ul>
+        <ol class="krows" id="krows" aria-label="The last 10 knocks, newest first"></ol>
+      </div>
       <div class="chart-wrap">
         <div class="chart-head">
           <h2>What each watch measured, last 90 seconds</h2>
@@ -239,7 +262,7 @@ dl.rtele dd { white-space: normal; overflow-wrap: anywhere; }
       </div>
       <details class="rawlog" id="rawlog">
         <summary>Raw messages <span id="rawlog-count">(none yet)</span></summary>
-        <div class="rawlog-bar"><span>The last 50 messages from the watches, newest at the bottom: the time, where it came from (a USB port or a Wi-Fi address), then the message as the bridge received it. Text a watch printed on its USB port is marked "printed".</span><label><input type="checkbox" id="rawlog-pause"> Pause</label></div>
+        <div class="rawlog-bar"><span>The last 50 messages from the watches, newest at the bottom: the time, where it came from (a USB port or a Wi-Fi address), then the message as the bridge received it. Text a watch printed on its USB port is marked "printed"; the bridge's own judgement of each knock comes from "bridge".</span><label><input type="checkbox" id="rawlog-pause"> Pause</label></div>
         <pre id="rawlog-text"></pre>
       </details>
     </section>
@@ -614,7 +637,8 @@ function fmtClock(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 6
 // tools/debug_server.py serves this page and relays the watches' records, read from their USB
 // serial ports or UDP datagrams, as Server-Sent Events on ./events: {src, rx, rec}, src being the
 // port's name or the sender's IP address; a line a watch printed on its USB port comes as
-// {src, rx, line}. An "rp" record carries the RenderParams the watch drew (SIM.show_params draws
+// {src, rx, line}; the bridge's judgement of a knock (tools/knocks.py) as {src: "bridge", rx, knock}.
+// An "rp" record carries the RenderParams the watch drew (SIM.show_params draws
 // them with the same renderer; over USB about once a second, and the renderer keeps animating
 // them in between), an "s" record its 5 Hz readings. The mode is offered only when
 // ./debug/status answers, so never in the artifact or from a plain http.server.
@@ -627,6 +651,8 @@ const RCOL = ['#7FD6FF', '#FFB86B'], RFILL = ['rgba(127,214,255,0.14)', 'rgba(25
 let mode = 'sim', realOK = null, es = null, everOpen = false, anyHeard = false, others = 0, rawDirty = false;
 let printedOn = null;                                  // the USB port a watch last printed text on
 const rawLog = [];
+const KNOCK_N = 10, KNOCK_LABEL = { matched: 'Matched', buzz: 'Set aside', apart: 'Too far apart', alone: 'Not matched' };
+const knocks = { n: {}, rows: [], dirty: true };       // n: each watch's totals; rows: [{row, at, A, B}], newest first
 const real = [0, 1].map(() => ({ mac: null, src: null, heard: null, n: 0, s: null, rp: null, shown: false, bad: null, clash: null, hist: [], html: '' }));
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -694,13 +720,42 @@ function openStream() {
   if (es) return;
   everOpen = false;
   es = new EventSource('./events');
-  es.onopen = () => { everOpen = true; };
+  es.onopen = () => { everOpen = true; knocks.n = {}; knocks.rows = []; knocks.dirty = true; knocksSoFar(); };   // the bridge may have restarted
   es.onmessage = (e) => {
     let msg = null;
     try { msg = JSON.parse(e.data); } catch (_) { return; }
     if (msg && msg.rec && typeof msg.rec === 'object') onRecord(msg, heardAt(msg.rx));
     else if (msg && typeof msg.line === 'string') onPrinted(msg);
+    else if (msg && msg.knock && typeof msg.knock === 'object') onKnock(msg);
   };
+}
+async function knocksSoFar() {                         // the bridge's totals and last knocks, for a stream that just opened
+  try {
+    const r = await fetch('./debug/status', { cache: 'no-store' }), j = r.ok ? await r.json() : null;
+    const n = j && j.knocks && j.knocks.totals, recent = j && j.knocks && j.knocks.recent;
+    if (Array.isArray(recent)) recent.forEach((k) => { if (k && typeof k === 'object') addKnock(k); });
+    if (n && typeof n === 'object') for (const d of ['A', 'B']) {                // a knock line may have come first
+      if (n[d] && typeof n[d] === 'object' && (num(n[d].felt) || 0) >= (knocks.n[d] ? num(knocks.n[d].felt) || 0 : 0)) knocks.n[d] = n[d];
+    }
+    knocks.dirty = true;
+  } catch (_) {}
+}
+function onKnock(msg) {
+  logLine(msg.src, msg.knock);
+  addKnock(msg.knock);
+}
+function addKnock(k) {                                 // one judgement into the totals and its row
+  const d = k.dev;
+  if (d !== 'A' && d !== 'B' || !Object.hasOwn(KNOCK_LABEL, k.v)) return;
+  if (k.n && typeof k.n === 'object' && (num(k.n.felt) || 0) >= (knocks.n[d] ? num(knocks.n[d].felt) || 0 : 0)) knocks.n[d] = k.n;
+  let r = knocks.rows.find((x) => x.row === k.row);
+  if (!r) knocks.rows.push(r = { row: k.row, at: null, A: null, B: null });
+  r[d] = k;
+  const at = num(k.at);                                // the row's time: its earlier knock (a match is judged sooner than the rest)
+  if (at != null && (r.at == null || at < r.at)) r.at = at;
+  knocks.rows.sort((x, y) => (y.at == null ? -Infinity : y.at) - (x.at == null ? -Infinity : x.at) || y.row - x.row);
+  knocks.rows.length = Math.min(knocks.rows.length, KNOCK_N);
+  knocks.dirty = true;
 }
 // When the bridge received the record (rx: this computer's clock, ms since 1970), on this page's
 // performance.now() clock. "Last heard" counts from there, never from the watch's own 't' (its
@@ -848,6 +903,7 @@ function realTick() {
   $('howto').hidden = anyHeard;
   if (!anyHeard) setText('howto-lead', howtoLead(printedOn));
   for (let i = 0; i < 2; i++) renderRealWatch(i, now, st === 'open');
+  if (knocks.dirty) renderKnocks();
   drawRealChart(now);
   setText('rawlog-count', rawLog.length ? `(last ${rawLog.length})` : '(none yet)');
   const pre = $('rawlog-text');
@@ -858,6 +914,38 @@ function realTick() {
     if (atEnd) pre.scrollTop = pre.scrollHeight;
   }
 }
+// ---------- knocks: the bridge's judgement of each knock a watch felt (tools/knocks.py) ----------
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+function knockTotalsText(d, n) {
+  const c = (k) => (num(n[k]) == null ? 0 : n[k]);
+  let t = `Watch ${d} felt ${plural(c('felt'), 'knock', 'knocks')}: ${c('matched')} matched, ${c('apart')} too far apart from the other watch's, ${c('alone')} with no knock from the other watch, ${c('buzz')} set aside while it buzzed.`;
+  const k = Array.isArray(n.spk) ? n.spk.map((v) => num(v) || 0) : [0, 0, 0, 0];
+  if (k[1] || k[2] || k[3]) t += ` Its accelerometer also ignored ${plural(k[1], 'bump', 'bumps')} too soft to count, ${k[2]} that lasted too long or came too soon after a knock, and ${k[3]} during its own buzz.`;
+  return t;
+}
+function knockCell(d, k) {
+  if (!k) return `<div class="kc"><b>${d}</b> nothing for this knock</div>`;
+  const cls = k.v === 'matched' ? 'good' : 'warnc';
+  return `<div class="kc"><b>${d}</b> <span class="${cls}">${KNOCK_LABEL[k.v]}</span>. ${esc(String(k.why || ''))}</div>`;
+}
+function renderKnocks() {
+  knocks.dirty = false;
+  const n = knocks.n, has = ['A', 'B'].filter((d) => n[d]);
+  const m = (d) => num(n[d].matched) || 0;
+  const ag = $('kagree');
+  if (has.length === 2) {
+    const same = m('A') === m('B');
+    ag.className = 'kagree ' + (same ? 'good' : 'warnc');
+    setText('kagree', same ? `Matched knocks: ${m('A')} on each watch` : `Matched knocks: ${m('A')} on watch A, ${m('B')} on watch B`);
+  } else { ag.className = 'kagree'; setText('kagree', has.length ? `Matched knocks: ${m(has[0])} on watch ${has[0]}` : ''); }
+  $('knocks-lead').hidden = knocks.rows.length > 0 || has.some((d) => num(n[d].felt) > 0);
+  $('ktot').innerHTML = has.map((d) => `<li><span class="swatch" style="background: var(--${d.toLowerCase()})"></span><span>${esc(knockTotalsText(d, n[d]))}</span></li>`).join('');
+  const p2 = (v) => String(v).padStart(2, '0');
+  $('krows').innerHTML = knocks.rows.map((r) => {
+    const t = r.at == null ? '' : ((d) => `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`)(new Date(r.at));
+    return `<li><span class="kt">${t}</span>${knockCell('A', r.A)}${knockCell('B', r.B)}</li>`;
+  }).join('');
+}
 function howtoLead(port) {                             // text from a USB port, but no record yet
   return port == null ? 'Nothing has arrived from a watch yet. To show both watches here over their USB cables:'
     : `USB port ${port} sends text but no watch records yet, so that watch may not be in debug mode: Raw messages below show what it printed. To show both watches here over their USB cables:`;
@@ -866,7 +954,8 @@ function realSummary() {                               // for fieldSim (headless
   const now = performance.now();
   return { available: realOK, bridge: bridgeState(), watches: real.map((w) => ({
     heard_ms: w.heard == null ? null : Math.round(now - w.heard), n: w.n, shown: w.shown, bad: w.bad, src: w.src,
-    screen: w.rp && w.rp.p ? w.rp.p.screen : null, d_est: w.s ? num(w.s.d_est) : null })) };
+    screen: w.rp && w.rp.p ? w.rp.p.screen : null, d_est: w.s ? num(w.s.d_est) : null })),
+    knocks: { totals: knocks.n, rows: knocks.rows.map((r) => ({ row: r.row, A: r.A && r.A.v, B: r.B && r.B.v })) } };
 }
 
 // ---------- real chart: distance guess (top) and smoothed signal (bottom), one shared time axis ----------
