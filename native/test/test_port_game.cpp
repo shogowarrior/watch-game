@@ -3,6 +3,7 @@
 #include <string>
 
 #include "check.h"
+#include "game_probe.h"
 #include "hm/game.h"
 #include "port.h"
 
@@ -62,21 +63,6 @@ struct Rig {
   std::string hint;
   std::optional<game::Game> g;
 };
-
-// A test's calls of private methods.
-namespace hm {
-namespace game {
-struct Probe {
-  static void emit(Game& g, ticks_t t, hp::Haptic h) { g.emit(t, h); }
-  static void new_round(Game& g, ticks_t t) { g.new_round(t); }
-  static void toast_set(Game& g, const char* text, rp::Severity sev) { g.toast_set(text, sev); }
-  static void hint_set(Game& g, ticks_t t, const char* text) { g.hint_set(t, text); }
-  static int32_t state_byte(const Game& g, ticks_t t) { return g.state_byte_(t); }
-  static int32_t peer_hz(const Game& g) { return g.peer_hz(); }
-  static const char* screen(const Game& g) { return g.screen_(); }
-};
-}  // namespace game
-}  // namespace hm
 
 static bool recorded_blank(void* rig, ticks_t t) {
   return static_cast<Rig*>(rig)->calls->take("blank_fn", J(std::vector<Json>{J(t)})).flag();

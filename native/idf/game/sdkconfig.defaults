@@ -1,0 +1,7 @@
+# On top of ../sdkconfig.defaults (CMakeLists.txt). The game loop feeds the task
+# watchdog once per pass: a hung loop reboots the watch after 8 s (main.py's
+# watchdog_ms), always the hardware one (hm/platform.h).
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=8
