@@ -166,7 +166,11 @@ stages in order:
    `play_named`; telemetry logs it only if the player accepted it) and the
    renderer's heartbeats (`heartbeat`, one call per beat) go into
    `HapticPlayer`; `tick(now)` gives the motor level, applied by `Motor.set`
-   only on change. The motor is also serviced after every band the renderer
+   only on change. When the renderer announces its next heartbeat spawn
+   (`hb_next_t`), the beat is handed to the player ahead, at the spawn time,
+   so it lands on its ring at any frame lock rate; the loop wakes for it
+   (`player.beat_due`), and the frame that spawns the ring does not start it
+   again. The motor is also serviced after every band the renderer
    blits or pushes and after its overlays, and in
    `idle` while a pattern plays.
 9. **gc**: `gc.collect()` every 10 s when the next frame is at least 10 ms

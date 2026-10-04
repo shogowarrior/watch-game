@@ -28,9 +28,12 @@ heartbeat or pre-empted event is dropped.
 The frame's ``params.haptic`` goes to ``play_named`` the first time it is
 drawn (its result says whether it was accepted), then the renderer's heartbeats
 (``()`` or ``[name]``) go to ``heartbeat`` (an event replaces one that starts
-with it). ``tick(t_ms)`` returns the motor strength (0..1) to apply; call it
-every loop step (the runtime also calls it after each display strip and every
-1 ms in ``idle`` while a pattern plays). The hal Motor applies it only on
+with it). A heartbeat can be handed over ahead of its time (the runtime does
+this for the ring spawn a renderer announces): it waits as ``beat_due`` and
+does not count as ``active`` until it starts. ``tick(t_ms)`` returns the motor
+strength (0..1) to apply; call it every loop step (the runtime also calls it
+between the bands of a frame and every 1 ms in ``idle`` while a pattern
+plays). The hal Motor applies it only on
 change. Nothing blocks or sleeps.
 """
 
@@ -155,6 +158,12 @@ class _Track:
         self.stop = False
         self.ph = t
 
+    def waiting(self, t):
+        """True while the pattern is scheduled after ``t`` and nothing of it
+        has been output yet."""
+        return (self.pat is not None and self.on and not self.shown and self.i == 0
+                and t is not None and self.ph is not None and ticks_diff(self.ph, t) > 0)
+
     def pulse_end(self):
         """End of the pulse being output now (None if no pulse is on)."""
         if self.pat is None or not self.on or not self.shown:
@@ -246,8 +255,22 @@ class HapticPlayer:
 
     @property
     def active(self):
-        """True while any pattern (event, queued event or heartbeat) plays."""
-        return self.busy or self._hb.pat is not None
+        """True while any pattern (event, queued event or heartbeat) plays; a
+        heartbeat scheduled for later is not playing yet (``beat_due``)."""
+        hb = self._hb
+        return self.busy or (hb.pat is not None and not hb.waiting(self._now))
+
+    @property
+    def beat_due(self):
+        """Start time of a heartbeat scheduled after the last tick, or None."""
+        hb = self._hb
+        return hb.ph if hb.waiting(self._now) else None
+
+    @property
+    def beat_playing(self):
+        """True while a heartbeat is being output (not just scheduled)."""
+        hb = self._hb
+        return hb.pat is not None and not hb.waiting(self._now)
 
     def play_named(self, name, t_ms=None):
         """Start event ``name`` (e.g. 'FOUND') at ``t_ms`` (or the next tick);
@@ -315,12 +338,23 @@ class HapticPlayer:
         return e is None or t is None or ticks_diff(t, e) >= HB_RESUME_MS
 
     def heartbeat(self, name, t_ms=None):
-        """Start heartbeat ``name`` if allowed; returns started."""
+        """Start heartbeat ``name`` at ``t_ms`` (or the next tick) if allowed;
+        returns started. ``t_ms`` may be ahead of the last tick: the beat then
+        waits (``beat_due``), and an event that starts first replaces it."""
         pattern = PATTERNS.get(name)
         if pattern is None or not self.hb_allowed(self._now if t_ms is None else t_ms):
             return False
         self._hb.start(pattern, t_ms)
         return True
+
+    def cancel_heartbeat(self):
+        """Drop a heartbeat that is scheduled but has not started; returns
+        whether one was dropped (a beat already on plays out)."""
+        hb = self._hb
+        if hb.waiting(self._now):
+            hb.pat = None
+            return True
+        return False
 
     # ---- metronome (heartbeat source when no renderer drives them) ----
     def set_metronome(self, period_ms, t_ms=None, name=None):
