@@ -9,8 +9,9 @@ is UB where the Python it ports has none), the tests at -O2 without them (the
 trace replays parse hundreds of MB of JSON: three times faster). Meanwhile native/tools/trace_game.py records the
 Python game's calls into a temporary folder (HM_TRACES), which the game port's
 trace tests replay (--tests and --classes as trace_game.py takes them: other
-Python tests to record than its default, only these classes).
-Runs them from the repo root and prints their result line
+Python tests to record than its default, only these classes), and
+native/tools/trace_hal.py records the hal/ drivers' bus traffic there for the
+driver ports' (test_hal_*.cpp). Runs them from the repo root and prints their result line
 ``[native] N passed, S skipped, K failed``.
 
 native/test/traced.txt holds a hash of the Python the default traces come
@@ -35,8 +36,8 @@ FLAGS = WARN + ["-O1"] + SANITIZE   # the code under test
 TEST_FLAGS = WARN + ["-O2"]         # the tests and the trace replay
 TRACED = os.path.join(ROOT, "native", "test", "traced.txt")
 # What the default traces depend on, besides the tests trace_game.py runs.
-PYTHON = ("finder/**/*.py", "sim/*.py", "app/*.py", "tests/__init__.py", "tests/est_helpers.py",
-          "tests/fakes/*.py", "native/tools/trace_game.py")
+PYTHON = ("finder/**/*.py", "sim/*.py", "app/*.py", "hal/*.py", "tests/__init__.py", "tests/est_helpers.py",
+          "tests/fakes/*.py", "native/tools/trace_game.py", "native/tools/trace_hal.py")
 # Plain C++ on the hm:: interfaces that lives in a port: (sources, headers, tests).
 PORTS = [("native/idf/components/hm_idf/portable", "native/idf/components/hm_idf/include", "native/idf/test")]
 
@@ -110,14 +111,15 @@ def run(args=()):
     changed = not rec_args and now != marked()   # a --tests or --classes run is always strict
     with tempfile.TemporaryDirectory() as d:
         traces = os.path.join(d, "traces")
-        rec = subprocess.Popen([sys.executable, os.path.join(ROOT, "native", "tools", "trace_game.py"), traces] + rec_args,
-                               cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        recs = [subprocess.Popen([sys.executable, os.path.join(ROOT, "native", "tools", tool), traces] + more,
+                                 cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for tool, more in (("trace_game.py", rec_args), ("trace_hal.py", []))]
         exe = os.path.join(d, "hm_host_tests")
         ok, log = build(exe)
-        rec_out = rec.communicate()[0]
+        rec_out = "".join(rec.communicate()[0] for rec in recs)
         if not ok:
             return 1, log
-        if rec.returncode:
+        if any(rec.returncode for rec in recs):
             return 1, log + rec_out
         env = dict(os.environ, HM_TRACES=traces, HM_PYTHON_CHANGED="1" if changed else "0")
         p = subprocess.run([exe] + args, cwd=ROOT, capture_output=True, text=True, env=env)
