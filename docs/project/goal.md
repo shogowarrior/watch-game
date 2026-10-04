@@ -15,7 +15,7 @@ Finish, in order:
 Keep:
 - **Honest on screen:** distance only as bands, never metres or dBm; FOUND only after a physical bump.
 - **The watch:** MicroPython 1.29 compatible, allocation-free render loop, and the AGENTS.md hard rules.
-- **Secrets:** Wi-Fi credentials only in the gitignored `secrets.py`, never in a commit, a log, a notebook output or a chat.
+- **Secrets:** Wi-Fi credentials only on my laptop outside the repo (saved with `python3 tools/wifi_setup.py`) and on the watches, never in a commit, a log, a notebook output or a chat.
 - **Explanations** in plain language; I'm not an RF or estimation expert.
 
 How to work:

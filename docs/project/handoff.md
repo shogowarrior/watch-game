@@ -1,4 +1,4 @@
-# Sheikah Finder: handoff (2026-10-03)
+# Sheikah Finder: handoff (2026-10-04)
 
 Read this first. It covers the current state, the decisions waiting on the
 owner, and the order to do things in. CLAUDE.md and AGENTS.md still govern how
@@ -49,8 +49,8 @@ in one message with the current default marked. Don't build on an assumption.
 
   It runs unchanged on CPython, on MicroPython 1.29 (WebAssembly) and in the
   web simulator.
-- **Tests:** `python3 tests/runner.py` gives 608 passed; `node tools/mpy/run.mjs
-  tests/runner.py` gives 620 passed. The held-out bake-off (seeds 100-129)
+- **Tests:** `python3 tests/runner.py` gives 663 passed; `node tools/mpy/run.mjs
+  tests/runner.py` gives 643 passed. The held-out bake-off (seeds 100-129)
   still ranks kalman2 first, at 0.660.
 - **Review:** four whole-repo review rounds ran on 2026-10-02/03. Every finding
   was verified by an independent skeptic before it was fixed. Confirmed
@@ -65,13 +65,16 @@ in one message with the current default marked. Don't build on an assumption.
 
 ## Next steps, in order
 
-1. **Debug mode (Simulator | Real watches toggle): done** (2026-10-03). Built
-   by the workflow `debug-mode-build` to
-   [docs/design/debug-mode.md](../design/debug-mode.md), reviewed, fixed and
-   checked end to end with `tools/debug_server.py --demo`. How to use it:
-   [docs/hardware-setup.md](../hardware-setup.md) §7. Still to do: one
-   `review-fix-round` with `changed` set to the files it touched, and question
-   7 above.
+1. **Debug mode (Simulator | Real watches toggle): built for USB and Wi-Fi**
+   (2026-10-04), to [docs/design/debug-mode.md](../design/debug-mode.md). The
+   Wi-Fi link came first (the workflow `debug-mode-build`, 2026-10-03). The
+   USB serial link, the bridge's `--serial` reader and the private Wi-Fi setup
+   (`tools/wifi_setup.py`, which keeps the password out of the repo) followed
+   in parallel tracks, tested end to end with `tools/debug_server.py --demo`
+   and `--demo --serial`. How to use it:
+   [docs/hardware-setup.md](../hardware-setup.md) §7 (USB first). Still to do:
+   one `review-fix-round` with `changed` set to the files it touched, and
+   question 7 above.
 2. **Design canvas sync.** The "Sheikah Finder watch UI" canvas
    (https://claude.ai/artifact/EnemW5QZy7BkxYyQ4SyfFn) predates these visual
    changes. The snapshots in docs/design/snapshots/ are current:
@@ -99,34 +102,34 @@ in one message with the current default marked. Don't build on an assumption.
 
 ## Known small issues (verified, not fixed)
 
-- **Arrow clock.** If the MENU or SAVER ON is open on the exact tick an arrow
-  comes back (an unstash after a cancelled scan, or a relink), the arrow's
-  clock runs for one 100 ms tick, about 3° of pacer. The fix is one line in
-  `finder/game.py` `_update_arrow`: OR `self.menu.is_open or self._inter_until
-  is not None` into `hidden`.
-- **Chip features after a bad start.** In `app/runtime.py` `_chip_start`, a
-  retry that succeeds while `start()` returns False leaves a stale
-  `errors['imu_features']`. If all 3 tries raise, the chip features stay off
-  for the session.
 - **Repeated partner RSSI.** The beacon's `rssi_last` has no age or sequence,
   so the partner can count the same RSSI value twice. A protocol field would
   fix it.
 - **Quick bake-off ranking.** `bakeoff.py --quick` (typical, seeds 0-2) ranks
   kalman1d slightly above kalman2. Only the held-out seeds decide `DEFAULT`.
 
+Fixed on 2026-10-04: the arrow clock and the chip features after a bad start.
+The one-line arrow fix this list suggested was incomplete: a SAVER ON that is
+waiting to start (`_inter_pending` in `finder/game.py`) also counts as hidden,
+and a scan's new arrow is checked on that tick too, not only a returning one.
+A chip start stopped by a bus error is now started again by the 1 s poll, 5
+starts in all (`CHIP_TRIES` in `app/runtime.py`), and a start that goes
+through clears the old error.
+
 ## Tools for this work
 
 - **`.claude/workflows/review-fix-round.js`:** a whole-repo review and fix
   round. The header comment lists its args. Use `changed` and `lenses` to keep
   later rounds cheap.
-- **`.claude/workflows/debug-mode-build.js`:** built the debug mode (step 1).
+- **`.claude/workflows/debug-mode-build.js`:** built debug mode's Wi-Fi link (step 1).
 - **`window.fieldSim`** on the web sim page drives the simulator from a script:
   - `advance(ms)` runs the simulator forward;
   - `call(name, ...args)` calls a `TwoWatchSim` method;
   - `telemetry` holds the latest state.
-- **Dev server:** `.claude/launch.json` `web-sim` runs `tools/debug_server.py`
-  on port 8765: it serves `dist/sim` (build it first) and is the bridge for the
-  page's Real watches mode.
+- **Dev server:** `.claude/launch.json` `web-sim` runs `tools/debug_server.py
+  --serial` on port 8765: it serves `dist/sim` (build it first) and is the
+  bridge for the page's Real watches mode (it holds the USB serial ports, so
+  stop it before `deploy.py` or `mpremote`).
 
 ## How this project has been run (owner's standing preferences)
 
@@ -136,7 +139,10 @@ in one message with the current default marked. Don't build on an assumption.
   and make cause and effect visible (the simulator was rebuilt for this).
 - **Hardware:** the owner flashes and deploys. Agents never do, and never
   download firmware.
-- **Secrets:** Wi-Fi credentials live only in the gitignored `secrets.py`.
+- **Secrets:** the Wi-Fi name and password live only on the owner's laptop,
+  outside the repo (`~/.config/watch-game/wifi.py`, saved with
+  `python3 tools/wifi_setup.py`), and on the watches in Wi-Fi debug mode. The
+  owner types them in their own terminal, never in a chat.
 - **Commits:** as `shogowarrior <abhinabray@gmail.com>`. Pushing works over SSH
   with the owner's shogowarrior key on their Mac, or through the Project's
   GitHub connection in the cloud.
