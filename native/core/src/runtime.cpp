@@ -171,17 +171,19 @@ void Runtime::sample_touch(ticks_t t) {
 void Runtime::stage_touch(ticks_t now) {
   sample_touch(now);
   const int code = g_code_;
-  opt_ticks td = td_t_;   // in time order; on one sample the gesture first (it ended the press before that finger)
+  // in time order; on one sample the gesture first (it ended the press before that finger)
+  bool td = td_t_.has_value();
+  const ticks_t td_at = td_t_.value_or(0);
   td_t_.reset();
-  if (td && (!code || ticks_diff(g_t_, *td) > 0)) {
-    game->on_touch_down(*td);   // a finger landed (rain filter)
-    td.reset();
+  if (td && (!code || ticks_diff(g_t_, td_at) > 0)) {
+    game->on_touch_down(td_at);   // a finger landed (rain filter)
+    td = false;
   }
   if (code) {
     g_code_ = 0;
     game->on_gesture(g_t_, code, g_x_, g_y_, g_t0_);
   }
-  if (td) game->on_touch_down(*td);   // landed as (or after) the gesture's press ended
+  if (td) game->on_touch_down(td_at);   // landed as (or after) the gesture's press ended
 }
 
 void Runtime::stage_button(ticks_t now) {

@@ -461,9 +461,10 @@ TEST(runtime_two_watches_one_minute) {
   CHECK(b.motor.lvl == 0);
   CHECK(a.rt->game->buzz == game::BUZZ_FULL);
   // A (FULL) still buzzes, B (OFF) does not; HOT has no heartbeat, so an event
+  // (a held one plays on the next tick)
   CHECK(a.rt->game->px.zone() == proximity::HOT && b.rt->game->px.zone() == proximity::HOT);
   const size_t a_idx = a.motor.history.size();
-  for (Watch* w : ws) GP::emit(*w->rt->game, clock.now, hp::NOPE);
+  for (Watch* w : ws) GP::hold(*w->rt->game, hp::NOPE);
   const uint32_t end = clock.now + 1500;
   while (clock.now < end) {
     int32_t w = 1000;
@@ -593,11 +594,13 @@ TEST(runtime_low_battery_shutdown_needs_confirmation_and_no_usb) {
   CHECK(!w.pmu.off);
   w.pmu.vbus = 0;              // unplugged
   uint32_t t_low = 0;
-  while (!Rp::low_n(rt)) {     // first off-USB reading (unconfirmed)
+  const uint32_t give_up = clock.now + R::BATTERY_MS + 1000;   // the Python waits for ever
+  while (!Rp::low_n(rt) && clock.now < give_up) {   // first off-USB reading (unconfirmed)
     t_low = clock.now;
     const int32_t s = rt.step();
     clock.now += s > 1 ? s : 1;
   }
+  CHECK(Rp::low_n(rt));
   CHECK(rt.game->battery == T::BATT_SHUTDOWN_PCT + 1 && !GP::bye_t(*rt.game));
   run_for(rt, clock, 30000);
   CHECK(rt.powered_off && !rt.running && w.pmu.off);
@@ -623,10 +626,12 @@ TEST(runtime_one_low_battery_reading_is_ignored) {
   CHECK(g.battery == 60);
   w.pmu.pct = 0;   // one more, at a later 10 s reading
   Rp::battery_due(rt, clock.now);
-  while (!Rp::low_n(rt)) {
+  const uint32_t give_up = clock.now + 1000;   // the Python waits for ever
+  while (!Rp::low_n(rt) && clock.now < give_up) {
     const int32_t s = rt.step();
     clock.now += s > 1 ? s : 1;
   }
+  CHECK(Rp::low_n(rt));
   w.pmu.pct = 60;
   const std::vector<hp::Haptic> haps = run_for(rt, clock, 3000);
   CHECK(g.battery == 60 && !g.saver() && !GP::toast_on(g));
@@ -821,7 +826,7 @@ static bool bump_in_hot(uint32_t t0, bool finger, std::vector<uint32_t> knocks, 
     }
     clock.now += w > 0 ? w : 1;
   }
-  const uint32_t n = 1 + knocks.size();
+  const int32_t n = 1 + (int32_t)knocks.size();
   if (a.rt->feed->n_taps != n || b.rt->feed->n_taps != n) return false;
   *ma = a.rt->game->mode;
   *mb = b.rt->game->mode;
@@ -894,10 +899,12 @@ TEST(runtime_touch_that_lands_in_the_wake_window_is_ignored) {
   run_for(rt, clock, down + 500);   // face down 1 s on: the screen goes off
   const game::Game& g = *rt.game;
   CHECK(!g.screen_on);
-  while (!g.screen_on) {            // face up: wake
+  const uint32_t give_up = clock.now + 5000;   // the Python waits for ever
+  while (!g.screen_on && clock.now < give_up) {   // face up: wake
     const int32_t s = rt.step();
     clock.now += s > 1 ? s : 1;
   }
+  CHECK(g.screen_on);
   const ticks_t t = GP::wake_t(g);
   w.touch.presses.push_back({t + 150, t + 250, 120, 120});
   run_for(rt, clock, 1000);

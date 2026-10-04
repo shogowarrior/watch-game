@@ -1,5 +1,6 @@
 // The tests' reach into hm::game::Game's private members (its friend Probe):
-// the Python tests call g._emit, g._start_scan and read g._toast and the like.
+// the Python tests call g._emit, g._start_scan, set g._held and read g._toast
+// and the like.
 // One definition for every test file.
 #pragma once
 #include "hm/game.h"
@@ -9,6 +10,7 @@ namespace game {
 
 struct Probe {
   static void emit(Game& g, ticks_t t, hp::Haptic h) { g.emit(t, h); }
+  static void hold(Game& g, hp::Haptic h) { g.held_ = h; }   // g._held = name: plays on the next tick
   static void new_round(Game& g, ticks_t t) { g.new_round(t); }
   static void start_scan(Game& g, ticks_t t) { g.start_scan(t); }
   static void toast_set(Game& g, const char* text, rp::Severity sev) { g.toast_set(text, sev); }
