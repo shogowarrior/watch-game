@@ -1,8 +1,9 @@
 """Record the Python game's calls for the C++ port to replay (CPython only).
 
-    python3 native/tools/trace_game.py OUTDIR [--tests test_link,test_game,...]
+    python3 native/tools/trace_game.py OUTDIR [--tests test_link,golden:menu,...]
 
-Runs Python tests (TESTS, or --tests) with every class in TRACED wrapped, and
+Runs Python tests and golden scenario drivers (TESTS, or --tests) with every
+class in TRACED wrapped, and
 writes one JSON-lines file per class, OUTDIR/<module>.<Class>.jsonl:
 
     {"new": 3, "a": [...]}                     # object 3 constructed with these arguments
@@ -242,10 +243,18 @@ def install(outdir):
 
 
 # The tests run under the recorder by default: those of the modules the C++
-# port has reached (add a module's when its port lands). Recording costs about
+# port has reached (add a module's when its port lands). "golden:<name>" runs
+# native/tools/golden/<name>.py's scenarios instead of a test module. Recording costs about
 # 50 us a call, so a porter runs the wider ones with --tests (test_game,
 # test_episode, test_app_runtime, test_webhost: a minute or more each).
-TESTS = ("test_proto", "test_link")
+TESTS = (
+    "test_proto", "test_link",
+    "test_est_default", "test_est_kalman2", "golden:estimator", "golden:kalman2",
+    "test_motion", "golden:motion",
+    "test_gestures", "golden:gestures",
+    "test_menu", "golden:menu",
+    "test_haptics",   # golden:haptic_patterns stays a golden test: 227k calls, 10 MB of trace
+)
 
 
 def main(argv):
@@ -256,9 +265,20 @@ def main(argv):
     o = parse_args(argv[1:], {"tests": ",".join(TESTS)})
     os.makedirs(pos[0], exist_ok=True)
     install(pos[0])
-    sys.path.insert(0, os.path.join(ROOT, "tests"))
-    import runner
-    failed = runner.run(o["tests"].split(","))
+    names = o["tests"].split(",")
+    scenarios = [n[len("golden:"):] for n in names if n.startswith("golden:")]
+    tests = [n for n in names if not n.startswith("golden:")]
+    failed = 0
+    if tests:
+        sys.path.insert(0, os.path.join(ROOT, "tests"))
+        import runner
+        failed = runner.run(tests)
+    for name in scenarios:      # a golden generator drives its module through its scenarios
+        ns = {"__name__": "golden_" + name}
+        with open(os.path.join(ROOT, "native", "tools", "golden", name + ".py")) as f:
+            exec(f.read(), ns)
+        for _ in ns["lines"]():
+            pass
     for f in _out.values():
         f.close()
     print("trace_game: %d classes, %d objects in %s" % (len(_out), len(_ids), pos[0]))
