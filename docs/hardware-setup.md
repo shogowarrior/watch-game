@@ -183,7 +183,11 @@ kernel per watch).
    pair them. After Ctrl-C at the REPL (while the game has stayed on USB; once
    it has run on battery, Ctrl-C reboots the watch within 8 s),
    `import app; app.rt.print_stats()` shows fps and ms per stage (and
-   `touch_errors`, FT6336 bus errors, if any).
+   `touch_errors`, FT6336 bus errors, if any). While the game runs it prints
+   `fps 9.9 lock 10 miss 0 late 4/18 jit 2.1 max 112 cost 86 gc 1 log 0.6`
+   every 10 s: the frame lock should sit at 10 or more with `miss` near 0;
+   `jit` is the sd of the frame-to-frame time in ms, `log` what the line itself
+   cost.
 
 ## 6. Assumptions to verify
 
@@ -206,7 +210,7 @@ watch yet.
 | RSSI at 1 m is about -45 dBm. The path-loss exponent n (how fast the signal falls with distance) is about 2.6 outdoors and 3.0 indoors | `tokens.json` `thresholds.calibrate` (`p1m_nominal_dbm`, `n`, `n_indoor`) -> `tuning.P1M_NOMINAL_DBM`, `PATH_LOSS_N`, `PATH_LOSS_N_INDOOR` | ping-pong at known distances, once outdoors and once indoors |
 | Body shadowing is deep enough (several dB) for the scan to fit a direction | `finder/scan.py` | scans with a partner at 10-20 m |
 | ESP-NOW on channel 6 at 20 dBm keeps 10-20 Hz beacons with the display running | `hal/radio.py` | ping-pong with `render=True` |
-| The renderer holds 20 fps, and an estimator update is well under 2 ms | `app/runtime.py` stats | `app.rt.print_stats()`, `tools/bench_est.py` on the watch (what to copy: [bakeoff.md section 3](estimation/bakeoff.md#when-to-switch-to-particle), step 1) |
+| The frame lock holds 10 fps or more with few missed slots, and an estimator update is well under 2 ms | the serial `fps` line, `app/runtime.py` stats | `app.rt.print_stats()`, `tools/bench_est.py` on the watch (what to copy: [bakeoff.md section 3](estimation/bakeoff.md#when-to-switch-to-particle), step 1) |
 | The battery gauge is trustworthy enough for the low-battery and shutdown thresholds | `hal/axp202.py` `battery_percent` | compare it with the voltage over a discharge |
 
 Record the results, and move any calibrated value into `docs/design/tokens.json`

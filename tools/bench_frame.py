@@ -17,9 +17,11 @@ Prints where the time goes:
     0.5 ms slices that hand the GIL over (``lock.acquire(0)``)
   * imu: per BMA423 rate, the I2C read, decode and ImuFeed cost per sample
     and the share of each second they take at that rate
-  * loop: 10 s of the real game loop (app/runtime.py), ``print_stats()``,
-    then 10 s more with bump sensing forced on (the IMU at 800 Hz). The
-    screen is held on (the game would turn it off face-down).
+  * loop: 10 s of the real game loop (app/runtime.py) with its serial
+    ``fps`` lines every 5 s (frame lock, missed slots, lateness, jitter, the
+    line's own print time), ``print_stats()``, then 10 s more with bump
+    sensing forced on (the IMU at 800 Hz). The screen is held on (the game
+    would turn it off face-down).
 """
 
 import gc
@@ -288,7 +290,7 @@ def bench_imu(i2c):
 
 def bench_loop(board):
     from app.runtime import Runtime
-    rt = Runtime(board)
+    rt = Runtime(board, fps_log_ms=LOOP_MS // 2)
     rt.begin()
     rt.game._keep_on = lambda: True         # screen stays on whatever the wrist does
     rt.run(max_ms=LOOP_MS)

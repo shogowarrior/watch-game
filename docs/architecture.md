@@ -139,8 +139,11 @@ stages in order:
    applies screen power (the panel wakes dark; the backlight follows
    `params.backlight` after each rendered frame), and shuts the PMU down only
    once `game.power_off`.
-6. **render** (at `params.fps_cap`): `Renderer.frame(params, display, now)`
-   composes each 240x24 strip off-screen (a map of each pixel's ring number,
+6. **render** (on the frame lock, `app/pacer.py`): frames start on an even
+   grid at the fastest of 20, 10, 8, 7, 6, 5 fps at or under `params.fps_cap`
+   that the loop's measured cost fits, and `Renderer.frame(params, display,
+   slot)` animates to the frame's slot time, so motion steps evenly (ui-spec
+   §4 rule 6). It composes each 240x24 strip off-screen (a map of each pixel's ring number,
    coloured through a 256-entry palette of byte-swapped RGB565, then glyph and
    text overlays) and
    pushes it with `display.push_strip`. Strips go top to bottom, so the panel
@@ -198,7 +201,7 @@ fallback is both short presses within 3 s in HOT.
 | What | Rate | Where |
 |---|---|---|
 | Game logic (`Game.tick`) | 10 Hz (100 ms) | `finder.tuning.LOGIC_MS` |
-| Render | 20 fps (15 in saver / low battery); a frame is about 40 ms on the watch, about 35 ms of it SPI at 26.67 MHz | `params.fps_cap`, `tuning.FPS_TARGET`, `tuning.SAVER_FPS` |
+| Render | locked to 20, 10, 8, 7, 6 or 5 fps: the fastest at or under the cap (20; 10 in saver / low battery) the loop holds; a frame is about 80 ms on the watch, about 40 ms of it SPI at 26.67 MHz; with `fps_log_ms` (main.py) a serial `fps` line every 10 s | `app.pacer`, `params.fps_cap`, `tuning.FPS_LOCKS`, `tuning.SAVER_FPS` |
 | Beacons | 10 Hz normal, 20 Hz in HOT and while scanning, 5 Hz in saver | `game.beacon_hz`, `tuning.BEACON_HZ_*` |
 | BMA423 FIFO | 100 Hz (holds 1.7 s), 800 Hz while a bump can count (holds 212 ms); drained every loop | `app.imu_feed` |
 | Motion tracker | 25 Hz | `app.runtime.IMU_OUT_HZ` |
