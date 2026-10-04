@@ -1100,6 +1100,33 @@ class UsbPMU(FakePMU):
         return not (self.unplug[0] <= self.clock.now < self.unplug[1])
 
 
+def test_second_ctrl_c_in_the_exit_drain_still_stops_the_soft_watchdog():
+    """Rule 15: Ctrl-C on USB leaves a usable REPL, even when a second one
+    lands while the exit flush drains the USB link (up to ~360 ms): an armed
+    soft watchdog would reset the watch 8 s later."""
+    fakes.install()
+    from tests.fakes.serial_port import Port
+    from hal.radio import SimRadio
+    from hal.debuglink import SerialLink
+    from app.telemetry import Telemetry
+    clock = Clock(1000)
+    rt = _watch(clock, SimRadio(MAC_A).begin())
+    rt.board.pmu = UsbPMU(clock)
+    rt.watchdog_ms = 8000
+    link = SerialLink("A", Port(clock))
+    rt.tele = Telemetry(dev="A", sink=link)
+
+    def ctrl_c():
+        raise KeyboardInterrupt
+    rt.step = link.drain = ctrl_c
+    try:
+        rt.run()
+        assert False, "no KeyboardInterrupt"
+    except KeyboardInterrupt:
+        pass
+    assert rt.wd is None
+
+
 def test_watchdog_turns_hardware_once_unplugged():
     """Started on USB: the stoppable soft watchdog. The first battery reading
     (every 10 s) without VBUS switches it, one way, to the hardware WDT."""
