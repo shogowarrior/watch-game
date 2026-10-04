@@ -25,7 +25,8 @@ the constructor). Values: JSON numbers (a float is always
 written with a "." or an exponent, so ints and floats stay apart; NaN and
 Infinity as such), {"b": "hex"} for bytes, {"@": "Class", ...fields} for
 other objects (namedtuples by field, the rest by public attribute), and
-{"@ref": "module.Class#id"} for a traced object; in "s", an array or bytearray
+{"@ref": "module.Class#id"} for an object of a TRACED class (recorded in
+this test or not); in "s", an array or bytearray
 is {"t": typecode, "n": length, "crc": CRC-32 of its bytes}. A test that fails
 under the recorder fails the run.
 
@@ -92,7 +93,7 @@ def enc(v, depth=0, deep=False):
     (arguments and results) writes a traced object's fields after its
     "@ref" too, so a replay sees what the call saw; otherwise (state) an
     array or bytearray is written as its typecode, length and CRC-32."""
-    if v is None or isinstance(v, (bool, int, float, str)):
+    if type(v) in _PLAIN or isinstance(v, (bool, int, float, str)):
         return v
     if not deep and isinstance(v, (array.array, bytearray)):
         return {"t": getattr(v, "typecode", "B"), "n": len(v), "crc": zlib.crc32(v)}
@@ -102,6 +103,8 @@ def enc(v, depth=0, deep=False):
         return [enc(x, depth, deep) for x in v]
     if isinstance(v, dict):
         return {str(k): enc(x, depth, deep) for k, x in v.items()}
+    if hasattr(v, "_fields"):
+        return _namedtuple(v, depth, deep)
     ref = _ids.get(id(v))
     if ref is not None and not deep:
         return {"@ref": ref}
@@ -111,12 +114,36 @@ def enc(v, depth=0, deep=False):
     if ref is not None:
         out["@ref"] = ref
     if depth < 2:
-        for k in (v._fields if hasattr(v, "_fields") else _public(v)):
-            out[k] = enc(getattr(v, k), depth + 1)
+        for k, x in _items(v):
+            out[k] = enc(x, depth + 1)
     return out
 
 
+_tuples = {}   # (id, depth, deep) -> (namedtuple, its encoding): a frame's RenderParams is written 3 times
+
+
+def _namedtuple(v, depth, deep):
+    key = (id(v), depth, deep)
+    hit = _tuples.get(key)
+    if hit is not None and hit[0] is v:
+        return hit[1]
+    out = {"@": type(v).__name__}
+    if depth < 2:
+        for k in v._fields:
+            out[k] = enc(getattr(v, k), depth + 1)
+    try:
+        hash(v)       # immutable all through: its encoding cannot change
+    except TypeError:
+        return out
+    if len(_tuples) > 4096:
+        _tuples.clear()
+    _tuples[key] = (v, out)
+    return out
+
+
+_PLAIN = frozenset((type(None), bool, int, float, str))
 _class_names = {}   # type -> its public slots and properties
+_names = {}         # (type, instance attribute names) -> public names, sorted
 _sigs = {}          # function -> its signature
 _ROUTINES = (types.FunctionType, types.MethodType, types.BuiltinFunctionType, types.BuiltinMethodType)
 
@@ -125,31 +152,32 @@ def _routine(v):
     return type(v) in _ROUTINES
 
 
-def _public(obj):
-    """Public attribute and property names of ``obj``, sorted."""
+def _items(obj):
+    """(name, value) of each public attribute and property of ``obj``, sorted
+    by name; one that cannot be read now (an unset slot, a property that
+    needs more state) is left out."""
     t = type(obj)
-    fixed = _class_names.get(t)
-    if fixed is None:
-        fixed = _class_names[t] = set(
-            k for c in t.__mro__ for k in list(getattr(c, "__slots__", ()))
-            + [k for k, a in c.__dict__.items() if isinstance(a, property)] if not k.startswith("_"))
-    names = set(k for k in fixed if hasattr(obj, k))
     d = getattr(obj, "__dict__", None)
-    if d:
-        names.update(k for k in d if not k.startswith("_"))
-    return sorted(names)
+    key = (t, tuple(d) if d else ())
+    names = _names.get(key)
+    if names is None:
+        fixed = _class_names.get(t)
+        if fixed is None:
+            fixed = _class_names[t] = set(
+                k for c in t.__mro__ for k in list(getattr(c, "__slots__", ()))
+                + [k for k, a in c.__dict__.items() if isinstance(a, property)] if not k.startswith("_"))
+        names = _names[key] = sorted(fixed.union(k for k in key[1] if not k.startswith("_")))
+    out = []
+    for k in names:
+        try:
+            out.append((k, getattr(obj, k)))
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 def _state(obj):
-    s = {}
-    for k in _public(obj):
-        try:
-            v = getattr(obj, k)
-        except Exception:  # noqa: BLE001 - a property that needs more state
-            continue
-        if not _routine(v):
-            s[k] = enc(v)
-    return s
+    return {k: enc(v) for k, v in _items(obj) if not _routine(v)}
 
 
 def _write(cls_key, rec):
@@ -191,15 +219,20 @@ def _bind(cls_key, fn, obj, args, kw):
     return b, [enc(x, deep=True) for x in list(b.arguments.values())[1:]]
 
 
+def _new_id(cls_key, obj):
+    n = _count[cls_key] = _count.get(cls_key, 0) + 1
+    _ids[id(obj)] = "%s#%d" % (cls_key, n)
+    _keep.append(obj)
+    return n
+
+
 def _wrap_init(cls_key, fn):
     @functools.wraps(fn)
     def init(self, *args, **kw):
         k = id(self)
         if k in _ids or _depth.get(k, 0):        # a base class's __init__, inside the outer one
             return fn(self, *args, **kw)
-        n = _count[cls_key] = _count.get(cls_key, 0) + 1
-        _ids[k] = "%s#%d" % (cls_key, n)
-        _keep.append(self)
+        n = _new_id(cls_key, self)
         b, a = _bind(cls_key, fn, self, args, kw)
         _depth[k] = 1
         try:
@@ -207,6 +240,18 @@ def _wrap_init(cls_key, fn):
         finally:
             _depth[k] = 0
         _write(cls_key, {"new": n, "a": a, "s": _changed(self)})
+    return init
+
+
+def _wrap_id(cls_key, fn):
+    """``__init__`` of a TRACED class this test does not record: the object
+    gets an id all the same, so a recorded object holding it shows it as a
+    ref, whichever classes are recorded."""
+    @functools.wraps(fn)
+    def init(self, *args, **kw):
+        if id(self) not in _ids:
+            _new_id(cls_key, self)
+        return fn(self, *args, **kw)
     return init
 
 
@@ -230,7 +275,7 @@ def _wrap(cls_key, name, fn):
     return method
 
 
-_wrappers = {}   # "module.Class" -> (class, {attr: (function, its wrapper)})
+_wrappers = {}   # "module.Class" -> (class, {attr: (function, its wrapper, when not recorded)})
 
 
 def install(outdir):
@@ -242,17 +287,18 @@ def install(outdir):
         w = {}
         for attr, fn in inspect.getmembers(cls, inspect.isfunction):   # inherited ones too
             if attr == "__init__":
-                w[attr] = (fn, _wrap_init(key, fn))
+                w[attr] = (fn, _wrap_init(key, fn), _wrap_id(key, fn))
             elif not attr.startswith("_"):
-                w[attr] = (fn, _wrap(key, attr, fn))
+                w[attr] = (fn, _wrap(key, attr, fn), fn)
         _wrappers[key] = (cls, w)
 
 
-def record(keys):
-    """Record the classes in ``keys`` (None: all) and no others."""
+def record(keys, unwrap=False):
+    """Record the classes in ``keys`` (None: all) and no others; ``unwrap``:
+    the classes as they were."""
     for key, (cls, w) in _wrappers.items():
-        for attr, (fn, wrapper) in w.items():
-            setattr(cls, attr, wrapper if keys is None or key in keys else fn)
+        for attr, (fn, wrapper, off) in w.items():
+            setattr(cls, attr, fn if unwrap else wrapper if keys is None or key in keys else off)
 
 
 # The Python tests run under the recorder by default, each with the classes it
@@ -280,7 +326,7 @@ def main(argv):
     for test, keys in plan:
         record(only if keys is None else set(keys) & only if only else set(keys))
         failed += runner.run([test])
-    record(())
+    record((), unwrap=True)
     for f in _out.values():
         f.close()
     print("trace_game: %d classes, %d objects in %s" % (len(_out), len(_ids), pos[0]))
