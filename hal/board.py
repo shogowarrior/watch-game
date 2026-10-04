@@ -28,9 +28,10 @@ never counts.
 
 Pass ``factories={"imu": fn}`` (fn(board) -> driver) to override any part.
 
-Debug mode (hal/debuglink.py): set ``board.debug`` to the joined
-``DebugLink`` before the radio is made, and the radio starts in its
-associated mode on the access point's channel (``channel`` is then unused).
+Debug mode (hal/debuglink.py): set ``board.debug`` to the link before the
+radio is made. A joined Wi-Fi ``DebugLink`` (its ``sta`` set) starts the
+radio in its associated mode on the access point's channel (``channel`` is
+then unused); the USB ``SerialLink`` leaves the radio as in normal play.
 """
 
 import machine
@@ -55,7 +56,7 @@ class Board:
         self.touch_rotation = touch_rotation
         self.default_brightness = brightness
         self.channel = channel
-        self.debug = debug        # a joined hal.debuglink.DebugLink: radio on its Wi-Fi channel
+        self.debug = debug        # hal.debuglink link; a joined ``sta``: radio on its channel
         self.factories = factories or {}
         self.errors = {}
         self._i2c0 = None
@@ -157,8 +158,9 @@ class Board:
     def _make_radio(self):
         from hal.radio import EspNowRadio, DEFAULT_CHANNEL
         # STA up, channel/txpower/pm set, ESP-NOW active
-        if self.debug is not None:          # keep the Wi-Fi connection, use its channel
-            return EspNowRadio().begin(sta=self.debug.sta)
+        sta = None if self.debug is None else self.debug.sta
+        if sta is not None:                 # Wi-Fi link: keep the connection, use its channel
+            return EspNowRadio().begin(sta=sta)
         return EspNowRadio(channel=self.channel or DEFAULT_CHANNEL).begin()
 
     # -- helpers ----------------------------------------------------------------

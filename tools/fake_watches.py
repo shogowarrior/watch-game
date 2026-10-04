@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two simulated watches that send real debug-mode datagrams (CPython host tool).
+"""Two simulated watches that send real debug-mode records (CPython host tool).
 
     python3 tools/fake_watches.py [--host 127.0.0.1] [--port 47268] [--seconds N] [--speed 1.0]
 
@@ -7,7 +7,9 @@ Runs the two-watch simulator (the sim/ world, radio and motion, one
 ``finder.game.Game`` per watch, no renderer) in real time (``speed`` times
 faster) and sends what two watches in debug mode send: per watch its events,
 the 5 Hz state record and the ``rp`` record, built by app/telemetry.py and
-sent through hal/debuglink.py's UDP sender, the same code as on the watch.
+sent through hal/debuglink.py, the same code as on the watch: UDP datagrams
+(``DebugLink``), or with ``run(serial=...)`` lines into two files
+(``SerialLink``, paced on the sim clock as on the watch).
 ``tools/debug_server.py --demo`` runs ``run()`` in a thread, so the page's
 Real watches mode can be tried with no watches.
 
@@ -35,13 +37,14 @@ from finder.game import Game, M_PAIRING  # noqa: E402
 from finder.haptic_patterns import HapticPlayer  # noqa: E402
 from finder.link import LinkMonitor, R_BAD, R_DUP  # noqa: E402
 from finder.tuning import LOGIC_MS  # noqa: E402
-from hal.debuglink import DebugLink, DEBUG_PORT  # noqa: E402
+from hal.debuglink import DebugLink, SerialLink, DEBUG_PORT  # noqa: E402
 from sim import Sim  # noqa: E402
 from sim.world import World, Walker, PI  # noqa: E402
 
 MACS = (b"\x24\x0a\xc4\x10\x00\x0a", b"\x24\x0a\xc4\x10\x00\x0b")
 DEVS = ("A", "B")
 STEP_MS = 50               # physics step; the logic runs every LOGIC_MS (100)
+FRAME_PUMPS = (38, 26, 14)  # mid-frame SerialLink pumps, ms before the step's end (12 apart)
 CONFIRM_MS = 800           # a player presses the side key this long after the runes show
 SPLIT_S = 5
 ROUTE = ((40.0, 0.0), (2.0, 0.0))   # A's walk, out and back (B stands at the origin)
@@ -53,9 +56,10 @@ BATT_MV = 3950
 
 class FakeWatch:
     """One simulated watch with what ``Telemetry.record`` reads from a
-    ``Runtime``: game, link, tx, params, screen and battery state."""
+    ``Runtime``: game, link, tx, params, screen and battery state. ``sink``
+    is its hal/debuglink.py link."""
 
-    def __init__(self, i, host, port):
+    def __init__(self, i, sink):
         self.game = Game(MACS[i])
         self.link = LinkMonitor(GAME_ID)
         self.tx = proto.Beacon(GAME_ID)
@@ -68,9 +72,8 @@ class FakeWatch:
         self.fps = 0.0
         self.batt_mv = BATT_MV
         self.batt_chg = False
-        self.sink = DebugLink(DEVS[i], host, port)
-        self.sink.open()
-        self.tele = Telemetry(cap=64, dev=DEVS[i], sink=self.sink)
+        self.sink = sink
+        self.tele = Telemetry(cap=64, dev=DEVS[i], sink=sink)
         self.tele.set_mac(MACS[i])
 
     def hear(self, t, sender, seq, rssi):
@@ -141,15 +144,29 @@ def _deliver(sim, watches, pks):
         watches[tx].tx.seq = r.sent[tx] & 0xFFFF
 
 
-def run(host="127.0.0.1", port=DEBUG_PORT, seconds=None, speed=1.0, stop=None):
+def _sink(i, host, port, serial):
+    """Watch ``i``'s link: ``SerialLink`` into ``serial[i]``, else UDP to ``host:port``."""
+    if serial is not None:
+        return SerialLink(DEVS[i], serial[i])
+    s = DebugLink(DEVS[i], host, port)
+    s.open()
+    return s
+
+
+def run(host="127.0.0.1", port=DEBUG_PORT, seconds=None, speed=1.0, stop=None, serial=None):
     """Send two watches' datagrams to ``host:port`` for ``seconds`` of watch
     time (None: until ``stop.is_set()``), ``speed`` times faster than real
-    time. Returns each watch's sender counters, by name."""
+    time. With ``serial``, two writable binary files (A's, B's; unbuffered,
+    like the watch's UART), each watch writes its records as lines into its
+    file instead, through ``SerialLink`` pumped on the sim clock as on the
+    watch: during the step's frame (``FRAME_PUMPS``, as after its strips)
+    and after the records. Returns each watch's link counters, by name."""
     a = Walker(1.0, 0.0, PI, 1.3, "A")       # held together: 1 m apart, face to face
     b = Walker(0.0, 0.0, 0.0, 1.3, "B")
     world = World(a, b)
     sim = Sim(world, "typical", 1)
-    watches = (FakeWatch(0, host, port), FakeWatch(1, host, port))
+    watches = (FakeWatch(0, _sink(0, host, port, serial)),
+               FakeWatch(1, _sink(1, host, port, serial)))
     games = (watches[0].game, watches[1].game)
     t = 0
     t0 = time.monotonic()
@@ -160,9 +177,14 @@ def run(host="127.0.0.1", port=DEBUG_PORT, seconds=None, speed=1.0, stop=None):
         pks = sim.step(STEP_MS / 1000.0)
         t += STEP_MS
         _deliver(sim, watches, pks)
+        for dt in FRAME_PUMPS:
+            for w in watches:
+                w.sink.pump(t - dt)
         if t % LOGIC_MS == 0:
             for i in (0, 1):
                 watches[i].tick(t, sim.motion(i))
+        for w in watches:
+            w.sink.pump(t)
         ahead = t / 1000.0 / speed - (time.monotonic() - t0)
         if ahead > 0:
             if stop is not None:

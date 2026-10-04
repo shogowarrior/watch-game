@@ -59,8 +59,11 @@ touch and radio drivers count their own bus errors (``touch_errors``,
 
 Telemetry (app/telemetry.py) runs after the haptic stage: a state record at
 5 Hz, events as they happen. In debug mode its ``sink`` sends them to the laptop,
-from that 5 Hz record only (never from the render stage); ``begin`` gives it
-the radio's MAC, and ``stats()`` shows the sink's counters (``debug_stats``).
+from that 5 Hz record only (never from the render stage), and the sink's
+``pump`` runs once per pass and after every strip (the USB link writes what
+the UART's FIFO has room for, so it never stalls the loop and keeps up while
+a frame renders); ``begin`` gives it the radio's MAC, and ``stats()`` shows
+the sink's counters (``debug_stats``).
 
 With ``watchdog_ms`` (main.py: 8000) ``run`` feeds hal/watchdog.py once per
 pass: the stoppable soft watchdog while on USB, switched once to the ESP32
@@ -118,8 +121,9 @@ _NO_EVENTS = ()
 
 class _HapticDisplay:
     """Display proxy for the renderer: services the motor after each strip,
-    so pulse edges stay within one strip (~4 ms) of schedule mid-frame, and
-    samples touch after every 2nd strip (~8 ms apart)."""
+    so pulse edges stay within one strip (~4 ms) of schedule mid-frame,
+    samples touch after every 2nd strip (~8 ms apart) and pumps the debug
+    sink after each strip."""
 
     def __init__(self, rt, display):
         self.rt = rt
@@ -132,6 +136,9 @@ class _HapticDisplay:
         rt._stage_haptic(t)
         if y0 // h & 1 and rt.touch is not None:
             rt._sample_touch(t)
+        tl = rt.tele
+        if tl is not None and tl.sink is not None:
+            tl.sink.pump(rt.clock())    # USB: refill the UART's FIFO mid-frame
 
 
 class Runtime:
@@ -379,6 +386,9 @@ class Runtime:
             if tl.due(now):
                 tl.record(now, self)
             tl.flush(now)
+            sk = tl.sink
+            if sk is not None:
+                sk.pump(self.clock())   # USB: the FIFO's room now (record and flush took time)
             a = self._acc(S_TELE, a)
         self._t_input = ticks_add(now, INPUT_MS)
         if ticks_diff(now, self._t_gc) >= GC_PERIOD_MS:

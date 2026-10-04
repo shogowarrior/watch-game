@@ -1,11 +1,12 @@
-"""hal/debuglink.py on the fake ``network`` and ``socket``, and main.py's
-debug switch (/debug present, secrets.py missing, a failed join: the game
-then plays normally). No test uses real Wi-Fi; the Wi-Fi name and password
-here are made up."""
+"""hal/debuglink.py on the fake ``network``, ``socket`` and USB serial port,
+and main.py's debug switch (/debug present, USB or Wi-Fi, secrets.py
+missing, a failed join: the game then plays normally). No test uses real
+Wi-Fi or a real serial port; the Wi-Fi name and password here are made up."""
 
 import sys
 
 from tests import Skip, fakes
+from tests.fakes.serial_port import LINE_FIFO, LINE_RATE, Port
 
 fakes.install()
 from hal import debuglink as dl  # noqa: E402  (import failure must FAIL, not skip)
@@ -95,17 +96,20 @@ def _wlans(network):
 # ---- files ---------------------------------------------------------------------------
 def test_read_config_defaults_and_errors():
     d = _tmpdir()
-    c, _ = _files(d, '{"dev": "B", "host": "192.168.1.23", "port": 5000}')
+    c, _ = _files(d, '{"dev": "B", "link": "wifi", "host": "192.168.1.23", "port": 5000}')
     try:
-        assert dl.read_config(c) == {"dev": "B", "host": "192.168.1.23", "port": 5000}
-        _write(c, '{"dev": "A"}')
-        assert dl.read_config(c) == {"dev": "A", "host": None, "port": dl.DEBUG_PORT}
-        _write(c, "dev=A")
-        try:
-            dl.read_config(c)
-            assert False, "not JSON accepted"
-        except ValueError:
-            pass
+        assert dl.read_config(c) == {"dev": "B", "link": "wifi", "host": "192.168.1.23",
+                                     "port": 5000}
+        _write(c, '{"dev": "A"}')                  # no link: USB
+        assert dl.read_config(c) == {"dev": "A", "link": "usb", "host": None,
+                                     "port": dl.DEBUG_PORT}
+        for bad in ("dev=A", '{"dev": "A", "link": "bluetooth"}'):
+            _write(c, bad)
+            try:
+                dl.read_config(c)
+                assert False, bad
+            except ValueError:
+                pass
         _rm(c)
         try:
             dl.read_config(c)
@@ -136,7 +140,7 @@ def test_read_secrets_never_quotes_the_file():
             dl.read_secrets(s)
             assert False, "missing secrets accepted"
         except ValueError as e:
-            assert "deploy.py --debug" in str(e)
+            assert "tools/deploy.py --debug A --wifi" in str(e), e
     finally:
         _clean(d)
 
@@ -358,7 +362,210 @@ def test_no_socket_module_is_a_reason():
         restore()
 
 
+# ---- USB serial ----------------------------------------------------------------------
+def _rec(n, tag="x"):
+    """A compact JSON record of exactly ``n`` bytes (from 18 + len(tag))."""
+    return '{"ev":"%s","pad":"%s"}' % (tag, "y" * (n - 18 - len(tag)))
+
+
+def _port(clock):
+    """A fake USB port whose writes are stamped with ``clock[0]``."""
+    return Port(lambda: clock[0])
+
+
+def test_serial_frames_each_record_as_one_line():
+    """0x1E, the JSON as UTF-8, then \\n (RFC 7464), for str and bytes alike;
+    nothing is written before a pump."""
+    port = Port()
+    link = dl.SerialLink("B", port)
+    assert link.send('{"ev":"s","t":1}') and link.send(b'{"ev":"btn"}')
+    assert link.send('{"ev":"crash","e":"\u00e9"}')
+    want = b'\x1e{"ev":"s","t":1}\n\x1e{"ev":"btn"}\n\x1e{"ev":"crash","e":"\xc3\xa9"}\n'
+    assert port.writes == [] and link.queued == len(want) and link.n_tx == 0
+    link.pump(0)
+    assert port.data() == want
+    assert link.stats() == {"dev": "B", "link": "usb", "tx": 3, "drop": 0, "queued": 0,
+                            "tx_err": 0, "err": None}
+    assert (link.sta, link.channel, link.rp_ms) == (None, None, 1000)
+    assert dl.SerialLink().out is sys.stdout.buffer       # the REPL's UART on the watch
+
+
+def test_serial_pieces_fill_whole_fifo_loads():
+    """Pieces of at most 128 bytes, cut once in ``send`` every 128 bytes of
+    the queued stream: a pass that finds the FIFO empty writes all 128 bytes,
+    across records too, and each record arrives as one intact line."""
+    clock = [0]
+    port = _port(clock)
+    link = dl.SerialLink("A", port)
+    a, b = _rec(200, "a"), _rec(300, "b")          # 202 and 302 bytes framed
+    assert link.send(a) and link.send(b)
+    loads = []
+    while link.queued:
+        clock[0] += 20                             # a loop pass every 20 ms
+        k = len(port.writes)
+        link.pump(clock[0])
+        loads.append(sum([len(w[0]) for w in port.writes[k:]]))
+    assert loads == [128, 128, 128, 120], loads
+    assert max([len(w[0]) for w in port.writes]) <= LINE_FIFO
+    assert port.data().split(b"\n") == [b"\x1e" + a.encode(), b"\x1e" + b.encode(), b""]
+    assert link.n_tx == 2
+
+
+def test_serial_pump_never_writes_more_than_the_fifo_has_room_for():
+    """A 4 KB backlog pumped at even and uneven passes: no write ever
+    overfills the 115200-baud line's FIFO (128 bytes, 11.52 bytes per ms),
+    and pumped every ms the backlog drains at about that rate."""
+    sizes = (411, 664, 70, 411, 63, 411)
+    for steps in ((1,), (1, 5, 3, 17, 2, 9, 30, 4, 12)):
+        clock = [1000]
+        port = _port(clock)
+        link = dl.SerialLink("A", port)
+        n = 0
+        while link.send(_rec(sizes[n % len(sizes)], "r%d" % n)):
+            n += 1
+        total = link.queued
+        assert link.drop == 1 and total > dl.SERIAL_QMAX - 664
+        j = 0
+        while link.queued:
+            link.pump(clock[0])
+            clock[0] += steps[j % len(steps)]
+            j += 1
+        assert port.overfill() is None, steps
+        assert len(port.data()) == total and link.n_tx == n
+        if steps == (1,):
+            t0 = port.writes[0][1]
+            first = sum([len(w[0]) for w in port.writes if w[1] == t0])
+            rate = (total - first) / (port.writes[-1][1] - t0)
+            assert 10.0 <= rate <= LINE_RATE, rate
+
+
+def test_serial_pump_runs_across_the_tick_wrap():
+    """``ticks_ms`` wraps at 2**30: the FIFO's room keeps refilling across it."""
+    port = Port()
+    link = dl.SerialLink("A", port)
+    for i in range(4):
+        link.send(_rec(411, "w%d" % i))
+    t = (1 << 30) - 50
+    for _ in range(20):                            # 13 passes of 128 bytes are enough
+        link.pump(t)
+        t = (t + 20) & ((1 << 30) - 1)
+    assert link.queued == 0 and link.n_tx == 4
+
+
+def test_serial_drops_whole_records_past_the_queue_limit():
+    port = Port()
+    link = dl.SerialLink("A", port)
+    n = 0
+    while link.queued + 413 <= dl.SERIAL_QMAX:
+        assert link.send(_rec(411, "k%d" % n))
+        n += 1
+    q = link.queued
+    assert not link.send(_rec(411, "lost"))        # would leave more than SERIAL_QMAX waiting
+    assert link.drop == 1 and link.queued == q
+    assert link.send(_rec(dl.SERIAL_QMAX - q - 2, "fits"))
+    assert link.queued == dl.SERIAL_QMAX
+    link.drain()
+    data = port.data()
+    assert b"lost" not in data and b"fits" in data and data.count(b"\n") == n + 1
+    assert not link.send(_rec(dl.SERIAL_QMAX, "huge")) and link.drop == 2   # never fits
+    for _ in range(dl.SERIAL_SLOTS):               # tiny records run out of piece slots
+        assert link.send("{}")
+    assert not link.send("{}") and link.drop == 3 and link.stats()["drop"] == 3
+
+
+def test_serial_drain_writes_out_everything_at_once():
+    """Loop exit and power off: what waits goes out now (waiting on the port
+    is fine then), so the last records, such as ``crash``, reach the laptop."""
+    port = Port()
+    link = dl.SerialLink("A", port)
+    for i in range(3):
+        link.send(_rec(411, "r%d" % i))
+    link.pump(0)
+    assert len(port.data()) == dl.SERIAL_FIFO and link.n_tx == 0
+    link.drain()
+    assert len(port.data()) == 3 * 413 and link.n_tx == 3 and link.queued == 0
+
+
+def test_serial_write_errors_are_counted_and_tried_again():
+    """A file that refuses a write (the fake watches' closed pty) never stops
+    the game: counted in ``tx_err``, the piece goes on the next pass."""
+    class Flaky(Port):
+        fails = 1
+
+        def write(self, b):
+            if self.fails:
+                self.fails -= 1
+                raise OSError(5)                   # EIO
+            return Port.write(self, b)
+    port = Flaky()
+    link = dl.SerialLink("A", port)
+    link.send('{"ev":"s"}')
+    link.pump(0)
+    assert link.tx_err == 1 and isinstance(link.err, OSError) and link.queued == 12
+    link.pump(20)
+    assert port.data() == b'\x1e{"ev":"s"}\n' and link.n_tx == 1 and link.queued == 0
+    assert link.stats()["tx_err"] == 1
+
+
+def test_serial_pump_allocates_nothing():
+    """``pump`` runs every loop pass: on MicroPython it must not allocate."""
+    import gc
+    if not hasattr(gc, "mem_alloc"):
+        raise Skip("needs MicroPython gc.mem_alloc")
+
+    class Port:
+        """Counts what it is given; allocates nothing."""
+
+        def __init__(self):
+            self.n = 0
+
+        def write(self, b):
+            self.n += len(b)
+            return len(b)
+    port = Port()
+    link = dl.SerialLink("A", port)
+    while link.send(_rec(411)):
+        pass
+    total = link.queued
+    gc.collect()
+    gc.disable()
+    try:
+        a0 = gc.mem_alloc()
+        t = 0
+        while t < 1000:
+            link.pump(t)
+            t += 3
+        used = gc.mem_alloc() - a0
+    finally:
+        gc.enable()
+    assert port.n == total and link.queued == 0, (port.n, total)
+    assert used <= 64, used
+
+
 # ---- start (main.py) -----------------------------------------------------------------
+def test_start_usb_needs_no_wifi_and_no_secrets():
+    """USB (``link`` usb, or no ``link``): a ``SerialLink`` at once and a
+    message that says what to run on the laptop; /secrets.py is never read
+    and the Wi-Fi is never touched."""
+    d = _tmpdir()
+    network = _ap()
+    made, restore = _wlans(network)
+    real = dl.read_secrets
+    reads = []
+    dl.read_secrets = reads.append
+    try:
+        for cfg in ('{"dev": "B"}', '{"dev": "B", "link": "usb", "host": "192.168.1.23"}'):
+            c, s = _files(d, cfg, _secrets())
+            link, msg = dl.start(c, s)
+            assert isinstance(link, dl.SerialLink) and link.dev == "B" and link.sta is None
+            assert msg == dl.USB_MSG % "B" and "python3 tools/debug_server.py --serial" in msg
+    finally:
+        dl.read_secrets = real
+        restore()
+        _clean(d)
+    assert reads == [] and made == []
+
+
 def test_start_without_debug_file_is_silent():
     d = _tmpdir()
     c, s = _files(d)
@@ -374,7 +581,7 @@ def test_start_paths_say_why_and_never_show_the_secrets():
     nap = lambda ms: None
     try:
         _ap(channel=11)
-        c, s = _files(d, '{"dev": "B", "host": "192.168.1.23", "port": 47268}')
+        c, s = _files(d, '{"dev": "B", "link": "wifi", "host": "192.168.1.23", "port": 47268}')
         link, msg = dl.start(c, s, sleep=nap)                     # no secrets.py
         assert link is None and "secrets.py is not on the watch" in msg
         assert msg.endswith("Playing normally.")
@@ -389,7 +596,7 @@ def test_start_paths_say_why_and_never_show_the_secrets():
         _write(c, "[1, 2]")
         link, msg = dl.start(c, s, sleep=nap)
         assert link is None and "/debug is not valid" in msg
-        _write(c, '{"dev": "B", "host": "192.168.1.23"}')
+        _write(c, '{"dev": "B", "link": "wifi", "host": "192.168.1.23"}')
         _write(s, _secrets())
         link, msg = dl.start(c, s, sleep=nap)
         assert link is not None and link.dev == "B" and link.channel == 11
@@ -405,7 +612,7 @@ def test_start_paths_say_why_and_never_show_the_secrets():
 
 def test_start_open_failure_leaves_the_wifi():
     d = _tmpdir()
-    c, s = _files(d, '{"dev": "A", "host": "192.168.1.23"}', _secrets())
+    c, s = _files(d, '{"dev": "A", "link": "wifi", "host": "192.168.1.23"}', _secrets())
     _ap()
     unhide = _hide_socket()
     import network
@@ -456,6 +663,10 @@ def _run_main(config, secrets, ap_key=PW, tele=None, start=None):
     fake_app.__path__ = sys.modules["app"].__path__
     fake_app.run = lambda board, **kw: calls.append((board, kw))
     out = io.StringIO()
+    try:
+        out.buffer = io.BytesIO()              # CPython: the USB link's port (SerialLink)
+    except AttributeError:
+        pass                                   # MicroPython keeps its own sys.stdout
 
     def _print(*a, **k):                       # main.py's own prints (MicroPython has no
         k["file"] = out                        # settable sys.stdout)
@@ -489,9 +700,42 @@ def _run_main(config, secrets, ap_key=PW, tele=None, start=None):
     return board, kw, out.getvalue()
 
 
+def test_main_usb_debug_plays_normally_and_sends_on_the_port():
+    """``--debug B`` (USB): the game starts with the normal radio, its records
+    go to the USB link, and /secrets.py is never read nor the Wi-Fi joined."""
+    import json
+    fakes.install()
+    import network
+    made, restore = _wlans(network)
+    real = dl.read_secrets
+    reads = []
+    dl.read_secrets = reads.append
+    try:
+        board, kw, out = _run_main('{"dev": "B", "link": "usb"}', _secrets())
+    finally:
+        dl.read_secrets = real
+        restore()
+    link = board.debug
+    assert isinstance(link, dl.SerialLink) and link.dev == "B"
+    assert dl.USB_MSG % "B" in out, out
+    r = board.radio                                # as in normal play
+    assert not r.associated and r.channel == 6 and r._e.active()
+    assert reads == [] and made and [w for w in made if w._ssid is not None] == []
+    tl = kw["telemetry"]
+    assert tl.sink is link and tl.dev == "B" and tl.path is None and tl.cap <= 64
+    port = Port()
+    link.out = port
+    tl.event(5, "btn", ("kind", "short"))
+    tl.flush(force=True)                           # loop exit: what waits goes out
+    line = port.data()
+    assert line[:1] == b"\x1e" and line[-1:] == b"\n" and b" " not in line, line
+    assert json.loads(line[1:-1]) == {"t": 5, "ev": "btn", "kind": "short", "dev": "B",
+                                      "mac": None}
+
+
 def test_main_debug_mode_joins_first_and_sends_telemetry():
-    board, kw, out = _run_main('{"dev": "B", "host": "192.168.1.23", "port": 47268}',
-                               _secrets())
+    board, kw, out = _run_main('{"dev": "B", "link": "wifi", "host": "192.168.1.23", '
+                               '"port": 47268}', _secrets())
     link = board.debug
     assert link is not None and link.dev == "B"
     assert "debug mode: watch B sends to 192.168.1.23:47268 on Wi-Fi channel 13" in out
@@ -504,7 +748,7 @@ def test_main_debug_mode_joins_first_and_sends_telemetry():
 
 
 def test_main_without_secrets_plays_normally():
-    board, kw, out = _run_main('{"dev": "A", "host": "192.168.1.23"}', None)
+    board, kw, out = _run_main('{"dev": "A", "link": "wifi", "host": "192.168.1.23"}', None)
     assert "debug mode off: secrets.py is not on the watch" in out and "Playing normally." in out
     assert board.debug is None and kw == {}
     r = board.radio
@@ -512,7 +756,7 @@ def test_main_without_secrets_plays_normally():
 
 
 def test_main_failed_join_plays_normally():
-    board, kw, out = _run_main('{"dev": "A", "host": "192.168.1.23"}', _secrets(),
+    board, kw, out = _run_main('{"dev": "A", "link": "wifi", "host": "192.168.1.23"}', _secrets(),
                                ap_key="the-real-one")
     assert "debug mode off: could not join the Wi-Fi in" in out and "Playing normally." in out
     assert PW not in out and "the-real-one" not in out
@@ -529,7 +773,7 @@ def test_main_without_debug_file_says_nothing():
 def test_main_unquoted_password_plays_normally():
     """``WIFI_PASSWORD = 12345678`` (no quotes) once made WLAN.connect raise
     TypeError past main.py's debug switch, and the game never started."""
-    board, kw, out = _run_main('{"dev": "A", "host": "192.168.1.23"}',
+    board, kw, out = _run_main('{"dev": "A", "link": "wifi", "host": "192.168.1.23"}',
                                "WIFI_SSID = %r\nWIFI_PASSWORD = 12345678\n" % SSID)
     assert "debug mode off: put the Wi-Fi name and password in quotes" in out, out
     assert "Playing normally." in out and "12345678" not in out and "crashed" not in out
@@ -543,7 +787,8 @@ def test_main_unexpected_debug_error_plays_normally():
     type is printed, never its text)."""
     def start():
         raise RuntimeError("Wifi Unknown Error 0x3001 " + PW)
-    board, kw, out = _run_main('{"dev": "A", "host": "192.168.1.23"}', _secrets(), start=start)
+    board, kw, out = _run_main('{"dev": "A", "link": "wifi", "host": "192.168.1.23"}', _secrets(),
+                               start=start)
     assert "debug mode off: it could not start (RuntimeError). Playing normally." in out, out
     assert PW not in out and "crashed" not in out
     assert board.debug is None and kw == {}
@@ -554,11 +799,13 @@ def test_main_unexpected_debug_error_plays_normally():
 def test_main_tele_and_debug_log_under_one_name():
     """/tele (an older ``--tele A``) and /debug (``--debug B``) disagree: the
     file name and every record use the /debug name, and it says so."""
-    board, kw, out = _run_main('{"dev": "B", "host": "192.168.1.23"}', _secrets(), tele="A")
+    board, kw, out = _run_main('{"dev": "B", "link": "wifi", "host": "192.168.1.23"}', _secrets(),
+                               tele="A")
     tl = kw["telemetry"]
     assert tl.path.endswith("_B.jsonl") and tl.dev == "B" and tl.sink is board.debug, tl.path
     assert "telemetry: /tele says A but /debug says B; logging as B" in out, out
-    board, kw, out = _run_main('{"dev": "B", "host": "192.168.1.23"}', _secrets(), tele="B")
+    board, kw, out = _run_main('{"dev": "B", "link": "wifi", "host": "192.168.1.23"}', _secrets(),
+                               tele="B")
     assert kw["telemetry"].path.endswith("_B.jsonl") and "telemetry:" not in out
     board, kw, out = _run_main(None, None, tele="A")        # field test only: as before
     tl = kw["telemetry"]
