@@ -26,7 +26,8 @@ if HAVE_FB:
     from ui.renderer import FrameCapture
     from ui.themes import ThemedRenderer
     from ui.themes import tide as TD
-    from ui.themes.base import M_FOUND, M_LISTEN, M_LIVE, NS, SH, _disc, theme_luts
+    from ui.themes.base import (ALL, DT_MAX, M_FOUND, M_LISTEN, M_LIVE, NS, SH, WAKE_MS, _disc,
+                                theme_luts)
 
 W = 240
 ROW = 480
@@ -67,6 +68,24 @@ def _y(level):
     return int(W * (1.0 - level) + 0.5)
 
 
+def _pristine(th):
+    """The theme's index map without the disc stack, as a full 240x240 map:
+    the framebuf path keeps it (``map0``); the viper path keeps only the half
+    maps (row y < 120 is ``qt0`` row y, row y >= 120 ``qb0`` row 239 - y, each
+    the right half, mirrored)."""
+    if th.map0 is not None:
+        return bytearray(th.map0)
+    m = bytearray(W * W)
+    for y in range(W):
+        src = th.qt0 if y < 120 else th.qb0
+        o = (y if y < 120 else 239 - y) * 120
+        for x in range(120):
+            v = src[o + x]
+            m[y * W + 120 + x] = v
+            m[y * W + 119 - x] = v
+    return m
+
+
 def _changed_rows(prev, cur):
     rows = []
     mp = memoryview(prev)
@@ -99,6 +118,8 @@ def test_tokens_match_spec():
 # ---- tables (MicroPython: the module imports the renderer) ------------------------------
 def test_tables():
     _need_fb()
+    for _ in TD.load():                        # idempotent: tables already built are kept
+        pass
     for b, lv in P["levels"].items():
         assert TD.LEVEL_Y[b] == int(W * (1 - lv) * 256 + 0.5), b
     assert TD.Y_FOUND == int(W * (1 - P["level_found"]) * 256 + 0.5)
@@ -109,6 +130,8 @@ def test_tables():
         assert TD.WAVE_V[z] == 14 + 12 * z
         assert TD.SWELL_Q[z] == int((5 + 3 * z) * 256 + 0.5)
         assert TD.BUB_N[z] == 2 + 2 * z and TD.BUB_V[z] == 22 + 12 * z
+    # one entry per ms of frame time up to DT_MAX (Theme.clock clamps dt there)
+    assert len(TD.EASE_K) == DT_MAX + 1, len(TD.EASE_K)
     for d in (1, 50, 100, 250):
         assert abs(TD.EASE_K[d] - 256 * (1 - math.exp(-d / 450.0))) <= 1, d
     assert TD.SWX[0] == 256 and abs(TD.SWX[30] - 256 * math.exp(-240 / 240.0)) <= 1
@@ -198,9 +221,27 @@ def test_wake_snaps_level():
     cap = FrameCapture()
     _run(r, cap, [(0, rs.hunt(0, dist_band="~40"))], 1000)
     # a gap longer than WAKE_MS: the next frame is the current state, no easing
-    r.frame(rs.make_params(t_ms=rt.T0 + 2000, **rs.hunt(3, dist_band="<3")), cap, rt.T0 + 2000)
+    t = 1000 + WAKE_MS + 1
+    r.frame(rs.make_params(t_ms=rt.T0 + t, **rs.hunt(3, dist_band="<3")), cap, rt.T0 + t)
     assert r.theme.ypx == _y(0.86), r.theme.ypx
-    assert r.theme.dirty == (1 << NS) - 1
+    assert r.theme.dirty == ALL
+
+
+def test_missed_slot_eases_dt_max():
+    # a gap between DT_MAX and WAKE_MS (a missed slot at the 5 fps lock is
+    # 400 ms) is no wake: the level eases by DT_MAX of its time constant
+    _need_fb()
+    r = ThemedRenderer("tide", overlays=False)
+    cap = FrameCapture()
+    _run(r, cap, [(0, rs.hunt(0, dist_band="~40"))], 1000)
+    y0 = r.theme.yq
+    y1 = TD.LEVEL_Y["<3"]
+    t = 1000 + 400
+    r.frame(rs.make_params(t_ms=rt.T0 + t, **rs.hunt(3, dist_band="<3")), cap, rt.T0 + t)
+    th = r.theme
+    assert not th.wake and th.dt == DT_MAX, (th.wake, th.dt)
+    assert th.yq == y0 + (((y1 - y0) * TD.EASE_K[DT_MAX]) >> 8), (th.yq, y0, y1)
+    assert th.dirty == ALL                          # the surface row moved: palette rebuilt
 
 
 def test_swell_locked_to_ring_spawn():
@@ -299,10 +340,11 @@ def test_listening_drip():
         if not sides or sides[-1][1] != x1:
             sides.append((t1, x1))
     # one drop every drip_ms, alternating sides (each first shows once its
-    # head clears the top edge, which depends on its landing row: +-2 frames)
-    assert len(sides) >= 2, sides
-    assert abs(sides[1][0] - sides[0][0] - P["drip_ms"]) <= 200, sides
-    assert sides[0][1] + sides[1][1] == W - 1, sides
+    # head clears the top edge, which depends on its landing row: +-2 frames;
+    # the first one starts half-way through its fall)
+    assert len(sides) >= 3, sides
+    assert abs(sides[2][0] - sides[1][0] - P["drip_ms"]) <= 200, sides
+    assert sides[0][1] + sides[1][1] == W - 1 and sides[2][1] == sides[0][1], sides
 
 
 def test_found_gold_glassy_shimmer_band():
@@ -376,7 +418,7 @@ def test_calm_moments_redraw_few_strips():
 def test_blit_matches_framebuf_path():
     # the viper half-map kernel (32-bit ports with viper) or the framebuf
     # palette blit must equal a straight palette blit of the full map with the
-    # disc stack drawn on it as Theme.draw_discs draws it (four quadrants)
+    # disc stack drawn on it as base._disc draws it (four quadrants)
     _need_fb()
     r = ThemedRenderer("tide", overlays=False)
     cap = FrameCapture()
@@ -387,7 +429,7 @@ def test_blit_matches_framebuf_path():
         _, phases, _ = rt.fixture(fx)
         _run(r, cap, phases, ms)
         th = r.theme
-        m = bytearray(th.map0 if th.map0 is not None else th.idx)
+        m = _pristine(th)
         mfb = framebuf.FrameBuffer(m, W, W, framebuf.GS8)
         for i in range(TD.NL):
             if th.lay[i] > 0:
@@ -400,7 +442,9 @@ def test_blit_matches_framebuf_path():
     assert th.kind in ("viper", "framebuf"), th.kind
     assert seen[1] and seen[2] and seen[3] and seen[4], seen   # fill, rim, iris, core dot
     # the map is left-right symmetric (the kernel mirrors it)
-    m = th.idx
+    m = th.map0
+    if m is None:
+        return                                      # the half maps are symmetric by design
     for y in (0, 37, 119, 120, 201, 239):
         for x in range(0, 120, 7):
             assert m[y * W + x] == m[y * W + 239 - x], (x, y)
@@ -482,3 +526,181 @@ def test_fast_bubbles_leave_a_trail():
 
         _run(r, cap, [(0, rs.hunt(z, dist_band=band))], 3000, each=each)
         assert (trails[0] > 10) == want, (z, trails)
+
+
+def test_viper_path_drops_the_full_map():
+    # the kernel reads only the two half maps and _burn draws into them, so
+    # the full 57.6 KB map and its framebuf go once the kernel agrees; the
+    # framebuf path keeps the full map and its pristine copy
+    _need_fb()
+    r = ThemedRenderer("tide", overlays=False)
+    th = r.theme
+    if th.kind == "viper":
+        assert th.idx is None and th.map_fb is None and th.map0 is None
+        assert len(th.qt0) == 120 * 120 and len(th.qb0) == 120 * 120
+    else:
+        assert th.kind == "framebuf", th.kind
+        assert len(th.idx) == W * W and th.map0 is not None and th.qt is None
+    cap = FrameCapture()
+    for fx in ("hot", "pairing_calibrate", "found_result"):
+        _, phases, run_ms = rt.fixture(fx)
+        _run(r, cap, phases, run_ms)               # every path still draws (no idx needed)
+
+
+def _menu_scenario(under, cap, until=4000):
+    """Ripple under ``under``, the MENU over it from 1100 ms (its params carry
+    no band, as the game's), tide chosen in the MENU at 1500 ms, the MENU
+    closed at 2600 ms; (t, ypx, sw, mom, dirty) of every tide frame."""
+    r = ThemedRenderer("ripple", overlays=False)
+    menu = dict(under, screen="MENU", sub="1v", menu_rows=rs.MENU_ROWS, dist_band=None,
+                word=None, top_text=None, glyph="glow", speed_px_s=80)
+    out = []
+    for t in range(0, until + 1, 100):
+        kw = menu if 1100 <= t < 2600 else under
+        if t == 1500:
+            r.set_theme("tide")
+        r.frame(rs.make_params(t_ms=rt.T0 + t, **kw), cap, rt.T0 + t)
+        th = r.theme
+        if th.name == "tide":
+            out.append((t, th.ypx, th.sw, th.mom, th.dirty))
+    return out
+
+
+def test_theme_made_in_the_menu():
+    # §4A rule 2: a theme chosen in the MENU starts in the moment and at the
+    # level of the screen under it, so the water neither eases nor swells
+    # when the MENU closes
+    _need_fb()
+    cap = FrameCapture()
+    found = dict(rs._found, sub="result", word="TAP=AGAIN")
+    for under, want_y, want_m in ((found, _y(0.92), M_FOUND),
+                                  (rs.hunt(3, dist_band="<3"), _y(0.86), M_LIVE),
+                                  (rs.hunt(0, dist_band="~40"), _y(0.38), M_LIVE)):
+        rows = _menu_scenario(under, cap)
+        assert rows[0][0] == 1500
+        for t, ypx, sw, mom, _ in rows:
+            assert ypx == want_y and mom == want_m, (under["screen"], t, ypx, mom)
+            if want_m == M_FOUND:
+                assert sw == 0, (t, sw)                 # FOUND is settled: no swell
+
+
+def test_wake_shows_found_settled_unless_burst():
+    _need_fb()
+    r = ThemedRenderer("tide", overlays=False)
+    cap = FrameCapture()
+    # FOUND entered on a wake whose params carry the burst: the entry, so it swells
+    _, phases, _ = rt.fixture("found_celebrate")
+    sw = []
+    _run(r, cap, phases, 500, each=lambda t, rr: sw.append(rr.theme.sw))
+    assert sw[0] == TD.FOUND_SWELL and 0 < sw[-1] < sw[0], sw
+    # a wake half-way through the swell (a 700 ms gap): shown settled, no catch-up
+    _run(r, cap, [(0, rs.hunt(3, dist_band="<3"))], 500)
+    found = dict(rs._found, sub="result", word="TAP=AGAIN")
+    _run(r, cap, [(0, found)], 300, t0=600, reset=False)
+    assert r.theme.sw > 0, r.theme.sw                 # the swell is under way
+    r.frame(rs.make_params(t_ms=rt.T0 + 1600, **found), cap, rt.T0 + 1600)
+    assert r.theme.wake and r.theme.sw == 0, (r.theme.wake, r.theme.sw)
+    r.frame(rs.make_params(t_ms=rt.T0 + 1700, **found), cap, rt.T0 + 1700)
+    assert r.theme.sw == 0
+
+
+def test_drop_is_never_behind_the_lens():
+    # PAIRING looking has the largest listening lens (iris 92, rim to 95);
+    # the drop falls and its droplets land outside it, on screen, every cycle
+    _need_fb()
+    r = ThemedRenderer("tide", overlays=False)
+    cap = FrameCapture()
+    _, phases, _ = rt.fixture("pairing_looking")
+    seen = [0, 0]                                     # falling frames, splash frames
+
+    def each(t, rr):
+        th = rr.theme
+        if t < 600:                                   # the iris opens
+            return
+        assert th.lr >= 95, th.lr
+        o = 4 * TD.B_DROP
+        c = th.dclk % TD.DRIP_MS
+        if c < TD.FALL_MS:
+            if th.dsy - 3 >= 0:                       # the head is on screen
+                assert th.box[o + 3] >= 0, (t, th.dsx, th.dsy, "hidden")
+                seen[0] += 1
+        elif c - TD.FALL_MS < TD.SPLASH_MS:
+            for k in range(2):
+                ob = o + 4 + 4 * k
+                assert th.box[ob + 3] >= 0, (t, k, "droplet hidden")
+                assert 0 <= th.box[ob] and th.box[ob] + 2 <= W - 1, (t, k, th.box[ob])
+            seen[1] += 1
+
+    _run(r, cap, phases, 6500, each=each)
+    assert seen[0] >= 20 and seen[1] >= 8, seen
+
+
+def test_fresh_theme_shows_the_drop():
+    # a fresh theme starts half-way through a fall, so the listening drop is
+    # on screen at once and in the previews (searching and link_lost, captured
+    # on their last frame)
+    _need_fb()
+    r = ThemedRenderer("tide", overlays=False)
+    cap = FrameCapture()
+    o = 4 * TD.B_DROP
+    for fx in ("searching", "link_lost"):
+        _, phases, run_ms = rt.fixture(fx)
+        first = []
+        _run(r, cap, phases, run_ms,
+             each=lambda t, rr: first.append(rr.theme.box[o + 3]) if t == 0 else None)
+        th = r.theme
+        assert first[0] >= 0, (fx, "no drop on the first frame")
+        assert th.box[o + 3] >= 0 and 0 <= th.dsy < W, (fx, th.dsy, list(th.box[o:o + 4]))
+
+
+def test_frozen_menu_reports_nothing():
+    # once the MENU's dim has settled nothing moves, so no strip is dirty:
+    # over the live water (bubbles), FOUND (shimmer) and listening (the drop)
+    _need_fb()
+    cap = FrameCapture()
+    menu = dict(rs._menu, sub="1v", menu_rows=rs.MENU_ROWS)
+    found = dict(rs._found, sub="result", word="TAP=AGAIN")
+    for under in (rs.hunt(3, dist_band="~5"), found, rt._kw("searching"),
+                  rt._kw("pairing_looking")):
+        r = ThemedRenderer("tide", overlays=False)
+        phases = [(0, under), (1000, dict(menu, ramp=under.get("ramp", "green")))]
+        prev = bytearray(W * W * 2)
+        seen = []
+
+        def each(t, rr):
+            if t >= 2000:
+                seen.append(t)
+                assert rr.theme.dirty == 0, (under.get("screen"), t, bin(rr.theme.dirty))
+                assert cap.buf == prev, (under.get("screen"), t)
+            prev[:] = cap.buf
+
+        _run(r, cap, phases, 3000, each=each)
+        assert len(seen) == 11, seen
+
+
+def test_queue_theme_loads_in_steps():
+    # ThemedRenderer.queue_theme loads tide one bounded step per frame (the
+    # tables, the map 20 rows a step, the kernel check); once it takes over,
+    # it draws exactly as a theme loaded whole
+    _need_fb()
+    cap = FrameCapture()
+    ref = FrameCapture()
+    r = ThemedRenderer("ripple", overlays=False)
+    r.queue_theme("tide")
+    _, phases, _ = rt.fixture("hot")
+    t = 0
+    n = 0
+    while r.loading is not None:
+        r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+        t += 100
+        n += 1
+        assert n < 50
+    assert r.theme.name == "tide"
+    assert n >= 120 // TD.MAP_ROWS + 2, n             # __init__, the map steps, the check
+    whole = ThemedRenderer("tide", overlays=False)
+    assert r.theme.kind == whole.theme.kind, (r.theme.kind, whole.theme.kind)
+    for fx in ("hot", "searching", "pairing_calibrate"):
+        _, phases, run_ms = rt.fixture(fx)
+        _run(r, cap, phases, run_ms)
+        _run(whole, ref, phases, run_ms)
+        assert cap.buf == ref.buf, fx
