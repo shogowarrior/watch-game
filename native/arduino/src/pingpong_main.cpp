@@ -43,7 +43,7 @@ void loop() {
     return;
   }
   const hm::ticks_t now = clock_.now_ms();
-  uint8_t ping[pingpong::SIZE];
+  uint8_t ping[hm::proto::SIZE];
   if (pinger.due(now, ping)) radio.send(ping, sizeof ping);
   radio.poll(on_frame, &pinger);
   if (pinger.done(now)) {

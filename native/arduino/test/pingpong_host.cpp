@@ -22,11 +22,11 @@ void hm::logf(const char* fmt, ...) {
 
 int main(int argc, char** argv) {
   static pingpong::Pinger p(argc > 1 ? atoi(argv[1]) : 1000);
-  char cmd[16], hex[2 * pingpong::SIZE + 1];
+  char cmd[16], hex[2 * hm::proto::SIZE + 1];
   unsigned long ms;
   while (scanf("%15s", cmd) == 1) {
     if (!strcmp(cmd, "t") && scanf("%lu", &ms) == 1) {
-      uint8_t b[pingpong::SIZE];
+      uint8_t b[hm::proto::SIZE];
       if (!p.due((hm::ticks_t)ms, b)) {
         puts("-");
       } else {
@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
       }
     } else if (!strcmp(cmd, "rx") && scanf("%lu", &ms) == 1) {
       int rssi;
-      uint8_t b[pingpong::SIZE];
+      uint8_t b[hm::proto::SIZE];
       if (scanf("%d %32s", &rssi, hex) != 2) return 2;
       const size_t n = strlen(hex) / 2;
       for (size_t i = 0; i < n && i < sizeof b; i++) sscanf(hex + 2 * i, "%2hhx", &b[i]);

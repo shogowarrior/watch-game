@@ -2,15 +2,12 @@
 
 #include <math.h>
 #include <stdio.h>
-#include <string.h>
 
 #include "hm/hal.h"
 
 namespace pingpong {
 
 namespace {
-
-constexpr uint8_t VERSION = 3;   // finder/proto.py VERSION; test/pingpong_host.py checks it
 
 // "-57.3": tenths as a signed decimal, without printf's float support.
 const char* tenths(char* s, int64_t t) {
@@ -20,14 +17,6 @@ const char* tenths(char* s, int64_t t) {
 }
 
 }  // namespace
-
-void pack_ping(uint8_t* b, uint16_t seq, int8_t rssi_last) {
-  const uint8_t ping[SIZE] = {'S', 'K', VERSION, GAME_ID, (uint8_t)seq, (uint8_t)(seq >> 8), (uint8_t)rssi_last,
-                              (uint8_t)RSSI_NONE, 0, 0,   // rssi_filt, steps
-                              0, 255, KIND_PING, 0,       // activity, battery unknown, game_state, flags
-                              0xFF, 0xFF};                // no bump
-  memcpy(b, ping, SIZE);
-}
 
 void RssiSummary::add(int v) {
   lo = n ? (v < lo ? v : lo) : v;
@@ -46,22 +35,25 @@ void RssiSummary::log(const char* where) const {
 }
 
 Pinger::Pinger(int n, int period_ms, int tail_ms)
-    : n_(n < MAX_N ? n : MAX_N), period_(period_ms), tail_(tail_ms) {}
+    : n_(n < MAX_N ? n : MAX_N), period_(period_ms), tail_(tail_ms) {
+  ping_.game_id = GAME_ID;   // the rest as radio_pingpong.Pinger: seq and the last pong's RSSI change
+  ping_.state = KIND_PING;
+  ping_.rssi_last = hm::proto::RSSI_NONE;
+}
 
 bool Pinger::due(hm::ticks_t now, uint8_t* out) {
   if (sent >= n_ || (sent && hm::ticks_diff(now, next_) < 0)) return false;
   // Next target from the last one (a fixed grid), from now after a stall: finder.link.TxScheduler.
   next_ = hm::ticks_add(sent && hm::ticks_diff(now, next_) < period_ ? next_ : now, period_);
-  pack_ping(out, (uint16_t)sent, last_rssi_);
+  ping_.seq = (uint16_t)sent;
+  ping_.pack(out);
   t_sent_[sent++] = now;
   last_send_ = now;
   return true;
 }
 
 void Pinger::on_rx(const uint8_t* d, size_t len, int8_t r, hm::ticks_t t) {
-  const bool pong = len >= SIZE && d[0] == 'S' && d[1] == 'K' && d[2] == VERSION && d[3] == GAME_ID &&
-                    d[12] == KIND_PONG;
-  const int s = pong ? (d[4] | d[5] << 8) : -1;
+  const int s = hm::proto::valid(d, len, GAME_ID) && d[12] == KIND_PONG ? hm::proto::seq_of(d) : -1;
   if (s < 0 || s >= sent || got_[s]) {
     stray++;
     return;
@@ -72,9 +64,10 @@ void Pinger::on_rx(const uint8_t* d, size_t len, int8_t r, hm::ticks_t t) {
   if (any_rx_) gaps.add((uint32_t)hm::ticks_diff(t, last_rx_));
   any_rx_ = true;
   last_rx_ = t;
-  last_rssi_ = r;
+  ping_.rssi_last = r;
   rssi.add(r);
-  if ((int8_t)d[6] != RSSI_NONE) peer_rssi.add((int8_t)d[6]);
+  pong_.unpack(d);
+  if (pong_.rssi_last != hm::proto::RSSI_NONE) peer_rssi.add((int)pong_.rssi_last);
 }
 
 bool Pinger::done(hm::ticks_t now) const {

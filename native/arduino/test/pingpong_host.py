@@ -156,8 +156,8 @@ def run():
         return 2, "no g++"
     with tempfile.TemporaryDirectory() as tmp:
         exe = os.path.join(tmp, "pingpong_host")
-        src = [os.path.join(ENV_DIR, "src", "pingpong.cpp"), os.path.join(NATIVE, "core", "src", "stats.cpp"),
-               os.path.join(HERE, "pingpong_host.cpp")]
+        src = [os.path.join(ENV_DIR, "src", "pingpong.cpp"), os.path.join(HERE, "pingpong_host.cpp")] + [
+            os.path.join(NATIVE, "core", "src", f) for f in ("stats.cpp", "proto.cpp")]
         p = subprocess.run(["g++", "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror",
                             "-I" + os.path.join(NATIVE, "core", "include"), "-I" + os.path.join(ENV_DIR, "src")] +
                            src + ["-o", exe], capture_output=True, text=True)
