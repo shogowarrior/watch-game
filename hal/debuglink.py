@@ -18,13 +18,15 @@ REPL's UART, the port ``tools/debug_server.py --serial`` reads. It reads no
 play (``sta`` is None) and never reads the port, so Ctrl-C still works.
 
 Wi-Fi (``DebugLink``): ``start`` reads ``/secrets.py`` (``WIFI_SSID``,
-``WIFI_PASSWORD``), joins the access point (``JOIN_MS`` at most) and opens a
-UDP socket to ``host:port``, or to the subnet broadcast address when
-``/debug`` has no host (broadcast is unreliable on the ESP32: a fallback
-only). Whatever fails, it returns ``(None, why)`` and the game plays
-normally (main.py also turns any unexpected error from ``start`` into such
-a message). The Wi-Fi name and password are never printed, logged or sent,
-and no reason quotes them.
+``WIFI_PASSWORD``: the file ``tools/wifi_setup.py`` saved on the laptop,
+copied by ``tools/deploy.py --debug A --wifi``), joins the access point
+(``JOIN_MS`` at most) and opens a UDP socket to ``host:port``, or to the
+subnet broadcast address when ``/debug`` has no host (broadcast is
+unreliable on the ESP32: a fallback only). Whatever fails, it returns
+``(None, why)`` and the game plays normally; a reason about the Wi-Fi file
+or the join ends with ``WIFI_FIX`` (main.py also turns any unexpected error
+from ``start`` into such a message). The Wi-Fi name and password are never
+printed, logged or sent, and no reason quotes them.
 
 ESP-NOW and the Wi-Fi connection share one radio, so once joined the access
 point's channel (1-13) is the ESP-NOW channel too: ``Board`` starts
@@ -59,6 +61,8 @@ JOIN_STEP_MS = 100
 OFF_MSG = "debug mode off: %s. Playing normally."
 USB_MSG = ("debug mode: watch %s sends its records on this USB port "
            "(on the laptop: python3 tools/debug_server.py --serial)")
+WIFI_FIX = ("on the laptop, run python3 tools/wifi_setup.py, then "
+            "python3 tools/deploy.py --debug %s --wifi again")   # %s: this watch's dev
 SERIAL_FIFO = 128        # bytes: the UART's transmit FIFO, and the largest piece
 SERIAL_RATE = 11         # bytes per ms the FIFO empties (115200 baud: 11.52)
 SERIAL_QMAX = 4096       # bytes that may wait; a record that would pass it is dropped
@@ -80,15 +84,14 @@ def read_config(path):
 
 
 def read_secrets(path):
-    """(ssid, password) from ``secrets.py``; ValueError with a plain reason
-    when it is missing or unusable. The reason never quotes the file (a
-    syntax error message can show one of its lines)."""
+    """(ssid, password) from ``/secrets.py``; ValueError with a plain reason
+    when it is missing or unusable (``start`` adds ``WIFI_FIX``). The reason
+    never quotes the file (a syntax error message can show one of its lines)."""
     try:
         with open(path) as f:
             src = f.read()
     except OSError:
-        raise ValueError("secrets.py is not on the watch "
-                         "(tools/deploy.py --debug A --wifi copies it)")
+        raise ValueError("/secrets.py is not on the watch")
     g = {}
     ok = True
     try:
@@ -98,12 +101,11 @@ def read_secrets(path):
     ssid = g.get("WIFI_SSID")
     pw = g.get("WIFI_PASSWORD")
     if not ok or ssid is None or ssid == "":
-        raise ValueError("secrets.py has no usable WIFI_SSID (compare it with secrets.example.py)")
+        raise ValueError("/secrets.py has no usable Wi-Fi name")
     if not isinstance(ssid, str) or not (pw is None or isinstance(pw, str)):
         # WLAN.connect raises TypeError for anything but text: an all-digit
-        # password typed without quotes is the likely case
-        raise ValueError("put the Wi-Fi name and password in quotes in secrets.py "
-                         "(compare it with secrets.example.py)")
+        # password typed without quotes in a hand-written file is the likely case
+        raise ValueError("the Wi-Fi name or password in /secrets.py is not in quotes")
     return ssid, pw or ""
 
 
@@ -279,7 +281,7 @@ class DebugLink:
                 self.sta, self.channel, self.ip, self.bcast = sta, ch, ip, bcast
                 joined = True
                 return True
-            self.why = _join_failed(timeout_ms)
+            self.why = _join_failed(timeout_ms, self.dev)
         except Exception as e:  # noqa: BLE001 - TypeError, RuntimeError('Wifi Unknown Error') too
             self.why = _wifi_error(e)
         finally:
@@ -355,19 +357,20 @@ class DebugLink:
                 "err": None if self.err is None else repr(self.err)}
 
 
-def _join_failed(timeout_ms):
+def _join_failed(timeout_ms, dev):
     """Why the join timed out. The ESP32 keeps retrying a wrong password or an
     unknown name (``status()`` stays ``STAT_CONNECTING``), so the watch cannot
     tell them apart: one message names both."""
-    return ("could not join the Wi-Fi in %d s (check the name and password in secrets.py, "
-            "and that it is a 2.4 GHz network in range)" % (timeout_ms // 1000))
+    return ("could not join the Wi-Fi in %d s (is it a 2.4 GHz network in range? "
+            "A wrong name or password looks the same: %s)"
+            % (timeout_ms // 1000, WIFI_FIX % dev))
 
 
 def _wifi_error(e):
     """Plain reason for an exception from the Wi-Fi calls. OSError and
     RuntimeError carry the port's fixed texts ("Wifi Internal Error", "Wifi
     Unknown Error 0x0102"); anything else shows only its type, so no value
-    from secrets.py can reach the message."""
+    from /secrets.py can reach the message."""
     if isinstance(e, (OSError, RuntimeError)):
         return "Wi-Fi error (%s)" % (str(e) or type(e).__name__)
     return "Wi-Fi error (%s)" % type(e).__name__
@@ -391,7 +394,7 @@ def start(config=None, secrets=None, timeout_ms=None, sleep=None):
     try:
         ssid, password = read_secrets(secrets or SECRETS)
     except ValueError as e:
-        return None, OFF_MSG % e
+        return None, OFF_MSG % ("%s (%s)" % (e, WIFI_FIX % cfg["dev"]))
     link = DebugLink(cfg["dev"], cfg["host"], cfg["port"])
     if not link.join(ssid, password, timeout_ms or JOIN_MS, sleep) or not link.open():
         link.close()

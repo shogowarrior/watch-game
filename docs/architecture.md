@@ -29,8 +29,8 @@ Rules that keep the layers apart:
 - The renderer reads **only** `RenderParams` (runes, menu rows and sun mode are
   fields too). It never sees estimator internals. `RenderParams` is
   JSON-serialisable (`to_dict` / `from_dict`). In debug mode (below) the watch
-  sends it at 5 Hz and the web page draws it with the same renderer. No replay
-  tool exists yet (R-08, R-14 in
+  sends it (5 Hz on Wi-Fi, about once a second on USB) and the web page draws
+  it with the same renderer. No replay tool exists yet (R-08, R-14 in
   [user-research](research/user-research.md)): `app/telemetry.py` logs a
   5 Hz state subset to `/log`, not `RenderParams`, and the web simulator has no
   replay input. The debug bridge's `logs/debug-*.jsonl` sessions hold both, as
@@ -229,37 +229,53 @@ auto-confirm and a 1 m proxy calibration.
 ## Debug mode: the real watches in the web page
 
 Debug mode ([design/debug-mode.md](design/debug-mode.md)) shows what two real
-watches are doing, live, in the web sim page. The watches never run a server:
+watches are doing, live, in the web sim page. The watches never run a server.
+Each one sends over its USB cable (the default) or over Wi-Fi:
 
 ```mermaid
 flowchart LR
   subgraph W["each watch (main.py with /debug)"]
-    T["app/telemetry.py<br>5 Hz: events, state record 's', 'rp' (RenderParams)"] --> L["hal/debuglink.py<br>one JSON object per UDP datagram"]
+    T["app/telemetry.py<br>5 Hz: events, state record 's', 'rp' (RenderParams)"] --> L["hal/debuglink.py<br>SerialLink: one line per record, paced<br>DebugLink: one UDP datagram per record"]
   end
-  L -- "UDP, Wi-Fi access point" --> B["tools/debug_server.py<br>UDP 0.0.0.0:47268"]
-  F["tools/fake_watches.py (--demo)"] -. "UDP, localhost" .-> B
+  L -- "USB serial, 115200 baud" --> B["tools/debug_server.py<br>--serial ports + UDP 0.0.0.0:47268"]
+  L -- "UDP, Wi-Fi access point" --> B
+  F["tools/fake_watches.py (--demo)"] -. "UDP, or pseudo-terminals with --serial" .-> B
   B -- "logs/debug-*.jsonl" --> G[(log)]
   B -- "Server-Sent Events /events<br>{src, rx, rec}" --> P["web/sim/index.html, Real watches<br>TwoWatchSim.show_params -> Renderer"]
 ```
 
 1. `main.py` finds `/debug` and calls `debuglink.start()` before `board.init()`.
-   The watch joins the access point named in `secrets.py` (10 s at most; on any
-   failure it prints why and plays normally).
-2. `Board` starts `EspNowRadio` in its associated mode: the Wi-Fi connection
-   stays up and ESP-NOW uses the access point's channel. Both watches must join
-   the same access point, or they will be on different channels (a watch whose
-   join failed stays on its usual channel 6).
-3. `app/telemetry.py` gets the link as its `sink`. From the 5 Hz state-record
+   - **USB** (`--debug A`): a `SerialLink` on the REPL's UART. No Wi-Fi, and the
+     radio starts as in normal play.
+   - **Wi-Fi** (`--debug A --wifi`): the watch joins the access point named in
+     `/secrets.py` (10 s at most; on any failure it prints why and plays
+     normally). `Board` then starts `EspNowRadio` in its associated mode: the
+     Wi-Fi connection stays up and ESP-NOW uses the access point's channel.
+     Both watches must join the same access point, or they will be on
+     different channels (a watch whose join failed stays on its usual
+     channel 6).
+2. `app/telemetry.py` gets the link as its `sink`. From the 5 Hz state-record
    path (never the render stage) it sends the events since the last record, the
    state record and an `rp` record with the frame's `RenderParams` and `ch`,
-   the watch's Wi-Fi channel. Each is one datagram of UTF-8 bytes no longer
-   than `DGRAM_MAX` (1400, one Wi-Fi frame). Send errors are counted, never
-   raised.
+   the watch's Wi-Fi channel (null on USB). Each record is compact JSON of
+   UTF-8 bytes no longer than `DGRAM_MAX` (1400, one Wi-Fi frame), on both
+   links. Send errors are counted, never raised.
+3. On Wi-Fi each record leaves at once as one datagram. On USB `send` only
+   queues it: the 115200-baud line takes about 11.5 bytes per ms through a
+   128-byte FIFO, and a write to a full FIFO would stall the loop. So
+   `SerialLink.pump` writes only what the FIFO has room for, once per loop
+   pass and after each strip of a frame (`_HapticDisplay` in
+   `app/runtime.py`), and allocates nothing. `rp` goes about once a second on
+   USB (with every state record on Wi-Fi), and at once when the screen, its
+   sub-state or its power changes.
 4. `tools/debug_server.py` (CPython, standard library only) serves `dist/sim/`
-   on 127.0.0.1, turns every valid datagram into one Server-Sent Event, and
-   appends it to `logs/debug-*.jsonl` (gitignored). `--demo` runs
+   on 127.0.0.1, reads the USB ports (`--serial`, exclusively) and the UDP
+   port, turns every valid record into one Server-Sent Event, and appends it to
+   `logs/debug-*.jsonl` (gitignored). Other lines from a USB port (boot
+   messages, tracebacks) reach the page's raw log. `--demo` runs
    `tools/fake_watches.py` on a thread: the two-watch simulator plus the same
-   `app/telemetry.py` and `hal/debuglink.py` code, sending to localhost.
+   `app/telemetry.py` and `hal/debuglink.py` code, sending to localhost (or,
+   with `--serial`, writing into two pseudo-terminals the bridge reads).
 5. In Real mode the page stops the simulated world (`TwoWatchSim.real_mode`)
    and hands each `rp` record to `TwoWatchSim.show_params`, so the screens come
    from the real renderer, animated between records. The state records fill the

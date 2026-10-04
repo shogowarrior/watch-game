@@ -10,3 +10,4 @@ dist/
 logs/
 firmware/*.bin
 bma423conf.bin
+.claude/worktrees/

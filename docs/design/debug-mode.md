@@ -1,9 +1,11 @@
 # Debug mode: watch the real watches in the web sim page
 
-Status: **Wi-Fi built; USB serial specified, being built.**
+Status: **built, over USB serial and over Wi-Fi.**
 `.claude/workflows/debug-mode-build.js` built the Wi-Fi link in three parallel
-tracks, then reviewed and verified it end to end. How to use it:
-[docs/hardware-setup.md](../hardware-setup.md) section 7.
+tracks, then reviewed and verified it end to end. The USB serial link, the
+bridge's serial reader and the private Wi-Fi setup followed in parallel tracks,
+merged and checked together. Neither link has run on a real watch yet. How to
+use it: [docs/hardware-setup.md](../hardware-setup.md) section 7.
 
 ## What the owner asked for
 
@@ -43,8 +45,9 @@ laptop, never in a chat.
      can draw the watch's real screen with the real renderer.
 
    Records are made in the 5 Hz telemetry path only, never in the render
-   loop. Over USB they are written out a little at a time once per loop pass
-   (see "USB serial" below), so the slow serial line never stalls the game.
+   loop. Over USB they are written out a little at a time, once per loop pass
+   and after each strip of a frame (see "USB serial" below), so the slow
+   serial line never stalls the game.
 4. **Radio channel (Wi-Fi link only).** ESP-NOW and a Wi-Fi association share one radio. Once
    the watch joins the access point, the channel is the access point's. In
    debug mode:
@@ -65,7 +68,9 @@ laptop, never in a chat.
      `WIFI_PASSWORD`; the format of `secrets.example.py`).
    - `--no-debug` removes `/debug` and `/secrets.py` from the watch.
    - `main.py` reads `/debug`. If the Wi-Fi link cannot start (no
-     `/secrets.py`, a failed join), the watch prints why and plays normally.
+     `/secrets.py`, a failed join), the watch prints why, and what to run on
+     the laptop (`tools/wifi_setup.py`, then `deploy.py --debug A --wifi`
+     again), and plays normally.
 6. **Credentials stay on the owner's laptop and the watches.**
    - `python3 tools/wifi_setup.py` asks for the Wi-Fi name and password on the
      laptop (the password is hidden as it is typed) and saves them outside the
@@ -88,11 +93,13 @@ JSON: `{"dev": "A", "link": "usb"}` or
 `{"dev": "A", "link": "wifi", "host": "192.168.1.23", "port": 47268}`
 
 - `dev` is the label the page shows (A or B).
-- `link` is `usb` or `wifi`; a `/debug` without it is `usb`. `host` and `port`
-  only matter for `wifi`, and everything below about joining and channels is
-  the Wi-Fi link only.
-- `host` is the laptop's LAN IPv4 address. `deploy.py --debug` detects it with
-  the UDP-connect trick; `--debug-host` overrides it. If `host` is missing, the
+- `link` is `usb` or `wifi`; a `/debug` without it is `usb`. Any other value
+  makes `/debug` invalid (`read_config` raises): the watch prints that and
+  plays normally. `host` and `port` only matter for `wifi`, and everything
+  below about joining and channels is the Wi-Fi link only.
+- `host` is the laptop's LAN IPv4 address. `deploy.py --debug A --wifi`
+  detects it with the UDP-connect trick; `--debug-host` overrides it, and
+  needs `--wifi` (the USB link has no address). If `host` is missing, the
   watch sends to the subnet broadcast address computed from `ifconfig`.
 - `port` defaults to 47268 (`DEBUG_PORT`).
 - `deploy.py --debug` takes `A` or `B` only. When it cannot find the laptop's
@@ -109,14 +116,16 @@ JSON: `{"dev": "A", "link": "usb"}` or
 ### A record (watch -> laptop)
 
 The same JSON object travels on both links: one UDP datagram on Wi-Fi, one
-line on USB (next section).
+line on USB (next section). Every record is compact JSON (no spaces after `,`
+and `:`), in the watch's telemetry ring and `/log` file too.
 
 ### A datagram (Wi-Fi)
 
 One UTF-8 JSON object per UDP packet, at most about 1400 bytes (one Wi-Fi
 frame; `DGRAM_MAX` in `app/telemetry.py`, counted in UTF-8 bytes, not
 characters). If a record would be larger, the watch drops optional fields
-rather than fragmenting it.
+rather than fragmenting it. The USB link gets the same fitted record, so a
+record looks the same on both links.
 
 Every datagram carries:
 
@@ -159,20 +168,38 @@ has room for.
   `\n` (the port may add `\r`). This is RFC 7464's JSON text sequence. Every
   other line on the port (`print` output, the boot message, a traceback, the
   REPL banner) is plain text.
-- **Pacing:** `send(s)` frames a record and queues it in pieces of at most 128
-  bytes (cut once, at 5 Hz); when more than `SERIAL_QMAX` bytes (4096) wait,
-  the whole record is dropped and counted in `drop`. `pump(now)` runs once
-  per loop pass from the runtime's telemetry stage and writes whole pieces
-  only while the FIFO has room: room refills at 11 bytes per ms since the last
-  write, up to 128. So a write never waits, and `pump` allocates nothing.
+- **Pacing:** `send(s)` frames a record and queues it, cut once (at 5 Hz)
+  into pieces of at most 128 bytes. The cuts fall every 128 bytes of the
+  queued stream, not of each record, so a pump that finds the FIFO empty can
+  fill all of it. When a record would leave more than `SERIAL_QMAX` bytes
+  (4096) waiting, the whole record is dropped and counted in `drop`.
+  `pump(now)` writes whole pieces only while the FIFO has room: room refills
+  at 11 bytes per ms since the last write, up to 128. So a write never waits,
+  and `pump` allocates nothing.
+- **Where it pumps:** once per loop pass, at the end of `Runtime.step`'s
+  telemetry stage (after the record and the flush, with the clock read again),
+  and after each strip of a drawn frame (`_HapticDisplay.push_strip` in
+  `app/runtime.py`, which also services the motor and touch). One pump per
+  pass was not enough: a frame takes about 40 ms, so a pass carried at most
+  128 bytes (about 2.5 KB/s), less than the records need, and the queue
+  filled up. After every strip (about 4 ms), the FIFO refills about 3 times
+  per frame. Since `pump` allocates nothing, the render loop stays
+  allocation-free (AGENTS rule 2).
+- **Loop exit and power off:** a forced telemetry flush sends what is left and
+  calls `drain()`, which writes out everything queued, waiting on the port as
+  `print` does, so the last records (such as `crash` or `pwr`) get out.
 - **Rate:** the `s` records at 5 Hz (about 410 bytes each, 2 KB/s) and the
-  events as they happen, but `rp` at most once per second (`rp_ms` 1000; the
-  Wi-Fi link sends it with every `s`, `rp_ms` 200), plus at once when the
-  screen or its sub-state changes. That is about a quarter of the line, so
-  the queue only fills in a burst. The page keeps the screen animating between
-  `rp` records.
+  events as they happen, but `rp` (about 664 bytes) at most once per second
+  (`rp_ms` 1000; the Wi-Fi link sends it with every `s`, `rp_ms` 200), plus at
+  once when the screen, its sub-state or its power changes. That is about
+  2.7 KB/s, a quarter of the line, so the queue only fills in a burst. An
+  `rp` the queue did not take goes with the next `s`. The page keeps the
+  screen animating between `rp` records.
 - **Counters:** `stats()` gives `dev`, `link` (`usb`), `tx` (records written
-  out), `drop` and `queued` (bytes waiting), like the Wi-Fi link's.
+  out), `drop` (records dropped whole), `queued` (bytes waiting), `tx_err`
+  (writes the port refused) and `err` (the last such error), like the Wi-Fi
+  link's. `Runtime.stats()` shows them as `debug_stats`. At bring-up, check
+  `drop` and `queued`: both should stay near 0 on a real watch.
 - The USB link needs no Wi-Fi name or password and leaves the radio as in
   normal play. It never reads the port, so the REPL's Ctrl-C still works.
 
@@ -213,23 +240,28 @@ USB serial on the bridge:
   every 2 s, so a watch plugged in later is picked up. `--serial PORT ...`
   reads just those. A macOS `/dev/tty.X` is opened as `/dev/cu.X`, which does
   not wait for a modem carrier.
-- A port is opened raw at 115200 8N1 with `CLOCAL`, and in exclusive mode
-  (`TIOCEXCL`), so `mpremote` and `deploy.py` get "port busy" instead of
-  quietly losing bytes to the bridge: stop the bridge before deploying. The
+- A port is opened raw at 115200 8N1 with `CLOCAL`, and exclusively: it
+  takes the `flock` that pyserial (so `mpremote`) takes, and `TIOCEXCL`, so
+  `mpremote` and `deploy.py` get "port busy" instead of quietly losing bytes
+  to the bridge: stop the bridge before deploying. The
   bridge never writes a byte to a port and leaves DTR and RTS as the OS sets
   them on open, as `mpremote` does, so opening it should not restart the
   watch (to confirm at bring-up).
 - A port that goes away (unplugged) or fails is closed and tried again every
   second; `/debug/status` says why meanwhile.
+- The bytes before the first `\n` after a port opens are dropped: the port
+  may have opened in the middle of a line.
 - A line that starts with `0x1E` is a record: the rest must pass the same
   checks as a datagram, and then it is handled exactly like one, with `src`
-  the port's name (such as `cu.usbserial-022152D1`). Any other non-empty line
+  the port's path under `/dev` (such as `cu.usbserial-022152D1`, `ttyUSB0`,
+  or `pts/3` for `--demo --serial`). Any other non-empty line
   becomes `data: {"src": "<port>", "rx": <server ms>, "line": "<text>"}` on
   `/events` and in the log, so boot messages and tracebacks reach the page's
   raw log. Lines over 8 KB are dropped and counted in `bad`.
 - `/debug/status` gains
   `"serial": {"<port>": {"open": bool, "err": str|null, "records": N, "lines": N}}`
-  (empty without `--serial`).
+  (empty without `--serial`). Its `packets` counts records only, from both
+  links; text lines count only in their port's `lines`.
 
 Details the parts rely on:
 

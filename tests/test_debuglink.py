@@ -134,13 +134,13 @@ def test_read_secrets_never_quotes_the_file():
                 assert False, bad
             except ValueError as e:
                 m = str(e)
-                assert PW not in m and SSID not in m and "secrets.example.py" in m, m
+                assert PW not in m and SSID not in m and "Wi-Fi name" in m, m
         _rm(s)
         try:
             dl.read_secrets(s)
             assert False, "missing secrets accepted"
         except ValueError as e:
-            assert "tools/deploy.py --debug A --wifi" in str(e), e
+            assert str(e) == "/secrets.py is not on the watch", e
     finally:
         _clean(d)
 
@@ -161,7 +161,7 @@ def test_read_secrets_wants_text_in_quotes():
                 assert False, bad
             except ValueError as e:
                 m = str(e)
-                assert "quotes" in m and "secrets.example.py" in m, m
+                assert "quotes" in m and "/secrets.py" in m, m
                 for v in ("12345678", "24680", SSID, PW):
                     assert v not in m, m
         _write(s, "WIFI_SSID = %r\n" % SSID)                          # an open network
@@ -208,6 +208,7 @@ def test_join_wrong_password_disconnects_and_says_why():
     assert link.sta is None and link.channel is None
     assert set(statuses) == {network.STAT_CONNECTING}   # what a real watch reports
     assert "could not join the Wi-Fi in 1 s" in link.why and "password" in link.why
+    assert link.why.endswith(dl.WIFI_FIX % "A" + ")"), link.why     # what to run on the laptop
     assert "wrong-pass" not in link.why and SSID not in link.why
     assert len(slept) == 1000 // dl.JOIN_STEP_MS
     assert made[0].status() == network.STAT_IDLE   # disconnected: it stops trying
@@ -583,15 +584,17 @@ def test_start_paths_say_why_and_never_show_the_secrets():
         _ap(channel=11)
         c, s = _files(d, '{"dev": "B", "link": "wifi", "host": "192.168.1.23", "port": 47268}')
         link, msg = dl.start(c, s, sleep=nap)                     # no secrets.py
-        assert link is None and "secrets.py is not on the watch" in msg
-        assert msg.endswith("Playing normally.")
+        assert link is None and "/secrets.py is not on the watch" in msg
+        assert msg.endswith("(%s). Playing normally." % (dl.WIFI_FIX % "B")), msg
+        assert "python3 tools/wifi_setup.py" in msg and "--debug B --wifi" in msg
         _write(s, _secrets(pw="wrong-pass-456"))
         link, msg = dl.start(c, s, 500, nap)                      # the AP refuses the password
         assert link is None and "password" in msg and "Playing normally" in msg
-        assert "wrong-pass-456" not in msg and SSID not in msg
+        assert "wrong-pass-456" not in msg and SSID not in msg and dl.WIFI_FIX % "B" in msg
         _write(s, "WIFI_SSID = %r\nWIFI_PASSWORD = 12345678\n" % SSID)   # no quotes
         link, msg = dl.start(c, s, 500, nap)
         assert link is None and "quotes" in msg and msg.endswith("Playing normally."), msg
+        assert dl.WIFI_FIX % "B" in msg
         assert "12345678" not in msg and SSID not in msg
         _write(c, "[1, 2]")
         link, msg = dl.start(c, s, sleep=nap)
@@ -749,7 +752,8 @@ def test_main_debug_mode_joins_first_and_sends_telemetry():
 
 def test_main_without_secrets_plays_normally():
     board, kw, out = _run_main('{"dev": "A", "link": "wifi", "host": "192.168.1.23"}', None)
-    assert "debug mode off: secrets.py is not on the watch" in out and "Playing normally." in out
+    assert "debug mode off: /secrets.py is not on the watch" in out and "Playing normally." in out
+    assert "python3 tools/wifi_setup.py" in out
     assert board.debug is None and kw == {}
     r = board.radio
     assert not r.associated and r.channel == 6 and r._e.active()
@@ -775,7 +779,7 @@ def test_main_unquoted_password_plays_normally():
     TypeError past main.py's debug switch, and the game never started."""
     board, kw, out = _run_main('{"dev": "A", "link": "wifi", "host": "192.168.1.23"}',
                                "WIFI_SSID = %r\nWIFI_PASSWORD = 12345678\n" % SSID)
-    assert "debug mode off: put the Wi-Fi name and password in quotes" in out, out
+    assert "debug mode off: the Wi-Fi name or password in /secrets.py is not in quotes" in out, out
     assert "Playing normally." in out and "12345678" not in out and "crashed" not in out
     assert board.debug is None and kw == {}
     r = board.radio
