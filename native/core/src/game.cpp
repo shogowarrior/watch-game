@@ -797,8 +797,7 @@ void Game::tick_hunt(ticks_t t_ms) {
   }
   if (teach_far_ && z == X::FAR && !hint_ && !peer_sweep_ && !menu.is_open)
     scan_hint(t_ms);   // the first FAR, once FIND YOUR FRIEND has gone
-  // hidden by the MENU or SAVER ON: the pacer must not run unseen (clock pauses)
-  update_arrow(t_ms, true, menu.is_open || inter_until_.has_value());
+  update_arrow(t_ms, true);
   update_bump_ready(t_ms);
   const A::Arrow* a = arrow;
   if (bump_ready && a && a->glyph == rp::Glyph::ARROW && a->sub == rp::Sub::WALK)
@@ -814,10 +813,13 @@ void Game::enter_hot(ticks_t t_ms) {
   light(t_ms, T::EVENT_LIT_MS);
 }
 
-void Game::update_arrow(ticks_t t_ms, bool link_ok, bool hidden) {
+void Game::update_arrow(ticks_t t_ms, bool link_ok) {
   A::Arrow* a = arrow;
   if (!a) return;
   const A::Phase was = a->phase;
+  // under the MENU or SAVER ON (a waiting one starts this tick) the clock
+  // pauses: the pacer must not run unseen, also on the tick the arrow comes back
+  const bool hidden = menu.is_open || inter_until_.has_value() || inter_pending_;
   a->update(t_ms, me.activity(), me.steps(), px.trend(), peer.fresh(t_ms) && peer.walking(), link_ok, px.unreliable(),
             hidden);
   if (a->phase == A::PH_TURN && was != A::PH_TURN) mirror.reset(t_ms);
@@ -1129,17 +1131,16 @@ void Game::tick_scan(ticks_t t_ms) {
     mode = HUNT;
     mode_t = t_ms;
     still_since_.reset();
-    if (unstash()) update_arrow(t_ms, true);
+    unstash();
+    update_arrow(t_ms, true);   // new or back: hidden if SAVER ON starts this tick
   }
 }
 
-// Put the arrow hidden by a scan back; true if there was one.
-bool Game::unstash() {
+// Put the arrow hidden by a scan back (unless it expired meanwhile).
+void Game::unstash() {
   A::Arrow* st = stash_;
   stash_ = nullptr;
-  if (!st || st->done()) return false;
-  arrow = st;
-  return true;
+  if (st && !st->done()) arrow = st;
 }
 
 // LINK_LOST

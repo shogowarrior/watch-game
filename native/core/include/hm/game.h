@@ -223,7 +223,7 @@ class Game {
   void enter_hunt(ticks_t t_ms, bool fanfare);
   void tick_hunt(ticks_t t_ms);
   void enter_hot(ticks_t t_ms);
-  void update_arrow(ticks_t t_ms, bool link_ok, bool hidden = false);
+  void update_arrow(ticks_t t_ms, bool link_ok);
   void update_bump_ready(ticks_t t_ms);
   void update_still_hint(ticks_t t_ms);
   void update_peer_scan(ticks_t t_ms);
@@ -242,7 +242,7 @@ class Game {
   void new_round(ticks_t t_ms);
   void start_scan(ticks_t t_ms);
   void tick_scan(ticks_t t_ms);
-  bool unstash();
+  void unstash();
   void enter_lost(ticks_t t_ms);
   void tick_lost(ticks_t t_ms);
   rp::Banner lost_banner() const;
