@@ -7,6 +7,12 @@
 // The repo's Python packages (app/, finder/, hal/, native/, sim/, ui/, tests/, tools/) and
 // main.py, boot.py are copied into the WebAssembly filesystem at /repo and cwd is /repo, and sys.argv is set
 // as CPython would set it.
+//
+// The script starts with a global __steps__ = None. If it leaves a generator
+// there (tests/runner.py does, one step per test module), it is resumed here,
+// one runPython call per step, until it finishes or raises SystemExit. The port
+// collects garbage only between runPython calls (gc.collect() inside one frees
+// nothing), so a long run in a single call grows the heap up to its 2 GB cap.
 import { loadMicroPython } from "./node_modules/@micropython/micropython-webassembly-pyscript/micropython.mjs";
 import fs from "node:fs";
 import path from "node:path";
@@ -50,15 +56,32 @@ sys.path.insert(0, '/repo')
 _argv = list(__argv)
 sys.argv[:] = _argv
 _src = open(_argv[0]).read()
-_g = {'__name__': '__main__', '__file__': '/repo/' + _argv[0]}
+_g = {'__name__': '__main__', '__file__': '/repo/' + _argv[0], '__steps__': None}
+def __exit_code(e):
+    rc = e.value if isinstance(e.value, int) else (0 if e.value is None else 1)
+    if rc == 1 and not isinstance(e.value, int):
+        print(e.value, file=sys.stderr)
+    return rc
 try:
     exec(compile(_src, _argv[0], 'exec'), _g)
     __rc = 0
+    __steps = _g.get('__steps__')
 except SystemExit as e:
-    __rc = e.value if isinstance(e.value, int) else (0 if e.value is None else 1)
-    if __rc == 1 and not isinstance(e.value, int):
-        print(e.value, file=sys.stderr)
+    __rc = __exit_code(e)
+    __steps = None
+__more = __steps is not None
 `);
+  while (mp.globals.get("__more")) {
+    mp.runPython(`
+try:
+    next(__steps)
+except StopIteration:
+    __more = False
+except SystemExit as e:
+    __rc = __exit_code(e)
+    __more = False
+`);
+  }
   exitCode = mp.globals.get("__rc") ?? 0;
 } catch (e) {
   console.error(String(e && e.message ? e.message : e));

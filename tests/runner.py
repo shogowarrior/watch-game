@@ -10,6 +10,10 @@ cannot run on this runtime raises ``tests.Skip("reason")``.
 
 Tests run from the repo root, so they open repo files by relative path. An
 unknown module name, or a run in which no test passed or failed, exits 1.
+
+Under tools/mpy/run.mjs the command line runs one test module per runPython
+call (``__steps__``, below): the WebAssembly port collects garbage only between
+calls, so a whole run in one call grows the heap to the port's 2 GB cap.
 """
 
 import os
@@ -37,7 +41,9 @@ def _select(names, selected):
     return [n for n in names if n in sel], [s for s in sel if s not in names]
 
 
-def run(selected=None):
+def _steps(selected=None):
+    """run() as a generator: it yields after each test module and returns what
+    run() returns."""
     root = _root()
     os.chdir(root)
     for p in (root, root + "/tests"):
@@ -74,6 +80,7 @@ def run(selected=None):
                 else:
                     import traceback
                     traceback.print_exception(type(e), e, e.__traceback__)
+        yield
     print("[%s] %d passed, %d skipped, %d failed" % (sys.implementation.name, passed, skipped, failed))
     if passed + failed == 0:
         print("no tests ran")
@@ -81,5 +88,25 @@ def run(selected=None):
     return failed
 
 
+def run(selected=None):
+    """Run the selected test modules (all by default): the number failed, or 1
+    for an unknown module or a run in which nothing ran."""
+    steps = _steps(selected)
+    try:
+        while True:
+            next(steps)
+    except StopIteration as e:
+        return e.value
+
+
+def _main(argv):
+    rc = yield from _steps([a for a in argv if not a.startswith("-")])
+    sys.exit(1 if rc else 0)
+
+
 if __name__ == "__main__":
-    sys.exit(1 if run([a for a in sys.argv[1:] if not a.startswith("-")]) else 0)
+    if "__steps__" in globals():    # tools/mpy/run.mjs: it resumes them, one call per step
+        __steps__ = _main(sys.argv[1:])
+    else:
+        for _ in _main(sys.argv[1:]):
+            pass
