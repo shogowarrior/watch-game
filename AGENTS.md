@@ -15,8 +15,10 @@ watches. The watch runs **stock MicroPython v1.29.0 (`ESP32_GENERIC-SPIRAM`)**,
 pure `.py`, no custom C modules.
 
 Status: every layer is written and tested on CPython, on MicroPython
-(WebAssembly) and in a two-watch simulator. **It has not yet run on real
-watches.** Every threshold is a starting value to calibrate. Debug mode
+(WebAssembly) and in a two-watch simulator. First bring-up on two watches
+(3-4 Oct 2026) measured the display timings, the gc time, the IMU z sign and
+the bump levels; the radio calibration and the field test are still to do, so
+every other threshold is a starting value to calibrate. Debug mode
 (`docs/design/debug-mode.md`) shows the real watches live in the web sim page,
 over their USB cables or over Wi-Fi.
 
@@ -53,23 +55,25 @@ over their USB cables or over Wi-Fi.
 | `finder/menu.py` | `Menu`: the MENU list (rows, scroll, END ROUND confirm, auto-close). |
 | `finder/render_params.py` | `RenderParams`, the only thing the renderer reads (ui-spec §3). |
 | `ui/` | Frame renderer: `renderer.py` (draws the whole 240x240 frame, pushes it as 4 bands of 240x60), `field.py` (ripple palette), `glyphs.py`, `text.py`, `font.py`. Colours in `ui/__init__.py` are byte-swapped RGB565. |
+| `ui/themes/` | Field themes (ui-spec §4A): `base.py` (the contract and shared helpers), one module per theme (`ripple`, `sonar`, `tide`, `warp`, `arcade`, `fireflies`), `ThemedRenderer` in `__init__.py`. Built and tested, not yet chosen from the MENU or wired into the game. |
 | `sim/` | Two-watch simulator: `world.py`, `radio.py` (RSSI profiles clean/typical/harsh/indoor, per-watch beacon period), `imu.py`, `accel_synth.py`, `scenarios.py`, `rng.py`, `link.py` (`GameLink`: beacon hand-off between two Games), `Sim`; `webhost.py` drives the browser sim. |
-| `native/` | Arduino and ESP-IDF ports (PlatformIO), work in progress: a shared C++ core (the ripple field, checked frame by frame against `ui/field.py`; display, PMU and IMU sequences from `hal/`) and the display benchmark both builds run. See `native/README.md`; `tests/test_native.py` runs its host tests. |
+| `native/` | Arduino and ESP-IDF ports (PlatformIO), work in progress: a shared C++ core (the game logic of `finder/`, checked call for call against traces of the Python tests; the renderer of `ui/`, checked against `tests/snapshot_crc.json`; display, PMU and IMU sequences from `hal/`) and the display benchmark both builds run; the main loop and the game builds are next. See `native/README.md`; `tests/test_native.py` runs its host tests. |
 | `web/sim/index.html` | Browser simulator page (runs the real `finder/`, `ui/`, `sim/` in MicroPython WebAssembly). Its **Simulator \| Real watches** toggle shows the real watches in debug mode. |
 | `tests/` | `runner.py`, `test_*.py`, `fakes/` (fake `machine`, `network`, `espnow`; `socket.py`, a fake UDP `socket` installed by `fakes.install_socket()`; `serial_port.py`, a fake USB serial port that checks `SerialLink`'s pacing against the 115200-baud line), `est_helpers.py` (shared estimator fixtures), `test_deploy.py` (`tools/deploy.py`, CPython only). |
-| `tests/test_debuglink.py` `test_debug_server.py` `test_fake_watches.py` `test_wifi_setup.py` `test_secrets_guard.py` | Debug mode: the watch side (USB and Wi-Fi links) and `main.py` wiring on fakes; the bridge's UDP-to-SSE relay, serial reader (on pseudo-terminals) and log over real localhost sockets (CPython only); the fake watches; `tools/wifi_setup.py` (the saved file, its permissions, nothing printed); no file git would commit, and no commit in its history, holds a value from a saved Wi-Fi file. |
+| `tests/test_debuglink.py` `test_debug_server.py` `test_fake_watches.py` `test_knocks.py` `test_wifi_setup.py` `test_secrets_guard.py` | Debug mode: the watch side (USB and Wi-Fi links) and `main.py` wiring on fakes; the bridge's UDP-to-SSE relay, serial reader (on pseudo-terminals), knock lines and log over real localhost sockets (CPython only); the fake watches; the knock judgements from crafted records; `tools/wifi_setup.py` (the saved file, its permissions, nothing printed); no file git would commit holds a value from a saved Wi-Fi file, and no commit in its history holds the password. |
 | `tools/` | Host and on-watch scripts (see Commands). `tools/mpy/run.mjs` runs Python under MicroPython WebAssembly; `tools/cli.py` is the shared `--key value` parser. |
-| `tools/debug_server.py` | Debug bridge (CPython, stdlib only): serves `dist/sim/` on 127.0.0.1, reads the watches' USB serial ports (`--serial`) and UDP datagrams, relays the records to the page as Server-Sent Events (`/events`), answers `/debug/status`, logs to `logs/`. |
-| `tools/fake_watches.py` | Two simulated watches that send real debug-mode records (same `app/telemetry.py` and `hal/debuglink.py` code), over UDP or through `SerialLink`; `debug_server.py --demo [--serial]` runs it. |
+| `tools/debug_server.py` | Debug bridge (CPython, stdlib only): serves `dist/sim/` on 127.0.0.1, reads the watches' USB serial ports (`--serial`) and UDP datagrams, relays the records to the page as Server-Sent Events (`/events`) with the knock judgements (`tools/knocks.py`), answers `/debug/status`, logs to `logs/`. |
+| `tools/fake_watches.py` | Two simulated watches that send real debug-mode records (same `app/telemetry.py` and `hal/debuglink.py` code), over UDP or through `SerialLink`; their players knock in HOT (a missed, a late and a matched knock); `debug_server.py --demo [--serial]` runs it. |
+| `tools/knocks.py` | `Knocks`: the bridge's judgement of each bump spike a watch sends (matched with the partner's spike, heard by radio, within 0.4 s, or why not: buzzing, too far apart, the partner not feeling for knocks...), relayed as `knock` lines and printed; `python3 tools/knocks.py LOG` judges a saved session again. |
 | `tools/wifi_setup.py` | Asks for the Wi-Fi name and password on the laptop (debug mode over Wi-Fi) and saves them outside the repo, readable only by the owner; `--check`, `--forget`. Never prints them. |
 | `secrets.example.py` | The format of the Wi-Fi file (`WIFI_SSID`, `WIFI_PASSWORD`) that `tools/wifi_setup.py` saves and the watch reads as `/secrets.py`. Not to be filled in. |
-| `logs/` | Gitignored. `debug-*.jsonl` sessions from the bridge: each line is one `/events` payload `{"src", "rx", "rec"}`, ready to replay. |
+| `logs/` | Gitignored. `debug-*.jsonl` sessions from the bridge: each line is one `/events` payload, either a record `{"src", "rx", "rec"}`, from a USB port a text line `{"src", "rx", "line"}` (boot messages, errors, the fps line), or a knock judgement `{"src": "bridge", "rx", "knock"}`; a replay reads the `rec` lines. |
 | `docs/project/` | `handoff.md` (current state, open questions, next steps: read first); the Claude Project's `goal.md`, `instructions.md` and `setup.md` (how to create it). |
-| `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`, `debug-mode.md` (debug mode: decisions and the contract between watch, bridge and page). |
+| `docs/design/` | `ui-spec.md` (behaviour), `design-system.md`, `tokens.json`, `snapshots/*.png`, `themes/*.png` (theme previews), `debug-mode.md` (debug mode: decisions and the contract between watch, bridge and page). |
 | `docs/estimation/` | `bakeoff.md` (why kalman2), `imu-drift.md` (why no dead reckoning). |
 | `docs/research/user-research.md` | Personas, field-test plan, requirements R-01..R-15. |
 | `docs/architecture.md` `docs/hardware-setup.md` | Layers and data flow (with the debug data path); bring-up on real watches and how to use debug mode (§7). |
-| `notebooks/` | Jupyter "MicroPython - USB" notebooks. `finder_dev.ipynb` is the current one. `watch.ipynb` and `tools.ipynb` are legacy (old custom firmware) and do not run on stock v1.29. |
+| `notebooks/` | Jupyter "MicroPython - USB" notebooks. `finder_dev.ipynb` is the current one. `watch movement.ipynb`: steps, stillness and tilt from `MotionTracker`, plus the drift demo, on `hal/`. `watch.ipynb` and `tools.ipynb` are legacy (old custom firmware) and do not run on stock v1.29. |
 | `firmware/` | Old firmware images. **Do not touch.** |
 | `.claude/settings.json` `.claude/hooks/cloud-setup.sh` | SessionStart hook: in cloud sessions only, installs the `tools/mpy` package. |
 | `.claude/workflows/` | `review-fix-round.js` (verified review/fix round) and `debug-mode-build.js`; args in each header. |
@@ -111,6 +115,7 @@ sets it as CPython would.
 | `python3 tools/render_snapshots.py [name ...]` | Render `RenderParams` fixtures through the real renderer (via the WebAssembly port) into `docs/design/snapshots/*.png`, and their frame CRCs into `tests/snapshot_crc.json` (checked by `test_renderer`). |
 | `node tools/mpy/run.mjs tools/bench_est.py` | Per-packet cost and heap per estimator. |
 | `node tools/mpy/run.mjs tools/bench_webhost.py` | Cost of one browser-sim step. |
+| `python3 tools/render_themes.py [theme ...]` / `--bench` | Theme previews (a contact sheet of 8 moments per theme) into `docs/design/themes/*.png` / ms per frame per theme and moment next to Ripple's (`--mp PATH` runs another MicroPython, such as a 32-bit unix build with viper). |
 | `python3 tools/drift_demo.py` | Why accelerometer double integration fails. |
 | `python3 tools/build_sim.py` | Build the web simulator into `dist/sim/` (needs `tools/mpy` npm install). |
 | `python3 native/tools/qemu_run.py native/idf` | Check a native build's flash layout and boot it in Espressif's QEMU (`--install` once). Checks boot and crashes, not speed (`native/README.md`). |
@@ -121,10 +126,11 @@ sets it as CPython would.
 | `tools/radio_pingpong.py` | **On two watches**: ESP-NOW delivery, RTT, RSSI (see `hal/README.md`). |
 | `tools/flash.sh <port>` | Erase and flash stock v1.29 SPIRAM. The **user** runs this; it asks y/N. |
 | `tools/fetch_bma423_config.sh` | Download and sha256-check the optional `bma423conf.bin`. |
-| `python3 tools/deploy.py [--port P] [-n] [--noapp\|--app] [--tele DEV\|--no-tele] [--debug A\|B [--wifi [--debug-host IP]]\|--no-debug]` | Hard-reset the watch, copy `app/`, `finder/`, `hal/`, `ui/` (+ `bma423conf.bin`) and last `boot.py`, `main.py` with mpremote, then hard-reset again so `main.py` starts the game. `--tele DEV` makes the game log to `/log/<n>_DEV.jsonl`. `--debug A` writes `/debug` for the USB link (nothing secret is copied). `--debug A --wifi` writes it for the Wi-Fi link (the laptop's address, found by itself or `--debug-host`, which needs `--wifi`) and copies the Wi-Fi file `tools/wifi_setup.py` saved as `/secrets.py`. `--no-debug` removes `/debug` and `/secrets.py`. |
+| `python3 tools/deploy.py [--port P] [-n] [--noapp\|--app] [--tele DEV\|--no-tele] [--debug A\|B [--wifi [--debug-host IP]]\|--no-debug]` | Hard-reset the watch, copy `app/`, `finder/`, `hal/`, `ui/` (+ `bma423conf.bin`) and last `boot.py`, `main.py` with mpremote, then hard-reset again so `main.py` starts the game. `--tele DEV` makes the game log to `/log/<n>_DEV.jsonl`. `--debug A` writes `/debug` for the USB link (nothing secret is copied, and any `/secrets.py` an earlier `--wifi` deploy left is removed). `--debug A --wifi` writes it for the Wi-Fi link (the laptop's address, found by itself or `--debug-host`, which needs `--wifi`) and copies the Wi-Fi file `tools/wifi_setup.py` saved as `/secrets.py`. `--no-debug` removes `/debug` and `/secrets.py`. |
 | `python3 tools/debug_server.py [--serial [PORT ...]] [--http-port 8765] [--udp-port 47268] [--root dist/sim] [--no-log] [--demo]` | Debug bridge: open `http://localhost:8765/local.html` and pick Real watches. `--serial` reads the watches' USB ports (every one it finds, or the PORTs given) and holds them: stop it before `deploy.py` or `mpremote`. `--demo` adds two fake watches (`--demo --serial`: over the USB link, through pseudo-terminals; `--udp-port` only with `--demo`: the watches always send to 47268). Needs `python3 tools/build_sim.py` first. |
 | `python3 tools/wifi_setup.py [--check\|--forget]` | The **owner** runs it in their own terminal: saves the Wi-Fi name and password for `deploy.py --debug A --wifi` outside the repo. `--check` says whether the file is there, private and readable, `--forget` deletes it; neither shows the values. |
 | `python3 tools/fake_watches.py [--host 127.0.0.1] [--port 47268] [--seconds N] [--speed 1.0]` | Two simulated watches sending debug-mode datagrams to a bridge. |
+| `python3 tools/knocks.py logs/debug-YYYYmmdd-HHMMSS.jsonl` | Judge a saved debug session's bump spikes again: one line per spike (matched, or why not) and each watch's totals. |
 
 Agents: do not flash, erase or deploy to a watch, and do not download
 firmware, unless the user explicitly asks in chat. Never write into `firmware/`.
@@ -291,13 +297,14 @@ of what each watch sent).
   `secrets.example.py` shows the format. The game joins Wi-Fi only in debug
   mode with `--wifi` (`/debug` with `"link": "wifi"`): `deploy.py` copies the
   file to the watch as `/secrets.py` only with `--debug A --wifi` (or
-  `--secrets`), and `--no-debug` removes it. The values are read only on the
-  watch (`hal/debuglink.py`) and by `deploy.py`'s check and copy, and are never
-  printed, logged or sent. Agents never open, print or search these files.
-  `tests/test_secrets_guard.py` checks that no file git would commit, and no
-  commit on any branch git knows, contains them (it runs where the Wi-Fi file
-  is, the owner's laptop, and skips elsewhere). Never commit credentials, tokens or `webrepl_cfg.py`, and never paste
-  them into notebook outputs, docs or tests.
+  `--secrets`), and `--no-debug` or a USB `--debug A` removes it. The values
+  are read only on the watch (`hal/debuglink.py`) and by `deploy.py`'s check
+  and copy, and are never printed, logged or sent. Agents never open, print or
+  search these files. `tests/test_secrets_guard.py` checks that no file git
+  would commit contains them, and no commit on any branch git knows contains
+  the password (it runs where the Wi-Fi file is, the owner's laptop, and skips
+  elsewhere). Never commit credentials, tokens or `webrepl_cfg.py`, and never
+  paste them into notebook outputs, docs or tests.
 - The first commit (`c79530c`) leaked the Wi-Fi name and password and the
   WebREPL password (in `boot.py` and `webrepl_cfg.py`); `boot.py` kept them
   until `44880ab`, so `0db0f98` holds them too. The repo is public, so they

@@ -55,6 +55,7 @@ class RippleField {
                bool live, bool first);
   void idle(ticks_t t) { next_spawn_ = t; }
   int32_t ring_r(int k, ticks_t t) const;
+  int32_t dt() const { return dt_; }      // smoothed frame interval, ms
   void cull(ticks_t t);
   void set_ramp(int ramp, ticks_t t, int32_t dur);
   void set_levels(ticks_t t, int32_t fl, int32_t gl, int32_t pu, int32_t gr, bool restart);

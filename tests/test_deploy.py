@@ -74,6 +74,9 @@ def test_debug_writes_and_removes_its_files():
     assert cfg == '{"dev": "B", "link": "wifi", "host": "192.168.1.23", "port": 47268}'
     assert json.loads(d.debug_config("A", True)) == {"dev": "A", "link": "wifi", "port": 47268}
     cmd = d.build_cmd(["mpremote"], None, [], [("s", "secrets.py")], None, True, None, cfg)
+    usb = d.build_cmd(["mpremote"], None, [], [("s", "secrets.py")], None, True, None,
+                      d.debug_config("A"))       # --debug A --secrets
+    assert not [c for c in cmd + usb if "os.remove" in c], (cmd, usb)   # the copy is kept
     i = cmd.index("exec", 3)
     assert cmd[i - 1] == "+" and cmd[-2:] == ["+", "reset"], cmd
     code = cmd[i + 1]                            # the watch runs this: /debug gets the JSON
@@ -126,6 +129,7 @@ def test_debug_over_usb_copies_nothing_secret():
         assert rc == 0, out
         assert "over the USB cable" in out and '{"dev": "A", "link": "usb"}' in out
         assert ":secrets.py" not in out and wifi not in out and _hidden(out), out
+        assert "os.remove('/secrets.py')" in out    # an earlier --wifi deploy's copy
 
 
 def test_debug_over_wifi_copies_the_saved_file():

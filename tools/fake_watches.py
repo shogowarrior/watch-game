@@ -14,7 +14,12 @@ sent through hal/debuglink.py, the same code as on the watch: UDP datagrams
 Real watches mode can be tried with no watches.
 
 The players hold the watches together to pair (each presses the side key
-once the runes show; the 30 s split is cut to 5 s), then A walks away to
+once the runes show; the 30 s split is cut to 5 s). Whenever A is next to B
+and both show HOT, they knock the watches together every 1.5 s: first a
+knock only A feels, then one B feels 0.6 s late, then matched ones until the
+round ends (``KNOCKS``), so the page's Knocks panel shows its verdicts. Each
+knock's spikes go to ``Game.on_accel_tap`` and the ``tap`` event, as
+app/runtime.py does. A taps FOUND for the next round, then walks away to
 about 40 m and back while B stands still, over and over. Beacons reach the
 other game through a ``LinkMonitor``, as in app/runtime.py, so the link
 counters (sequence numbers, loss) are real too.
@@ -33,10 +38,12 @@ from app.telemetry import Telemetry  # noqa: E402
 from finder import pairing as P  # noqa: E402
 from finder import proto  # noqa: E402
 from finder.compat import ticks_diff  # noqa: E402
-from finder.game import Game, M_PAIRING  # noqa: E402
+from finder.game import Game, M_FOUND, M_HUNT, M_PAIRING  # noqa: E402
+from finder.gestures import TAP, NAMES  # noqa: E402
 from finder.haptic_patterns import HapticPlayer  # noqa: E402
 from finder.link import LinkMonitor, R_BAD, R_DUP  # noqa: E402
-from finder.tuning import LOGIC_MS  # noqa: E402
+from finder.proximity import HOT  # noqa: E402
+from finder.tuning import FOUND_CELEBRATE_MS, LOGIC_MS  # noqa: E402
 from hal.debuglink import DebugLink, SerialLink, DEBUG_PORT  # noqa: E402
 from sim import Sim  # noqa: E402
 from sim.world import World, Walker, PI  # noqa: E402
@@ -47,8 +54,12 @@ STEP_MS = 50               # physics step; the logic runs every LOGIC_MS (100)
 FRAME_PUMPS = (38, 26, 14)  # mid-frame SerialLink pumps, ms before the step's end (12 apart)
 CONFIRM_MS = 800           # a player presses the side key this long after the runes show
 SPLIT_S = 5
-ROUTE = ((40.0, 0.0), (2.0, 0.0))   # A's walk, out and back (B stands at the origin)
-PAUSE_S = 5.0              # A waits this long at each end
+ROUTE = ((40.0, 0.0), (1.0, 0.0))   # A's walk, out and back (B stands at the origin)
+PAUSE_S = 5.0              # A waits this long out there
+KNOCK_MS = 1500            # next to B, both in HOT: a knock this often
+KNOCKS = ((0, None), (0, 600), (0, 70))   # A's and B's spike, ms after each knock (None: missed);
+                                          # the last one repeats until FOUND
+AGAIN_MS = 2000            # A taps FOUND this long after its celebration ends
 TILT_FLAT = 5.0            # watch held flat, face up
 BATTERY = 90
 BATT_MV = 3950
@@ -56,8 +67,8 @@ BATT_MV = 3950
 
 class FakeWatch:
     """One simulated watch with what ``Telemetry.record`` reads from a
-    ``Runtime``: game, link, tx, params, screen and battery state. ``sink``
-    is its hal/debuglink.py link."""
+    ``Runtime``: game, link, tx, radio, params, screen and battery state.
+    ``sink`` is its hal/debuglink.py link."""
 
     def __init__(self, i, sink):
         self.game = Game(MACS[i])
@@ -66,15 +77,26 @@ class FakeWatch:
         self.rxb = proto.Beacon(GAME_ID)
         self.buf = bytearray(proto.SIZE)
         self.player = HapticPlayer()
+        self.radio = None              # no ESP-NOW radio, so ``rp.ch`` stays null
         self.params = None
         self.screen_is_on = True
         self.bl_level = 0.0
         self.fps = 0.0
         self.batt_mv = BATT_MV
         self.batt_chg = False
+        self.feed = None               # no accelerometer, so ``spk`` stays null
         self.sink = sink
         self.tele = Telemetry(cap=64, dev=DEVS[i], sink=sink)
         self.tele.set_mac(MACS[i])
+
+    def knock(self, t):
+        """A bump spike at ``t``, as app/runtime.py's ``_on_tap`` hands it over."""
+        self.tele.event(t, "tap", ("ok", self.game.on_accel_tap(t)))
+
+    def tap(self, t):
+        """A finger tap on the screen, as app/runtime.py hands a gesture over."""
+        self.game.on_gesture(t, TAP)
+        self.tele.event(t, "touch", ("g", NAMES[TAP]), ("x", 120), ("y", 120))
 
     def hear(self, t, sender, seq, rssi):
         """A beacon from ``sender`` with sequence number ``seq``: filled as it
@@ -120,13 +142,52 @@ class FakeWatch:
             self.tele.record(t, self)
 
 
-def _walk(world, games):
-    """A's route, once both games have left PAIRING."""
-    a = world.a
-    if a.plan or games[0].mode == M_PAIRING or games[1].mode == M_PAIRING:
-        return
-    for x, y in ROUTE:
-        a.walk_to((x, y)).still(PAUSE_S)
+class Players:
+    """The two players, once both games have left PAIRING: next to each other
+    in HOT they knock (``KNOCKS``) until FOUND; A taps FOUND for the next round
+    and walks its route. The first round starts next to each other."""
+
+    def __init__(self, world, watches):
+        self.a = world.a
+        self.watches = watches
+        self.walk = False          # A walks its route before the next knocks
+        self.n = 0                 # knocks since A came back
+        self.next_t = None         # the next knock, once both show HOT
+        self.due = []              # [t, i]: a spike due on watch i
+
+    def step(self, t):
+        w = self.watches
+        for d in list(self.due):
+            if ticks_diff(t, d[0]) >= 0:
+                self.due.remove(d)
+                w[d[1]].knock(d[0])
+        ga, gb = w[0].game, w[1].game
+        if ga.mode == M_FOUND:
+            if ticks_diff(t, ga.found_t) >= FOUND_CELEBRATE_MS + AGAIN_MS:
+                w[0].tap(t)        # TAP=AGAIN: B follows
+                self.walk = True
+                self.n = 0
+                self.next_t = None
+            return
+        if M_PAIRING in (ga.mode, gb.mode) or self.a.plan:
+            return
+        if self.walk:
+            self.a.walk_to(ROUTE[0]).still(PAUSE_S).walk_to(ROUTE[1])
+            self.walk = False
+            return
+        if not (ga.mode == M_HUNT and ga.px.zone == HOT
+                and (gb.mode == M_FOUND or (gb.mode == M_HUNT and gb.px.zone == HOT))):
+            self.next_t = None
+            return
+        if self.next_t is None:
+            self.next_t = t + KNOCK_MS
+        elif ticks_diff(t, self.next_t) >= 0:
+            da, db = KNOCKS[min(self.n, len(KNOCKS) - 1)]
+            self.due.append([t + da, 0])
+            if db is not None:
+                self.due.append([t + db, 1])
+            self.n += 1
+            self.next_t = t + KNOCK_MS
 
 
 def _deliver(sim, watches, pks):
@@ -168,10 +229,11 @@ def run(host="127.0.0.1", port=DEBUG_PORT, seconds=None, speed=1.0, stop=None, s
     watches = (FakeWatch(0, _sink(0, host, port, serial)),
                FakeWatch(1, _sink(1, host, port, serial)))
     games = (watches[0].game, watches[1].game)
+    players = Players(world, watches)
     t = 0
     t0 = time.monotonic()
     while (seconds is None or t < seconds * 1000) and not (stop is not None and stop.is_set()):
-        _walk(world, games)
+        players.step(t)
         sim.radio.period_ms[0] = 1000 // games[0].beacon_hz
         sim.radio.period_ms[1] = 1000 // games[1].beacon_hz
         pks = sim.step(STEP_MS / 1000.0)

@@ -64,4 +64,4 @@ except SystemExit as e:
   console.error(String(e && e.message ? e.message : e));
   exitCode = 1;
 }
-process.exit(exitCode);
+process.exitCode = exitCode;   // not process.exit(): that drops stdout still queued for a slow pipe

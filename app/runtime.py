@@ -334,6 +334,9 @@ class Runtime:
                     pass                    # e.g. MemoryError again: keep the original
             raise
         finally:
+            wd = self.wd                    # first: a second Ctrl-C in the cleanup below
+            if wd is not None and wd.stop():    # must not leave the soft watchdog armed
+                self.wd = None
             self.quiet()
             tl = self.tele
             if tl is not None:
@@ -341,9 +344,6 @@ class Runtime:
                     tl.flush(force=True)    # the last <= flush_ms of records (also on Ctrl-C)
                 except Exception:
                     pass
-            wd = self.wd
-            if wd is not None and wd.stop():
-                self.wd = None
         return self
 
     def _make_watchdog(self, usb=None):

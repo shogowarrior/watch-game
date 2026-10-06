@@ -16,6 +16,13 @@ doing, live, and the laptop logs it. The first way in is the **USB cable**
 Wi-Fi credentials must never be committed, and the owner enters them on the
 laptop, never in a chat.
 
+From the first bump tests (4 Oct 2026): each watch kept its own knock count,
+and the two counts disagreed. The owner asked for the watches to agree on the
+count. They already compare knock times by radio: a knock counts as a bump only
+when the other watch felt one within 0.4 s. So the Real watches view shows, for
+each watch, the knocks it felt, which of them matched the other watch's knock,
+and why the others did not count ("Knocks" below).
+
 ## Decisions
 
 1. **Real mode lives in the local page, not the artifact.** The claude.ai
@@ -41,8 +48,10 @@ laptop, never in a chat.
    - the 5 Hz state records (`"ev": "s"`: rssi, rssi_f, d_est/d_lo/d_hi,
      zone, trend, steps, act, ui/sub, battery, link counters);
    - its events;
-   - one new 5 Hz `"rp"` record with the frame's `RenderParams`, so the page
-     can draw the watch's real screen with the real renderer.
+   - an `"rp"` record with the frame's `RenderParams` (with every state record
+     on Wi-Fi, about once a second on USB, and at once when the screen, its
+     sub-state or its power changes), so the page can draw the watch's real
+     screen with the real renderer.
 
    Records are made in the 5 Hz telemetry path only, never in the render
    loop. Over USB they are written out a little at a time, once per loop pass
@@ -52,17 +61,21 @@ laptop, never in a chat.
    the watch joins the access point, the channel is the access point's. In
    debug mode:
    - The watch joins first and reads the channel.
-   - The ESP-NOW radio starts on that channel without dropping the Wi-Fi
-     connection. Today `EspNowRadio.begin()` always disconnects and allows
-     only channels 1, 6 and 11. Debug mode needs an explicit associated mode:
-     any channel from 1 to 13, no disconnect, `PM_NONE` kept.
-   - Normal play is unchanged.
+   - `Board` then starts ESP-NOW with `EspNowRadio.begin(sta=link.sta)`, its
+     associated mode: the connection stays up, ESP-NOW uses the access
+     point's channel (any of 1-13) and modem sleep stays off (`PM_NONE`).
+   - Normal play and the USB link are unchanged: `begin()` drops any
+     connection and uses channel 1, 6 or 11 (6 by default).
    - **Both watches must join the same access point**, so they share the
      channel.
+   - A watch on the USB link keeps ESP-NOW on channel 6, so a USB watch and a
+     Wi-Fi watch hear each other only when the access point is on 6: load
+     both watches with the same link.
    - Only `hal/` imports `network` and `socket` (AGENTS rule 12).
 5. **Switching it on**, like `/tele`:
    - `python3 tools/deploy.py --port P --debug A` writes `/debug` for the USB
-     link. Nothing else is copied.
+     link. Nothing secret is copied, and any `/secrets.py` an earlier `--wifi`
+     deploy left is removed (the USB link reads no Wi-Fi file).
    - `--debug A --wifi` writes `/debug` for the Wi-Fi link and copies the
      Wi-Fi name and password to the watch as `/secrets.py` (`WIFI_SSID`,
      `WIFI_PASSWORD`; the format of `secrets.example.py`).
@@ -82,9 +95,9 @@ laptop, never in a chat.
      with a hint to move it.
    - The values are read only on the watch and by `deploy.py`'s copy, and are
      never printed, logged or sent.
-   - `tests/test_secrets_guard.py` checks that no file git would commit, and
-     no commit on any branch git knows, contains them (on the laptop that
-     holds the Wi-Fi file; it skips elsewhere).
+   - `tests/test_secrets_guard.py` checks that no file git would commit
+     contains them, and no commit on any branch git knows contains the
+     password (on the laptop that holds the Wi-Fi file; it skips elsewhere).
 
 ## Contract between the parts
 
@@ -137,12 +150,13 @@ Every datagram carries:
 
 The kinds are:
 
-- `"s"`: the existing state record, with unchanged fields.
+- `"s"`: the existing state record, plus its bump readings (`arm`, `tap`,
+  `tap_hot`, `ptap`, `ptap_hot`, `spk`; see "Knocks" below).
 - `"rp"`: `p` holds `finder.render_params.to_dict(params, json_ready=True)`;
   `on` is whether the screen is on; `bl` is the backlight from 0 to 100; `ch`
-  is the watch's Wi-Fi channel (the access point's), or null on the fake
-  watches or when unknown. The page compares the two watches' `ch` to explain
-  a channel split.
+  is the radio's ESP-NOW channel: 6 on USB, the access point's on Wi-Fi, null
+  when there is no radio (the fake watches) or it is unknown. The page
+  compares the two watches' `ch` to explain a channel split.
 - The other telemetry events (`btn`, `tap`, `haptic`, `pwr`, `crash`, ...), as
   they happen.
 
@@ -168,40 +182,44 @@ has room for.
   separator), the compact JSON object (no spaces after `,` and `:`), then
   `\n` (the port may add `\r`). This is RFC 7464's JSON text sequence. Every
   other line on the port (`print` output, the boot message, a traceback, the
-  REPL banner) is plain text.
+  REPL banner) is plain text. The runtime's `fps` line (every 10 s) goes
+  through the same queue (`log()`) as a plain text line, so it never lands
+  inside a record.
 - **Pacing:** `send(s)` frames a record and queues it, cut once (at 5 Hz)
   into pieces of at most 128 bytes. The cuts fall every 128 bytes of the
   queued stream, not of each record, so a pump that finds the FIFO empty can
   fill all of it. When a record would leave more than `SERIAL_QMAX` bytes
   (4096) waiting, the whole record is dropped and counted in `drop`.
   `pump(now)` writes whole pieces only while the FIFO has room: room refills
-  at 11 bytes per ms since the last write, up to 128. So a write never waits,
-  and `pump` allocates nothing.
+  at 11 bytes per ms counted from the tick after the last write (`ticks_ms`
+  floors, so a tick step can be almost no real time), up to 128. So a write
+  never waits, and `pump` allocates nothing.
 - **Where it pumps:** once per loop pass, at the end of `Runtime.step`'s
   telemetry stage (after the record and the flush, with the clock read again),
   and at each mid-frame service of a drawn frame (`_HapticDisplay.service` in
   `app/runtime.py`, which also services the motor and touch, after each of the
   renderer's bands is blitted or pushed and after its overlays). One pump per
-  pass was not enough: a frame takes about 40 ms, so a pass carried at most
-  128 bytes (about 2.5 KB/s), less than the records need, and the queue
-  filled up. At every service (about 5-15 ms apart) the FIFO refills nearly
-  whole, several times per frame. Since `pump` allocates nothing, the render loop stays
-  allocation-free (AGENTS rule 2).
+  pass was not enough: a frame takes about 80 ms, so a pass that draws one
+  carried at most 128 bytes (under 1.6 KB/s), less than the ~3.1 KB/s the
+  records need, and the queue filled up. At every service (about 5-15 ms
+  apart) the FIFO refills nearly whole, several times per frame. Since `pump`
+  allocates nothing, the render loop stays allocation-free (AGENTS rule 2).
 - **Loop exit and power off:** a forced telemetry flush sends what is left and
   calls `drain()`, which writes out everything queued, waiting on the port as
   `print` does, so the last records (such as `crash` or `pwr`) get out.
-- **Rate:** the `s` records at 5 Hz (about 410 bytes each, 2 KB/s) and the
+- **Rate:** the `s` records at 5 Hz (about 490 bytes each, 2.5 KB/s) and the
   events as they happen, but `rp` (about 664 bytes) at most once per second
   (`rp_ms` 1000; the Wi-Fi link sends it with every `s`, `rp_ms` 200), plus at
   once when the screen, its sub-state or its power changes. That is about
-  2.7 KB/s, a quarter of the line, so the queue only fills in a burst. An
+  3.1 KB/s, a quarter of the line, so the queue only fills in a burst. An
   `rp` the queue did not take goes with the next `s`. The page keeps the
   screen animating between `rp` records.
-- **Counters:** `stats()` gives `dev`, `link` (`usb`), `tx` (records written
-  out), `drop` (records dropped whole), `queued` (bytes waiting), `tx_err`
-  (writes the port refused) and `err` (the last such error), like the Wi-Fi
-  link's. `Runtime.stats()` shows them as `debug_stats`. At bring-up, check
-  `drop` and `queued`: both should stay near 0 on a real watch.
+- **Counters:** `stats()` gives `dev`, `link` (`usb`), `tx` (lines written
+  out: records and the fps line), `drop` (lines dropped whole), `queued`
+  (bytes waiting), `tx_err` (writes the port refused) and `err` (the last
+  such error), like the Wi-Fi link's. `Runtime.stats()` shows them as
+  `debug_stats`. At bring-up, check that `drop` stays near 0 on a real watch
+  (`queued` reads 0 after Ctrl-C: the loop drains the link on exit).
 - The USB link needs no Wi-Fi name or password and leaves the radio as in
   normal play. It never reads the port, so the REPL's Ctrl-C still works.
 
@@ -226,8 +244,12 @@ python3 tools/debug_server.py [--serial [PORT ...]] [--http-port 8765] [--udp-po
   `{"ok": true, "udp_port": N, "clients": N, "packets": N, "bad": N, "log": path|null, "watches": {"<dev>": {"src": ip, "last_rx": ms, "n": N}}}`.
   The page checks this to decide whether Real mode is available.
 - Every valid datagram is appended to `logs/debug-YYYYmmdd-HHMMSS.jsonl`
-  (gitignored) unless `--no-log` is set. A recorded session can be replayed
-  later to calibrate the estimators on real radio data.
+  (gitignored) unless `--no-log` is set. The sessions are real radio data for
+  calibrating the estimators later (docs/estimation/bakeoff.md section 4);
+  `tools/knocks.py` judges a session's knocks again ("Knocks" below), and
+  nothing replays the rest yet. A watch's RSSI is in its 5 Hz state records
+  (`rssi`, the last beacon heard), not one line per beacon: debug mode leaves
+  `bcn_rx` off.
 - `--demo` runs `tools/fake_watches.py` in a thread, so Real mode can be tried
   with no watches. `--demo --serial` makes the fake watches use the USB link
   instead: each writes through `SerialLink` into a pseudo-terminal that the
@@ -270,9 +292,12 @@ Details the parts rely on:
 - `rx` is the laptop's wall clock in ms since 1970 (`Date.now()` on the page),
   never the watch's ticks.
 - `/debug/status` `log` is a path relative to the repo, such as
-  `logs/debug-20261003-210553.jsonl`, or null. The log is created with the first
-  record. Each of its lines is exactly one `/events` payload
-  (`{"src", "rx", "rec"}`), ready to replay.
+  `logs/debug-20261003-210553.jsonl`, or null. The log is created with the
+  first line it receives. Each of its lines is one `/events` payload:
+  `{"src", "rx", "rec"}` for a record, `{"src", "rx", "line"}` for text a
+  watch printed on its USB port (boot messages, tracebacks, the fps line),
+  `{"src": "bridge", "rx", "knock"}` for the bridge's judgement of a knock; a
+  reader skips lines without `rec`.
 - The `/events` stream starts with `retry: 2000`, so the page's `EventSource`
   reconnects within 2 s after the bridge restarts. A comment line every 10 s
   finds closed tabs.
@@ -292,6 +317,101 @@ writable binary files (one per watch), each watch sends through
   on a daemon thread.
 - The two watches are `A` and `B`, with different `mac` values. Their `rp`
   records hold `finder.render_params.to_dict(params)`.
+- The players knock whenever A is next to B and both show HOT: first a knock
+  only A feels, then one B feels 0.6 s late, then a matched one, which ends
+  the round; a tap on FOUND starts the next. So the Knocks panel shows each
+  kind of verdict (`buzz` when a knock lands while a watch buzzes, such as
+  just after it enters HOT).
+
+### Knocks: which spikes the watches matched, and why the rest did not count
+
+The game's bump code is unchanged: this only reads it. Each watch learns its
+partner's spike times by radio (every beacon carries `bump_ago_ms`, the age
+of the sender's last spike; `finder/session.py` puts it on the receiver's
+clock as `peer.tap_t`), and counts a knock only when the partner's spike is
+within `BUMP_WINDOW_MS` (400) of its own, each spike used once. So each
+watch can say which of its spikes matched, on its own clock, as the game
+does.
+
+**What a watch adds to its state record** (`app/telemetry.py`):
+
+- `arm`: `Game.bump_armed()`, true while it feels for knocks (HOT, FOUND, and
+  PAIRING once the runes show; the accelerometer runs fast only then).
+- `tap`, `tap_hot`: its last spike that reached the game (`t` on its clock,
+  or null) and whether that spike was made in HOT (the beacon's
+  `ST_TAP_HOT`, which the partner sees too).
+- `ptap`, `ptap_hot`: the partner's last spike as heard by radio, on this
+  watch's clock (null before the first), and the partner's `ST_TAP_HOT`.
+- `spk`: the accelerometer's counts since it started, `[spikes, soft, odd,
+  buzz]` (`app/imu_feed.py`): spikes handed to the game; bumps that never
+  reached the spike peak (1 g); bumps that lasted too long for a knock
+  (`BUMP_SPIKE_MS`) or came within 200 ms of the last spike; and bumps
+  hidden by the motor's own buzz.
+  Null on a watch without an accelerometer (and on the fake watches).
+
+Each spike that reaches the game is also a `tap` event (`ok` false: the game
+ignored it, because its own buzz was blanking the accelerometer).
+
+**The bridge judges every spike** (`tools/knocks.py`, `Knocks`, fed every
+record `handle` relays). A spike comes from a `tap` event, or from a state
+record's `tap` that no event brought (a record the USB queue dropped) and
+that is at most 2.5 s old. Each partner spike heard goes with one spike of
+this watch only, its nearest (the earlier of two as near), so one knock is
+never counted twice. The verdicts:
+
+- `matched`: a partner spike that goes with it lies within 0.4 s (`gap`, ms,
+  positive when the partner's spike came first). The sentence adds whether
+  both were made in HOT (a knock ends the round only then), that one or
+  neither was, or that it is not known (no record named the spike).
+- `buzz`: the game ignored it (its own buzz).
+- `apart`: the nearest partner spike that goes with it was more than 0.4 s
+  and at most 2 s away.
+- `alone`: no partner spike that goes with it within 2 s. The sentence says
+  why, from the partner's own records at the same moment, first that
+  applies: it sent nothing yet, or was not sending then (no state record
+  within 1 s on both sides); it felt one knock then, but that one goes with
+  this watch's other spike; it felt the knock but was buzzing; it felt it
+  (within 0.6 s, or its nearest knock within 2 s) but the time never reached
+  this watch by radio; it was not feeling for knocks (`arm` false); its
+  accelerometer set the bump aside (`spk` within 0.5 s after: during its
+  buzz, too soft, or too long or too soon); it felt nothing. When its
+  records carry no `spk`: "No knock from" it. A watch whose own records carry
+  no `ptap` runs code from before this panel: its spikes are `alone` with a
+  sentence that says to deploy both watches again.
+
+When: a `buzz` at once; a `matched` once its watch's state records reach
+0.4 s past the later of the two spikes (both HOT bits are firm by then);
+any other once they reach 2.5 s past it (a partner spike up to 2 s later has
+been heard by then); and any spike the bridge has held 4 s (its watch went
+silent; the bridge checks every 0.2 s while no datagram arrives, and judges
+what is left when it stops).
+
+"The same moment" is laptop time: a watch's clock offset is the smallest
+`rx - t` over its last 50 state records (10 s). A state record more than 1 s
+behind the last one means the watch restarted: its waiting spikes are judged
+and it starts afresh (its totals carry on, its accelerometer counts start
+again from 0); a record less far behind came out of order and is dropped.
+The offset only places spikes for the partner's side and the rows; matching
+uses the watch's own clock, as the game does.
+
+Each judgement is one line on `/events` and in the log:
+`{"src": "bridge", "rx": ms, "knock": {"dev", "t", "at", "row", "v", "gap",
+"why", "n"}}`: `at` the spike in laptop ms, `row` the same number for both
+watches' spikes of one knock (a `matched` or `apart` spike joins the row of
+the partner spike it names; any other joins a row within 0.6 s that holds
+neither), `v` the verdict
+above, `gap` null unless `matched` or `apart`, `why` one plain sentence (the
+verdict's own name, Matched, Set aside, Too far apart or Not matched, goes
+with it on the page and in the terminal) and `n` that watch's totals so far. A log reader that wants records skips lines
+without `rec`, as before. The bridge also prints the sentence in its
+terminal. `/debug/status` gains `"knocks": {"totals": {"<dev>": totals},
+"recent": [the last 40 judgements]}`, with totals `{"felt", "matched",
+"buzz", "apart", "alone", "spk"}` (`spk`: the accelerometer counts since the
+bridge first heard the watch).
+
+`python3 tools/knocks.py logs/debug-....jsonl` judges a saved session again
+and prints the same sentences and the totals, so a bump test can be read back
+without the page.
 
 ### Page side (`sim/webhost.py`, `web/sim/index.html`)
 
@@ -310,8 +430,15 @@ The page in Real mode:
   zone, trend, rssi/rssi_f, steps, activity, battery and loss, all with
   plain-language labels.
 - **Distance chart:** each watch's d_est (with the d_lo..d_hi band) and rssi_f.
+- **Knocks:** the matched knocks on each watch and whether the two agree,
+  each watch's totals as a sentence, and the last 10 knocks, newest first:
+  per knock, what each watch made of it (the bridge's sentence). Before the
+  first knock, a line on when knocks count. Each time the stream opens (the
+  bridge may have restarted) the page clears the panel and fills it from
+  `/debug/status` (`totals` and `recent`), then from each `knock` line.
 - **Raw log:** the last 50 lines, collapsible. Plain text lines from a USB
-  port show there too, marked with the port.
+  port show there too, marked with the port, and the bridge's `knock` lines,
+  marked `bridge`.
 - **Waiting state:** a short how-to, USB first: plug both watches in, deploy
   each with `--debug A` / `--debug B`, run `python3 tools/debug_server.py
   --serial`, open `http://localhost:8765/local.html`; then one line on Wi-Fi.
@@ -328,13 +455,18 @@ How the page reads the records:
 - Two different `mac` values under one label within 3 s are flagged as two
   watches with the same name. The same MAC on both watches is fine.
 - When both watches are live and their latest `rp` records carry different
-  non-null `ch`, both cards say the watches joined different parts of the
-  Wi-Fi (different channels) and suggest a network with one access point.
+  non-null `ch`, both cards say why they cannot hear each other. Both on
+  Wi-Fi: they joined different parts of the Wi-Fi (different channels), so use
+  a network with one access point. One on USB: the cards name both channels
+  ("Watch A talks on channel 6 (USB) and watch B on your Wi-Fi's channel 11
+  ...") and say to load both watches with the same link (both on USB, or both
+  with `--wifi`).
 - "Last heard" counts from the bridge's `rx`, not from the record's `t`.
 - An `rp` record without `p` keeps the last screen. A `mac` of null (a watch
   whose radio failed to start) is accepted.
 - `window.fieldSim` also has `mode`, `setMode('sim'|'real')` (it resolves to the
-  mode in effect) and `real` (a summary of what each watch sent).
+  mode in effect) and `real` (a summary of what each watch sent, with the
+  knock totals and rows).
 
 ## Tests (both runners where they apply)
 
@@ -355,6 +487,11 @@ How the page reads the records:
   and short timeouts. These run on CPython only.
 - `show_params` draws the same frame the renderer draws for the same params.
 - The secrets guard.
+- `tools/knocks.py`: each verdict and reason from crafted records, the
+  timings, one-to-one pairing, the clock offset, a restart and an
+  out-of-order record, rows, a spike from a dropped `tap` event, records
+  from older watch code; the bridge's `knock` lines, log, status and silent
+  watch; the fake watches' knocks end to end.
 
 No test uses real Wi-Fi or a real serial port.
 

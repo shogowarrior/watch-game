@@ -242,15 +242,19 @@ does), so the link paces itself:
   stream (`SERIAL_FIFO`). A record that would leave more than 4096 bytes
   waiting (`SERIAL_QMAX`) is dropped whole and counted in `drop`.
 - `pump(now)` writes whole pieces only while a model of the FIFO has room
-  (refilling at 11 bytes per ms since the last write), so a write never waits,
-  and it allocates nothing. `app/runtime.py` calls it once per loop pass and
-  at each mid-frame service (after each band the renderer blits or pushes,
-  and after its overlays, ~5-15 ms apart); once per pass was too slow while
-  frames render.
+  (refilling at 11 bytes per ms counted from the tick after the last write),
+  so a write never waits, and it allocates nothing. `app/runtime.py` calls it
+  once per loop pass and at each mid-frame service (after each band the
+  renderer blits or pushes, and after its overlays, ~5-15 ms apart); once per
+  pass was too slow while frames render.
 - `drain()` (a forced telemetry flush at loop exit and power off) writes out
   whatever waits, waiting on the port like `print`.
-- `stats()` gives `tx`, `drop`, `queued` (bytes waiting), `tx_err` and `err`.
-  At bring-up, `drop` and `queued` should stay near 0.
+- `log(text)` queues the runtime's fps line as a plain text line between
+  records.
+- `stats()` gives `tx` (lines written out: records and fps lines), `drop`,
+  `queued` (bytes waiting), `tx_err` and `err`. At bring-up, `drop` should
+  stay near 0 (`queued` reads 0 after Ctrl-C: the loop drains the link on
+  exit).
 - The screen record (`rp`) goes once a second (`rp_ms` 1000, against 200 on
   Wi-Fi) and at once when the screen, its sub-state or its power changes, so
   the records need about a quarter of the line.
@@ -263,8 +267,12 @@ Gotchas:
   failed stays on channel 6 while a joined partner uses the access point's
   channel, so the pair cannot find each other until both have joined. A mesh
   or extender network (one name, several access points) can split two
-  watches the same way. Each `rp` record carries the channel (`ch`), so the
-  page can say when the two watches differ.
+  watches the same way. A watch on the USB link (or with no link) keeps
+  ESP-NOW on channel 6 too, so it hears a Wi-Fi-link watch only when the
+  access point is on 6: load both watches with the same link. Each `rp`
+  record carries the radio's channel (`ch`: 6 on USB, the access point's on
+  Wi-Fi), so the page can say when the two watches differ, including one on
+  USB and one on Wi-Fi.
 - If the Wi-Fi drops in the middle of a game, the ESP32 keeps trying to
   reconnect. That can make it scan other channels and disturb ESP-NOW until
   the access point is back in reach. Debug mode is for the desk and the field

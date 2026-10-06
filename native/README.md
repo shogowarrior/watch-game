@@ -2,19 +2,21 @@
 
 Work in progress. Today this is a **display and motion-sensor benchmark** built
 for two runtimes from one portable C++ core, to find out where MicroPython's
-frame time goes and how much a native runtime gains. The game itself has not
-been ported yet. MicroPython (the rest of the repo) is untouched.
+frame time goes and how much a native runtime gains, and the game's logic and
+renderer ported into that core, checked against the Python. The main loop and
+the watch builds that run the game are next. MicroPython (the rest of the repo)
+is untouched.
 
 | Path | What |
 |---|---|
-| `core/` | Portable C++17 with no hardware calls. The ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h` and `field_tables.h` are generated. |
-| `esp32_shared/` | ESP32 clock, serial log, backlight PWM and the motion-sensor task on core 0. Plain ESP-IDF calls, so both builds share it. |
+| `core/` | Portable C++17 with no hardware calls. The game (`finder/`, one `hm::<module>` per Python module, `hm::game::Game` on top, checked call for call below), the renderer (`ui/`: `hm::ui::Renderer` draws any strip of a frame; every snapshot fixture's frame matches `tests/snapshot_crc.json`), the ripple field (a port of `ui/field.py`, checked frame by frame against the MicroPython renderer), the ST7789, AXP202 and BMA423 command sequences (as `hal/*.py`), and `hm::Bench`, the benchmark every runtime runs. `include/hm/tuning.h`, `field_tables.h` and `ui_tables.h` are generated. |
+| `esp32_shared/` | ESP32 clock, serial log, backlight PWM, the motion-sensor task on core 0, the spi_master LCD bus, the ESP-NOW radio (IDF 4.4 and 5), the motor and the interrupt lines, plus `esp32_app.h`: those as the game loop's parts (`hm/platform.h`). Plain ESP-IDF calls, so both builds share it. |
 | `arduino/` | PlatformIO: Arduino-ESP32 2.0.17 (IDF 4.4), one env per graphics library (LovyanGFX, TFT_eSPI, Arduino_GFX, LVGL): see `arduino/README.md`. |
 | `idf/` | PlatformIO: ESP-IDF 5.5, one environment per way of driving the panel: the `esp_lcd` SPI panel IO with DMA (`bench-esplcd`, which also checks a faster BMA423 I2C clock) and SPI2's registers with DMA (`bench-regdma`). `components/hm_idf/` holds the I2C0 and SPI buses they share; its `portable/` (the I2C0 check) runs in the host tests. |
 | `idf/lvgl/` | PlatformIO: LVGL 9.5 through esp_lvgl_port 2.9 on the same `esp_lcd` bus (`bench-lvgl`). The field is an LVGL image a custom decoder fills from the ring map, so its pixels are the other builds' ones; the HOT chips are LVGL labels; and a third scene has LVGL draw rings itself as arcs. |
 | `micropython/` | `hmlcd`, a C user module for a custom MicroPython 1.29 build: the screen push on core 0 from internal DMA buffers, from the shared ST7789 code and `esp32_shared`'s spi_master bus. |
-| `test/` | Host tests (g++ with address and UB sanitizers) on fake hardware, plus the golden palettes. `run.py` also builds the ports' portable code and tests (`idf/test/`), and replays the Python game's traces through the game port (`trace.h`, `test_port_*.cpp`, below). |
-| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU), `xcheck.py` (the core with the watch's compilers), `bench_report.py` (tables from bench logs), `golden/` (game vectors from `finder/`), `trace_game.py` (records the Python game's calls for the trace tests). |
+| `test/` | Host tests (g++; the code under test with address and UB sanitizers) on fake hardware, plus the golden palettes and frames. `run.py` also builds the ports' portable code and tests (`idf/test/`), and replays the Python game's traces through the game port (`trace.h`, `test_port_*.cpp`, below). |
+| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU), `xcheck.py` (the core, and esp32_shared's plain headers, with the watch's compilers), `bench_report.py` (tables from bench logs), `golden/` (game vectors from `finder/`), `scenarios/` (fixed inputs the trace tests record), `trace_game.py` (records the Python game's calls for the trace tests). |
 
 Both builds use pins and settings from `hal/pins.py`: SPI on HSPI with SCK 18,
 MOSI 19, CS 5, DC 27 and no MISO (GPIO12 is the backlight), MADCTL 0xC0 with
@@ -29,9 +31,10 @@ versions in `idf/lvgl/dependencies.lock`.
 ```sh
 python3 native/test/run.py                      # host tests (tests/test_native.py runs them too)
 python3 native/tools/gen_tuning_h.py --check    # headers match finder/tuning.py and ui/field.py
-python3 native/tools/xcheck.py                  # core/ with both xtensa g++, double promotion an error
+python3 native/tools/xcheck.py                  # core/ (+ esp32_shared headers) with both xtensa g++, double promotion an error
 python3 native/tools/golden/run.py [--check]    # native/test/golden/*.txt (modules without a trace port)
 node tools/mpy/run.mjs native/tools/golden_field.py > native/test/golden_field.txt   # after a ui/field.py change
+python3 native/tools/golden_frames.py [--check] # ui_tables.h and the snapshot fixtures, after a ui/ change
 python3 native/test/run.py --tests test_game,test_episode   # the trace tests on wider Python tests (minutes)
 python3 native/test/run.py --mark               # after a run where every port matched: note this Python
 ```
@@ -42,12 +45,15 @@ The C++ port of `finder/` (one header per Python module, `core/include/hm/<modul
 names as in Python, floats as `double` like CPython, ticks with MicroPython's
 2^30 period) is checked call for call against the Python. `run.py` runs
 `tools/trace_game.py` while it compiles: it runs Python tests (`TESTS` there:
-those of the modules ported so far) with every game class wrapped, and records
-each outermost call on each object (arguments, result, the object's public
+those of the modules ported so far), each with the game classes `TESTS` names
+for it wrapped (objects of the others still show as references), and records
+each outermost call on each object, a test's call of a private method too
+(arguments, result, the object's public
 state afterwards, the functions it calls back, attributes other code writes
 between calls) into one JSON-lines file per class. Each ported class has a
 `Port<T>` in `test/test_port_<module>.cpp` (how to construct it, make each call
-by method name, show its state under the Python names, write an attribute);
+by method name, show its state under the Python names, write an attribute; a
+`Probe` the class befriends reaches the private methods tests call);
 `CHECK_REPLAY` replays the class's file and compares every result and state
 field after every call exactly, as Python's `==`, and prints the first
 difference with its trace line, call, field, wanted and actual value.

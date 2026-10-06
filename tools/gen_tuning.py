@@ -12,6 +12,9 @@ haptic queue) must match their whole template: if their wording changes this
 script fails loudly instead of emitting a stale number.
 Tokens that repeat a value (backlight, sweep rate, breathing, crossfade, link
 bars, preset wavelengths, FOUND glow_r) must agree.
+The themes block (ui-spec section 4A) must list every theme in ``order``,
+ripple first, each label as its upper-case name; theme colours must be
+RGB565-exact.
 """
 
 import hashlib
@@ -249,6 +252,112 @@ def _fmt(v, ind=0):
             return one
         return "{\n" + "".join(pad + x + ",\n" for x in items) + " " * ind + "}"
     raise TypeError("cannot emit %r" % (v,))
+
+
+def _lut_stepped(stops_rgb, size):
+    """64-entry LUT that holds each stop flat: LUT[j] = stop round(j*7/63)."""
+    n = len(stops_rgb) - 1
+    out = []
+    for j in range(size):
+        r, g, b = stops_rgb[int(math.floor(j * n / (size - 1) + 0.5))]
+        out.append(Hex(_swap(_rgb565(r, g, b))))
+    return tuple(out)
+
+
+def _exact(name, hexstr):
+    """RGB565 int of an RGB565-exact hex colour (bit-replicated channels)."""
+    if not isinstance(hexstr, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", hexstr):
+        raise ValueError("colour %s %r is not #RRGGBB" % (name, hexstr))
+    r, g, b = _rgb(hexstr)
+    if (r, g, b) != ((r >> 3) << 3 | r >> 5, (g >> 2) << 2 | g >> 6, (b >> 3) << 3 | b >> 5):
+        raise ValueError("colour %s %s is not RGB565-exact" % (name, hexstr))
+    return _rgb565(r, g, b)
+
+
+THEME_RULE = (r"ui-spec section 4A\. Ripple draws with ramp and color\.bg\.iris; every other "
+              r"theme lists its own ramps \(8 RGB565-exact stops each\) and lens colour \(iris\)\. "
+              r"lut linear: expanded as ramp\.lut_interpolation; lut stepped: LUT\[j\] = stop "
+              r"round\(j\*7/63\)\. params: the section 4A numbers \(z = zone 0\.\.3 FAR\.\.HOT, "
+              r"\[a, b\] = a \+ b\*I or a \+ b\*z as section 4A writes it\)\.")
+# per-zone params (FAR..HOT): 4 values each
+THEME_ZONE_PARAMS = {
+    "sonar": ("beams",),
+    "warp": ("stars", "rate"),
+    "fireflies": ("count", "sync"),
+}
+# [a, b] params (a + b*I or a + b*z)
+THEME_AB_PARAMS = {
+    "sonar": ("trail_deg", "trail_amp", "range_level"),
+    "tide": ("swell_px", "bubbles", "bubble_px_s", "wave_px_s"),
+    "arcade": ("front_scale", "core_cells"),
+}
+
+
+def _key(d, k, path):
+    if not isinstance(d, dict) or k not in d:
+        raise ValueError("tokens.json %s: missing %r" % (path, k))
+    return d[k]
+
+
+def _themes(th, size, rgb565):
+    """Rows for the themes block: names, labels, ramp LUTs, lens colours, params."""
+    _match(THEME_RULE, _key(th, "rule", "themes"), "themes.rule")
+    order = tuple(_key(th, "order", "themes"))
+    if order[0] != "ripple" or _key(th, "default", "themes") not in order or sorted(order) != sorted(
+            k for k in th if k not in ("order", "default", "rule")):
+        raise ValueError("themes: order, default and the theme entries disagree")
+    labels = {}
+    luts = {}
+    iris = {}
+    params = {}
+    for n in order:
+        t = th[n]
+        path = "themes." + n
+        lab = _key(t, "label", path)
+        if lab != n.upper() or len("THEME: " + lab) > 16:
+            raise ValueError("themes.%s.label must be %r and fit THEME: <label> in 16 chars" % (n, n.upper()))
+        labels[n] = lab
+        if n == "ripple":
+            if sorted(t) != ["label"]:
+                raise ValueError("themes.ripple takes only a label (it draws with ramp and bg.iris)")
+            iris[n] = Hex(_swap(rgb565["bg.iris"]))
+            continue
+        if sorted(t) != ["iris", "label", "lut", "params", "ramp"]:
+            raise ValueError("%s: keys must be label, lut, iris, ramp, params" % path)
+        kind = t["lut"]
+        if kind not in ("linear", "stepped"):
+            raise ValueError("themes.%s.lut: %r" % (n, kind))
+        if sorted(t["ramp"]) != sorted(RAMPS):
+            raise ValueError("%s.ramp: needs exactly %s" % (path, ", ".join(RAMPS)))
+        ramps = {}
+        for r in RAMPS:
+            stops = t["ramp"][r]
+            if len(stops) != 8:
+                raise ValueError("themes.%s.ramp.%s needs 8 stops" % (n, r))
+            for k, c in enumerate(stops):
+                _exact("themes.%s.ramp.%s[%d]" % (n, r, k), c)
+            rgb = [_rgb(c) for c in stops]
+            ramps[r] = _lut(rgb, size) if kind == "linear" else _lut_stepped(rgb, size)
+        luts[n] = ramps
+        iris[n] = Hex(_swap(_exact("themes.%s.iris" % n, t["iris"])))
+        prm = t["params"]
+        for k in THEME_ZONE_PARAMS.get(n, ()):
+            v = _key(prm, k, path + ".params")
+            if not isinstance(v, list) or len(v) != 4:
+                raise ValueError("%s.params.%s: one value per zone (4)" % (path, k))
+        for k in THEME_AB_PARAMS.get(n, ()):
+            v = _key(prm, k, path + ".params")
+            if not isinstance(v, list) or len(v) != 2:
+                raise ValueError("%s.params.%s: [a, b]" % (path, k))
+        params[n] = {k: _tup(v) for k, v in prm.items()}
+    return [
+        ("THEME_NAMES", order, "MENU order; ripple first"),
+        ("THEME_DEFAULT", th["default"], None),
+        ("THEME_LABELS", labels, "MENU row THEME: <label>"),
+        ("THEME_IRIS", iris, "lens colour, byte-swapped (ripple: bg.iris)"),
+        ("THEME_RAMP_LUT", luts, "like RAMP_LUT; ripple uses RAMP_LUT"),
+        ("THEME_PARAMS", params, "ui-spec section 4A numbers"),
+    ]
 
 
 # ---- build -----------------------------------------------------------------
@@ -532,6 +641,9 @@ def build(tok):
     rows.append(("RAMP_LUT", {r: _lut([_rgb(col[t]["hex"]) for t in rp[r]], size) for r in RAMPS},
                  "LUT[j] = ramp position j/63*7, byte-swapped"))
     sec("Ramps (ramp)", rows)
+
+    # themes (ui-spec section 4A)
+    sec("Themes (themes): ramps, lens colour and section 4A numbers per theme", _themes(tok["themes"], size, rgb565))
 
     # layout
     ir = lay["iris_radius_px"]

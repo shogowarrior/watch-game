@@ -29,8 +29,14 @@ docs/design/debug-mode.md, "Contract between the parts". This server:
   {"src": "<port>", "rx": <ms>, "line": "<text>"}``, so boot messages and
   tracebacks reach the page's raw log. A port that fails or goes away is
   closed and opened again every second, with the reason in /debug/status;
-- answers ``GET /debug/status`` with the counters, the watches heard so far
-  and the serial ports (the page asks it whether Real mode is available);
+- judges each watch's bump spikes as its records arrive (tools/knocks.py:
+  matched with the other watch's spike within 0.4 s, or why not) and sends
+  each judgement as ``data: {"src": "bridge", "rx": <ms>, "knock": {...}}``,
+  also printed in this terminal;
+- answers ``GET /debug/status`` with the counters, the watches heard so far,
+  the serial ports, the knock totals and the last knock judgements (the
+  page asks it whether Real mode is available, and fills its Knocks panel
+  from it when its stream opens);
 - appends every event line, exactly as sent on ``/events``, to
   ``logs/debug-YYYYmmdd-HHMMSS.jsonl`` (gitignored; created with the first
   record) unless ``--no-log``, so a session can be replayed later to calibrate
@@ -68,6 +74,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 # Where the watches send: the one value deploy.py writes into /debug and fake_watches.py uses.
 from hal.debuglink import DEBUG_PORT as UDP_PORT  # noqa: E402  (after the path fix)
+from tools.knocks import Knocks, say, summary  # noqa: E402
 
 HTTP_PORT = 8765
 RECV_MAX = 4096           # a record is at most ~1400 bytes; a longer one arrives cut and is bad
@@ -129,9 +136,10 @@ def _shown(path):
 
 
 class Bridge:
-    """Records and serial lines -> /events clients, the log and the counters.
-    ``handle`` runs on the UDP and serial threads, ``port_*`` on the serial
-    ones, the rest on HTTP threads; one lock guards them."""
+    """Records and serial lines -> /events clients, the log and the counters,
+    and the knock judgements (``knocks``). ``handle`` runs on the UDP and
+    serial threads, ``port_*`` on the serial ones, the rest on HTTP threads
+    (``news`` on main()'s); one lock guards them."""
 
     def __init__(self, udp_port, log=None):
         self.udp_port = udp_port
@@ -141,6 +149,8 @@ class Bridge:
         self.bad = 0
         self.watches = {}         # dev -> {"src", "last_rx", "n"}
         self.serial = {}          # port name -> {"open", "err", "records", "lines"}
+        self.knocks = Knocks()
+        self._news = []           # knock sentences for the terminal, until ``news`` takes them
         self._lock = threading.Lock()
         self._clients = []        # one queue of lines per open /events stream
         self._file = None
@@ -152,13 +162,8 @@ class Bridge:
         not a valid record. Ignored once ``close`` has run (no log reopened,
         no stream fed)."""
         rec = None if data is None else parse(data)
-        line = None
-        if rec is not None:
-            try:              # strict JSON for the page and the log; parse lets no NaN through
-                line = json.dumps({"src": src, "rx": rx, "rec": rec}, separators=(",", ":"),
-                                  allow_nan=False)
-            except ValueError:
-                pass
+        line = None if rec is None else json.dumps({"src": src, "rx": rx, "rec": rec},
+                                                   separators=(",", ":"))
         with self._lock:
             if self.done.is_set():
                 return None
@@ -175,7 +180,28 @@ class Bridge:
             if serial:
                 self._port(src)["records"] += 1
             self._relay(line)
+            for v in self.knocks.feed(rec, rx):
+                self._knock(v, rx)
         return line
+
+    def _knock(self, v, rx):
+        """A knock judgement to the log, the streams and the terminal (lock held)."""
+        self._relay(json.dumps({"src": "bridge", "rx": rx, "knock": v}, separators=(",", ":")))
+        self._news.append(say(v))
+
+    def tick(self, rx):
+        """Judges the spikes that are ready at ``rx`` while no record arrives
+        (a watch went silent): the UDP loop calls it on each timeout."""
+        with self._lock:
+            if not self.done.is_set():
+                for v in self.knocks.tick(rx):
+                    self._knock(v, rx)
+
+    def news(self):
+        """The knock sentences since the last call, for the terminal."""
+        with self._lock:
+            out, self._news = self._news, []
+        return out
 
     def port_line(self, port, data, rx):
         """One line read from serial ``port`` at ``rx`` ms (bytes without
@@ -249,12 +275,18 @@ class Bridge:
                     "packets": self.packets, "bad": self.bad,
                     "log": None if self.log is None else _shown(self.log),
                     "watches": {k: dict(v) for k, v in self.watches.items()},
-                    "serial": {k: dict(v) for k, v in self.serial.items()}}
+                    "serial": {k: dict(v) for k, v in self.serial.items()},
+                    "knocks": {"totals": self.knocks.totals(), "recent": self.knocks.recent()}}
 
     def close(self):
-        """Ends every /events stream and closes the log."""
-        self.done.set()
+        """Judges the spikes still waiting, then ends every /events stream
+        and closes the log."""
+        rx = now_ms()
         with self._lock:
+            if not self.done.is_set():
+                for v in self.knocks.flush(rx):
+                    self._knock(v, rx)
+            self.done.set()
             for q in self._clients:
                 try:
                     q.put_nowait(None)
@@ -560,6 +592,7 @@ class DebugServer:
             try:
                 data, addr = self.udp.recvfrom(RECV_MAX)
             except socket.timeout:
+                self.bridge.tick(now_ms())
                 continue
             except OSError:           # closed by stop(), or (Windows) longer than RECV_MAX
                 data, addr = None, ("", 0)
@@ -694,12 +727,14 @@ def port_news(port, p):
 
 
 def _follow(srv):
-    """Prints the watches heard and the serial ports' news until Ctrl-C."""
+    """Prints the watches heard, the serial ports' news and the knocks until Ctrl-C."""
     heard = set()
     news = {}
     try:
         while True:
             time.sleep(1)
+            for line in srv.bridge.news():
+                print(line)
             st = srv.bridge.status()
             for port, p in sorted(st["serial"].items()):
                 n = port_news(port, p)
@@ -747,12 +782,19 @@ def main(argv=None):
     if demo is not None:
         demo.join(2)                  # it stops within one step once the bridge is done
     _close_all(ends)
+    for line in srv.bridge.news():        # spikes judged as it closed
+        print(line)
     st = srv.bridge.status()
     print("Stopped. Heard %d record(s) from %d watch(es); %d could not be read." % (
         st["packets"], len(st["watches"]), st["bad"]))
+    for line in summary(st["knocks"]["totals"]):
+        print(line)
     if st["log"] is not None and st["packets"]:
         print("Session saved to %s" % st["log"])
 
 
 if __name__ == "__main__":
+    # a pipe (the web-sim preview, tee) shows each line as it is printed; not in main(),
+    # which the tests run with stdout redirected to a StringIO (no reconfigure)
+    sys.stdout.reconfigure(line_buffering=True)
     main()

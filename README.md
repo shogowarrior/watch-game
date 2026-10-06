@@ -9,7 +9,8 @@ closer, the watch buzzes in step with it, and an arrow appears once you've
 worked out which way to go. You win by finding your friend and bumping watches.
 
 The code has been tested on the computer and in a two-watch simulator, but
-**hasn't been run on real watches yet**. Expect to calibrate.
+**has only had a first bring-up on real watches** (display, IMU and bump
+levels). Expect to calibrate.
 
 ## How it works
 
@@ -82,11 +83,11 @@ reboots into the game. To play:
 
 | Input | Action |
 |---|---|
-| Tap the centre | Start a direction scan, or cancel one; confirm runes when pairing; lock the arrow while turning. Where a tap does nothing, some screens say what does (SWIPE: HOW TO PLAY while it looks for the other watch, PRESS 2X TO SCAN in HOT, PRESS THE BUTTON on FOUND) |
+| Tap the centre | Start a direction scan (not in HOT, where the screen is for knocking watches: press the side button twice there), or cancel one; confirm runes when pairing; lock the arrow while turning. Where a tap does nothing, some screens say what does (SWIPE: HOW TO PLAY while it looks for the other watch, PRESS 2X TO SCAN in HOT, PRESS THE BUTTON on FOUND) |
 | Swipe left or right (while it looks for the other watch) | Flip through four how-to cards; swipe past the last one or press the button to close them. They close by themselves when the other watch is found |
 | Side button, short press | Same as a tap on the current screen, except in HOT: one press is your half of the fallback bump, and two presses within 1 s start a scan; on FOUND it starts the next round. When the screen is off, or lit by an event while your wrist stayed down, it only wakes it |
 | Touch and hold (0.8 s) or button hold (1.5 s) | Menu: resume, sun mode, buzz mode (full / events / off), place (outdoors / indoors, changes how signal turns into distance), end round. A short press moves to the next row (it wraps) and a swipe scrolls; tap a row, or hold again, to choose it. END ROUND asks SURE? PRESS: press again within 3 s to confirm. The menu closes by itself after 8 s without input |
-| Raise your wrist | Screen on. Lower it and the screen goes off, but the game keeps running and buzzing. On battery the screen also lights for a few seconds when you get close, when BUMP! appears, when the signal drops and when your friend leaves, and for 10 s at FOUND |
+| Raise your wrist | Screen on. On battery, lower your wrist for 10 s and the screen goes off (on USB power it stays on), but the game keeps running and buzzing. On battery the screen also lights for a few seconds when you get close, when BUMP! appears, when the signal drops and when your friend leaves, and for 10 s at FOUND |
 | Bump watches (in HOT) | Found! Fallback: both press the button within 3 s |
 
 **Safe boot:** double-press or hold the side button within the first second after
@@ -107,14 +108,16 @@ node tools/mpy/run.mjs tests/runner.py      # the same tests on real MicroPython
   two watches in your browser. You can drag the watches around a field and see
   both screens react.
 - **Debug mode (the real watches in that page):** plug both watches in, load
-  each with `python3 tools/deploy.py --port P --debug A` (and `--debug B`), and
-  start the bridge with `python3 tools/debug_server.py --serial`. The watches
-  send their screens and readings over the USB cable. Flip the page's toggle
-  to **Real watches** to see both screens live, with a distance chart and the
-  raw messages. Off the cable, the watches can send over your Wi-Fi instead:
-  save its name and password once with `python3 tools/wifi_setup.py` (kept
-  outside the repo, never committed) and add `--wifi` to the deploy. `--demo`
-  on the bridge tries it with two pretend watches. Steps and troubleshooting:
+  each with `python3 tools/deploy.py --port P --app --debug A` (and
+  `--debug B`), and start the bridge with `python3 tools/debug_server.py
+  --serial`. The watches send their screens and readings over the USB cable.
+  Flip the page's toggle to **Real watches** to see both screens live, with a
+  distance chart, the knocks (which ones both watches felt within 0.4 s, and
+  why the others did not count) and the raw messages. Off the cable, the watches can send
+  over your Wi-Fi instead: save its name and password once with
+  `python3 tools/wifi_setup.py` (kept outside the repo, never committed) and
+  add `--wifi` to the deploy. `--demo` on the bridge tries it with two
+  pretend watches. Steps and troubleshooting:
   [docs/hardware-setup.md](docs/hardware-setup.md) section 7.
 - **Estimator experiments:** `python3 tools/bakeoff.py --quick`
   ([docs/estimation/bakeoff.md](docs/estimation/bakeoff.md)).
@@ -155,6 +158,7 @@ node tools/mpy/run.mjs tests/runner.py      # the same tests on real MicroPython
 
 All layers are written: drivers, game logic, renderer, watch runtime, simulator
 and web simulator. The test suite passes on CPython and on MicroPython 1.29
-(WebAssembly), and a simulated two-watch episode reaches FOUND. **It hasn't yet
-run on real watches.** Next steps: the first-boot checklist, the radio
-ping-pong, calibrating the path loss, then field tests.
+(WebAssembly), and a simulated two-watch episode reaches FOUND. **First
+bring-up on real watches is under way** (3-4 Oct 2026). Next steps: the rest
+of the first-boot checklist, the radio ping-pong, calibrating the path loss,
+then field tests.

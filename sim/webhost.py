@@ -449,10 +449,14 @@ class TwoWatchSim:
         self.games[i].on_button(self.t_ms, bool(long))
 
     def bump(self):
-        """Both accelerometers tap at the same instant (watches knocked together)."""
+        """Both watches knocked together at the same instant. A watch senses the
+        spike only while ``Game.bump_armed()`` (HOT, PAIRING seen/confirmed, FOUND):
+        otherwise its accelerometer samples too slowly to see a knock
+        (app/imu_feed.py, ui-spec §6)."""
         t = self.t_ms
-        self.games[0].on_accel_tap(t)
-        self.games[1].on_accel_tap(t)
+        for g in self.games:
+            if g.bump_armed():
+                g.on_accel_tap(t)
 
     # ---- real watches ------------------------------------------------------------
     def real_mode(self, on):

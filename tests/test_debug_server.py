@@ -272,6 +272,62 @@ def test_nothing_is_handled_after_close():
             assert len(f.read().splitlines()) == 1
 
 
+def test_knocks_are_judged_relayed_logged_and_counted():
+    """Each spike's judgement (tools/knocks.py) goes to the streams and the log
+    as a ``knock`` line from ``bridge``, to the terminal (``news``) and into
+    /debug/status; ``tick`` judges a silent watch's spikes and ``close`` the
+    ones still waiting."""
+    ds = _ds()
+    import tempfile
+    from tools.knocks import QUIET_MS, clock
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "debug-x.jsonl")
+        b = ds.Bridge(47268, log)
+        q = b.subscribe()
+
+        def rec(dev, t, ev="s", **kw):
+            d = dict({"dev": dev, "mac": "a1b2c3", "t": t, "ev": ev}, **kw)
+            if ev == "s":
+                d["ptap"] = None      # B's spikes, as A hears them: none
+            return json.dumps(d).encode()
+        rx = 1_790_000_000_000
+        b.handle(rec("A", 1000), "ttyUSB0", rx)
+        b.handle(rec("A", 1050, "tap", ok=True), "ttyUSB0", rx + 200)
+        for i in range(1, 14):        # A's records reach 2.5 s past its spike, never hearing B
+            b.handle(rec("A", 1000 + 200 * i), "ttyUSB0", rx + 200 * i)
+        assert b.news() == ["%s  knock, watch A  Not matched    B has sent nothing yet." % (
+            clock(rx + 50))] and b.news() == []
+        b.handle(rec("A", 3700, "tap", ok=False), "ttyUSB0", rx + 2700)     # judged at once
+        assert [x.split("  ")[2] for x in b.news()] == ["Set aside"]
+        b.handle(rec("A", 3800, "tap", ok=True), "ttyUSB0", rx + 2800)      # then A goes silent
+        b.tick(rx + 2800 + QUIET_MS - 1)
+        assert b.news() == []
+        b.tick(rx + 2800 + QUIET_MS)
+        assert len(b.news()) == 1
+        b.handle(rec("A", 4000, "tap", ok=True), "ttyUSB0", rx + 3000)
+        st = b.status()
+        assert st["packets"] == 18 and st["knocks"]["totals"]["A"]["alone"] == 2, st
+        assert [v["v"] for v in st["knocks"]["recent"]] == ["alone", "buzz", "alone"], st
+        b.close()                     # the one still waiting
+        b.tick(rx + 99999)            # nothing once closed
+        lines = []
+        while True:
+            line = q.get_nowait()
+            if line is None:
+                break
+            lines.append(json.loads(line))
+        knocks = [m for m in lines if "knock" in m]
+        assert [m["src"] for m in knocks] == ["bridge"] * 4, knocks
+        assert [(m["knock"]["dev"], m["knock"]["v"]) for m in knocks] == [
+            ("A", "alone"), ("A", "buzz"), ("A", "alone"), ("A", "alone")]
+        assert knocks[0]["rx"] == rx + 2600 and knocks[0]["knock"]["at"] == rx + 50
+        assert knocks[3]["knock"]["n"]["felt"] == 4
+        assert [m["src"] for m in lines if "rec" in m] == ["ttyUSB0"] * 18
+        with open(log) as f:          # the log holds the same lines
+            assert [json.loads(x) for x in f.read().splitlines()] == lines
+        assert b.status()["knocks"]["totals"]["A"]["buzz"] == 1
+
+
 def test_closed_tab_is_dropped():
     ds = _ds()
     import tempfile
@@ -490,6 +546,49 @@ def test_launch_config_runs_the_bridge_on_usb():
     assert args[0] == "tools/debug_server.py" and "--serial" in args, args
     a = ds.parse_args(args[1:])
     assert a.serial == [] and a.http_port == web["port"] == 8765, args
+
+
+def test_piped_output_shows_each_line_as_it_is_printed():
+    """Run as a script with stdout on a pipe (the web-sim preview, tee), the
+    banner and the "Heard watch" lines arrive while the bridge runs, not when
+    it stops: Python block-buffers a pipe unless the entry point says not to."""
+    ds = _ds()
+    import select
+    import signal
+    import subprocess
+    import sys
+    import tempfile
+    import time
+    if os.name != "posix":
+        raise Skip("select() on a pipe: macOS or Linux")
+    env = dict(os.environ)
+    env.pop("PYTHONUNBUFFERED", None)
+    with tempfile.TemporaryDirectory() as tmp:
+        p = subprocess.Popen(
+            [sys.executable, os.path.join(ds.ROOT, "tools", "debug_server.py"), "--root",
+             _www(tmp), "--http-port", "0", "--udp-port", "0", "--no-log", "--demo"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        got = []
+        try:
+            end = time.time() + 20
+            while not any(ln.startswith("Heard watch") for ln in got):
+                left = end - time.time()
+                assert left > 0, got
+                ready = select.select([p.stdout], [], [], left)[0]
+                assert ready, got
+                ln = p.stdout.readline().decode()
+                assert ln and p.poll() is None, (got, p.poll())   # arrived while it runs
+                got.append(ln)
+        finally:
+            p.send_signal(signal.SIGINT)
+            try:
+                out, err = p.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                out, err = p.communicate()
+    assert got[0].startswith("Debug bridge running."), got
+    assert "Press Ctrl-C to stop.\n" in got, got
+    assert "Stopped. Heard" in out.decode(), (out, err)
 
 
 # ---- USB serial ------------------------------------------------------------------------

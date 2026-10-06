@@ -264,6 +264,17 @@ def test_sideways_swipe_flips_howto_cards_until_paired():
     assert s.telemetry(0)["sub"] == "seen" and not s.games[0].howto.open
 
 
+def test_bump_unarmed_is_not_sensed():
+    s = TwoWatchSim(seed=1)
+    s.auto_pair = False
+    s.set_pose(1, 1.0, 0.0, 270.0)
+    assert not s.games[0].bump_armed() and not s.games[1].bump_armed()
+    s.bump()
+    while s.t_ms < 3000:
+        s.step(50)
+    assert [g.pair.sub for g in s.games] == ["seen", "seen"]
+
+
 def test_auto_pair_starts_quickly():
     s = TwoWatchSim()
     split = [None, None]
@@ -596,9 +607,8 @@ def test_page_follows_the_debug_contract():
     """web/sim/index.html asks the bridge's endpoints and calls the host's real-mode methods."""
     if MPY:
         raise Skip("reads web/sim/index.html and tools/debug_server.py (CPython)")
+    page = _page()
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
-        page = f.read()
     with open(os.path.join(root, "tools", "debug_server.py"), encoding="utf-8") as f:
         server = f.read()
     for path in ("/debug/status", "/events"):
@@ -616,9 +626,7 @@ def test_page_waiting_and_unavailable_name_the_usb_commands():
     bridge with --serial."""
     if MPY:
         raise Skip("reads web/sim/index.html (CPython)")
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
-        page = f.read()
+    page = _page()
     k = page.index('<div class="howto" id="howto">')
     howto = page[k:page.index("</div>", k)]
     steps = howto[howto.index("<ol>"):howto.index("</ol>")]
@@ -641,20 +649,10 @@ def test_page_real_mode_shows_usb_ports_and_printed_text():
     """Text a watch printed on its USB port goes to the raw log, marked with the port, and is
     not a record; "Sent from" names the USB port or the Wi-Fi address; a silent USB watch is
     asked about its cable, a Wi-Fi one about the Wi-Fi."""
-    if MPY:
-        raise Skip("runs the page's own functions in node (CPython)")
-    import shutil
-    import subprocess
-    node = shutil.which("node")
-    if not node:
-        raise Skip("needs node")
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
-        page = f.read()
-    stubs = "let pageError = null, printedOn = null, rawDirty = false;\n"   # LOG_N's line has CLASH_MS
-    script = stubs + _page_js(page, ("LOG_N", "rawLog", "esc", "num", "real", "realSilent", "ago",
-                                     "heardAgo", "chSplit", "viaWifi", "sentFrom", "realWhy",
-                                     "pushLog", "logLine", "onPrinted", "howtoLead")) + """
+    stubs = "let pageError = null, printedOn = null, rawDirty = false;\n"
+    out = _run_page_js(stubs, ("rawLog", "esc", "num", "real", "realSilent", "ago", "heardAgo",
+                               "chSplit", "viaWifi", "sentFrom", "realWhy", "pushLog", "logLine",
+                               "onPrinted", "howtoLead"), """
 const out = { lead0: howtoLead(printedOn) };
 onPrinted({ src: 'cu.usbserial-022152D1', rx: 1, line: 'Traceback (most recent call last):' });
 logLine('cu.usbserial-022152D1', { dev: 'A', ev: 's' });
@@ -669,10 +667,7 @@ out.why = [realWhy(0, { heard: 0, src: 'cu.usbserial-1', clash: null }, 5000, tr
 for (let k = 0; k < 60; k++) onPrinted({ src: 'ttyUSB0', line: 'n' + k });
 out.kept = [rawLog.length, rawLog[0].slice(10), rawLog[rawLog.length - 1].slice(10)];
 console.log(JSON.stringify(out));
-"""
-    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60)
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)
+""")
     assert out["log"] == ["cu.usbserial-022152D1  printed: Traceback (most recent call last):",
                           'cu.usbserial-022152D1  {"dev":"A","ev":"s"}',
                           '192.168.1.40  {"dev":"B","ev":"s"}'], out["log"]
@@ -704,9 +699,15 @@ def _page_js(page, names):
     return "\n".join(out)
 
 
-def test_page_real_mode_shows_a_failed_start():
-    """A MicroPython or bundle failure while Real watches is shown: #boot (in the Simulator
-    card) is hidden, so the watch cards must not keep saying Live or 'next message'."""
+def _page():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
+        return f.read()
+
+
+def _run_page_js(stubs, names, body):
+    """Run the page's own NAMES in node, after STUBS and the page's LOG_N/SILENT_MS/CLASH_MS
+    line, then BODY; return the JSON that BODY prints."""
     if MPY:
         raise Skip("runs the page's own functions in node (CPython)")
     import shutil
@@ -714,17 +715,22 @@ def test_page_real_mode_shows_a_failed_start():
     node = shutil.which("node")
     if not node:
         raise Skip("needs node")
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
-        page = f.read()
-    assert "\nlet pageError = null;\n" in page
+    script = stubs + _page_js(_page(), ("LOG_N",) + tuple(names)) + body
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def test_page_real_mode_shows_a_failed_start():
+    """A MicroPython or bundle failure while Real watches is shown: #boot (in the Simulator
+    card) is hidden, so the watch cards must not keep saying Live or 'next message'."""
     stubs = (
-        "let pageError = null; const SILENT_MS = 3000, CLASH_MS = 10000;\n"
+        "let pageError = null;\n"
         "function setStatus() {}\n"
         "const boot = { hidden: true, innerHTML: '', appendChild() {} };\n"
         "const document = { createElement: () => ({ appendChild() {} }) };\n")
-    script = stubs + _page_js(page, ("fail", "num", "real", "realSilent", "ago", "heardAgo",
-                                     "chSplit", "viaWifi", "realWhy", "waitText")) + """
+    out = _run_page_js(stubs, ("fail", "num", "real", "realSilent", "ago", "heardAgo", "chSplit",
+                               "viaWifi", "realWhy", "waitText"), """
 const w = { heard: 0, clash: null, bad: null, rp: null, shown: false };
 const out = { before: [realWhy(0, w, 400, true), waitText(0, w)] };
 w.shown = true; out.drawn = waitText(0, w); w.shown = false;
@@ -735,10 +741,8 @@ w.shown = true; out.drawnAfter = waitText(1, w);
 out.waiting = [realWhy(1, { heard: null }, 400, true), waitText(1, { heard: null, shown: false })];
 out.silent = realWhy(0, w, 5000, true);
 console.log(JSON.stringify(out));
-"""
-    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60)
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)
+""")
+    assert "\nlet pageError = null;\n" in _page()
     assert out["before"] == ["Live: last heard just now.", "The screen comes with its next message"], out
     assert out["drawn"] is None
     assert out["err"] == "Could not load the watch code bundle (py/bundle.json)."
@@ -752,40 +756,37 @@ console.log(JSON.stringify(out));
 
 
 def test_page_real_mode_names_a_channel_split():
-    """Both watches live on different Wi-Fi channels (rp.ch; a mesh or an extender can do it)
-    cannot hear each other: both cards say why. Equal channels, a null ch (the fake watches,
-    older records) or a silent watch say nothing about it."""
-    if MPY:
-        raise Skip("runs the page's own functions in node (CPython)")
-    import shutil
-    import subprocess
-    node = shutil.which("node")
-    if not node:
-        raise Skip("needs node")
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, "web", "sim", "index.html"), encoding="utf-8") as f:
-        page = f.read()
-    stubs = "let pageError = null; const SILENT_MS = 3000, CLASH_MS = 10000;\n"
-    script = stubs + _page_js(page, ("num", "real", "realSilent", "ago", "heardAgo",
-                                     "chSplit", "viaWifi", "realWhy")) + """
+    """Both watches live on different channels (rp.ch, the radio's) cannot hear each other:
+    both cards say why. Both on Wi-Fi (a mesh or an extender can do it): the access point
+    message. One on USB (channel 6) and one on Wi-Fi: the mixed-link message, with both
+    channels. Equal channels, a null ch (the fake watches, older records) or a silent watch
+    say nothing about it."""
+    stubs = "let pageError = null;\n"
+    out = _run_page_js(stubs, ("num", "real", "realSilent", "ago", "heardAgo", "chSplit",
+                               "viaWifi", "realWhy"), """
 const why = () => [realWhy(0, real[0], 400, true), realWhy(1, real[1], 400, true)];
-Object.assign(real[0], { heard: 0, rp: { ev: 'rp', ch: 1 } });
-Object.assign(real[1], { heard: 100, rp: { ev: 'rp', ch: 6 } });
+Object.assign(real[0], { heard: 0, src: '192.168.1.4', rp: { ev: 'rp', ch: 1 } });
+Object.assign(real[1], { heard: 100, src: '192.168.1.5', rp: { ev: 'rp', ch: 6 } });
 const out = { split: why() };
 real[1].rp.ch = 1; out.same = why();
 real[1].rp.ch = null; out.fake = why();
 delete real[1].rp.ch; out.old = why();
 real[1].rp.ch = 6; out.splitAgain = why();
+real[0].src = '/dev/ttyUSB0'; real[0].rp.ch = 6; real[1].rp.ch = 11; out.mixed = why();
+real[0].rp.ch = 11; out.mixedSame = why();
+real[0].rp.ch = 1; real[0].src = '192.168.1.4'; real[1].rp.ch = 6;
 real[0].heard = -5000; out.silent = why();
 real[0].heard = 0; real[1].rp = null; out.noRp = why();
 console.log(JSON.stringify(out));
-"""
-    r = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60)
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)
+""")
     msg = ("The two watches joined different parts of your Wi-Fi (different channels), so they "
            "cannot hear each other. Use a network with one access point.")
     assert out["split"] == [msg, msg] and out["splitAgain"] == [msg, msg], out
+    mixed = ("Watch A talks on channel 6 (USB) and watch B on your Wi-Fi's channel 11, so they "
+             "cannot hear each other. Load both watches with the same link (both on USB, or "
+             "both with --wifi).")
+    assert out["mixed"] == [mixed, mixed], out["mixed"]
+    assert [w.startswith("Live") for w in out["mixedSame"]] == [True, True], out["mixedSame"]
     for k in ("same", "fake", "old", "noRp"):
         assert [w.startswith("Live") for w in out[k]] == [True, True], (k, out[k])
     assert out["silent"][0].startswith("Last heard 5.4 s ago. Is the watch on"), out["silent"]

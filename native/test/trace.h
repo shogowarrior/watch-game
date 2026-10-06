@@ -63,7 +63,7 @@ std::string dump(const Json& v, size_t max = 300);   // compact, cut at max char
 Json J();                                    // None
 Json J(bool v);
 Json J(double v);
-Json J(const char* v);
+Json J(const char* v);                       // nullptr: None
 Json J(const std::string& v);
 Json J(std::vector<Json> v);
 template <class I, class = std::enable_if_t<std::is_integral<I>::value && !std::is_same<I, bool>::value>>
