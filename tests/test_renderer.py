@@ -18,7 +18,7 @@ except ImportError:
     HAVE_FB = False
 
 from finder import tuning as T
-from finder.compat import ticks_add
+from finder.compat import ticks_add, ticks_diff
 from tests import Skip
 from tools import render_snapshots as rs  # the snapshot fixtures: make_params, hunt, _lost ...
 from ui import PROX, BG_IRIS, swap16
@@ -430,6 +430,42 @@ def test_heartbeat_on_live_spawns_only():
     assert len(ev) == 2                       # FAR-style: every 2nd ring
     r.reset()                                 # screen off: state advances, no display
     assert len(_run(r, None, kw, 2000)) == 5
+
+
+def test_next_heartbeat_spawn_is_announced():
+    """frame() names the spawn time of the next heartbeat ring (hb_next_t,
+    hb_next) before it spawns, so the runtime can start the buzz on time at
+    any frame rate; the beat a frame returns carries that time (hb_t0).
+    Frames here come every 125 ms (8 fps), which 1600 ms does not divide."""
+    _need_fb()
+    r = Renderer()
+    for every, period in ((1, 1600), (2, 500)):
+        r.reset()
+        kw = _warm(pulse_period_ms=period, heartbeat="TICK", heartbeat_every=every)
+        said = []
+        got = []
+        t = 0
+        while t <= 8000:
+            if _fr(r, make_params(t_ms=ticks_add(T0, t), **kw)):
+                got.append(r.hb_t0)
+            assert r.hb_next == "TICK" and ticks_diff(r.hb_next_t, ticks_add(T0, t)) > 0
+            if not said or said[-1] != r.hb_next_t:
+                said.append(r.hb_next_t)
+            t += 125
+        step = period * every
+        first = 0 if every == 1 else period
+        assert got == [ticks_add(T0, first + step * k) for k in range(len(got))], (every, got)
+        k = 1 if every == 1 else 0            # the first frame's own spawn: not ahead
+        assert len(got) >= 4 and got[k:] == said[:len(got) - k], (every, got, said)
+    r.reset()
+    _run(r, None, _warm(pulse_period_ms=500, heartbeat="TICK", ring_live=False), 500)
+    assert r.hb_next_t is None and r.hb_next is None      # ghost rings: no beat
+    _run(r, None, _warm(pulse_period_ms=500, heartbeat=None), 500)
+    assert r.hb_next_t is None                            # muted (HOT)
+    _run(r, None, _warm(pulse_period_ms=500, heartbeat="TICK"), 500)
+    assert r.hb_next_t is not None
+    _run(r, None, MENU_KW, 500)
+    assert r.hb_next_t is None                            # MENU: the field is frozen
 
 
 def test_burst_once_per_params_and_no_event_echo():

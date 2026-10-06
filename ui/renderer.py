@@ -20,6 +20,10 @@ its ``push_strip`` services after each push).
     # live ring spawn). Treat it as read-only: the lists are reused. The
     # caller plays ``params.haptic`` itself (HapticPlayer.play_named) and
     # passes these to HapticPlayer.heartbeat.
+    r.hb_next_t, r.hb_next   # the next heartbeat spawn's time and pattern
+                             # (None: none scheduled), so a caller can start
+                             # it on time at any frame rate (app/runtime.py)
+    r.hb_t0                  # the spawn time of the beat just returned
 
 With the screen off (``display=None``) the field keeps time; the first drawn
 frame after that is the current state with no intro (§8): no arrow scale-in,
@@ -184,12 +188,16 @@ class Renderer:
         self.tc = tx.TextCache()
         self._last = {}
         self._ev1 = {}
+        self.hb_t0 = None               # spawn time of the heartbeat frame() returned
+        self.hb_next_t = None           # the next heartbeat spawn (None: none scheduled)
+        self.hb_next = None             # ... and its pattern
         self._binq = bytearray(12)      # bins as Q8 (255 = none)
         self._bino = [0] * 12           # the objects they came from (0 -> Q8 0)
         self.reset()
 
     def reset(self):
         self.field.reset()
+        self.hb_t0 = self.hb_next_t = self.hb_next = None
         self._iv = self._gv = self._ad = None
         self._iq = self._gq = self._adq = 0
         self._scr = -1
@@ -329,15 +337,23 @@ class Renderer:
         else:
             lead = RING_LEAD
             trail = RING_TRAIL
+        nxt = None
         if (v != 0 and period > 0 and not menu and scr != S_FOUND and
                 not (scr == S_SCANNING and sub != "ready" and sub is not None)):
             r0 = (f.iris_to << 8) if v > 0 else (R_MAX << 8)
             # inward rings are listening rings (§4 rule 4): never ghosts
-            if (f.schedule(t, period, r0, v, lead, trail, p.ring_live or v < 0, first) and
-                    p.heartbeat and f.spawns % (p.heartbeat_every or 1) == 0):
+            live = p.ring_live or v < 0
+            every = p.heartbeat_every or 1
+            if (f.schedule(t, period, r0, v, lead, trail, live, first) and
+                    p.heartbeat and f.spawns % every == 0):
                 hb = 1
+                self.hb_t0 = f.last_spawn
+            if live and p.heartbeat:        # announce the next beat's spawn
+                nxt = ticks_add(f.next_spawn, (every - 1 - f.spawns % every) * period)
         elif not menu:
             f.idle(t)
+        self.hb_next_t = nxt
+        self.hb_next = p.heartbeat if nxt is not None else None
         if p.burst and p.t_ms != self._burst_t:
             self._burst_t = p.t_ms
             bv = BURST_V_FOUND if (scr == S_FOUND or v == 0) else BURST_MULT * (v if v > 0 else -v)
