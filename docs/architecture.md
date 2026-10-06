@@ -85,7 +85,7 @@ flowchart LR
   ARROW --> RP
   PAIR --> RP
   MENU --> RP
-  RP --> REND["ui.themes.ThemedRenderer (a ui.renderer.Renderer)<br/>whole frame, 4 bands of 240x60"]
+  RP --> REND["ui.themes.ThemedRenderer (a ui.renderer.Renderer)<br/>whole frame drawn, changed 24-row strips sent"]
   REND --> DISP
   REND -->|heartbeats| PLAYER --> MOTOR
   RP -.->|haptic| PLAYER
@@ -149,9 +149,12 @@ stages in order:
    §4 rule 6). It draws the whole frame off-screen in one 240x240 buffer: the
    ring map (each pixel's ring number) coloured through a 256-entry palette of
    byte-swapped RGB565 a band of 240x60 at a time, then the glyph and text
-   overlays once over the whole frame. Then it pushes the four bands top to
-   bottom with `display.push_strip`, which the panel takes as one window. The
-   field is coloured
+   overlays once over the whole frame. Then it pushes the frame top to
+   bottom with `display.push_strip`, which the panel takes as one window:
+   only the 24-row strips that changed since the last frame pushed (the
+   theme's changed strips plus each overlay slot whose content or place
+   changed; ui-spec §4A rule 6), all of them as four 240x60 bands when every
+   strip changed, as Ripple's travelling rings do. The field is coloured
    from a quarter of the ring map, eight pixels a pass mirrored left-right
    and top-bottom (a viper kernel on the watch, checked against the framebuf
    path when the renderer starts; elsewhere a framebuf palette blit). The

@@ -253,6 +253,67 @@ def test_frame_pushes_four_bands_and_colours():
         assert _px(cap.buf, x, y) == pal[_ring_index(x, y)], (x, y)
 
 
+def test_push_strips_and_overlay_slot_strips():
+    # the push strips are a theme's dirty strips (ui/themes/base.py), and each
+    # overlay slot's strips cover every row it draws on (a toast falls 12 px)
+    _need_fb()
+    from ui.themes import base
+    assert (R.SH, R.NS, R.ALL) == (base.SH, base.NS, base.ALL) and R.SH * R.NS == R.W
+    assert R.strips(0, 240) == R.ALL and R.strips(5, 5) == 0
+    assert (R.strips(23, 24), R.strips(24, 25), R.strips(23, 25)) == (1, 2, 3)
+    for g in range(len(R.G_Y0)):
+        assert R.G_M[g] == R.strips(R.G_Y0[g], R.G_Y1[g]), g
+    assert R.TOP_M == R.strips(12, 36) == 3
+    assert R.BOT_M == R.strips(186, 226 + R.TOAST_PX)
+    for y in R.MENU_Y:
+        assert R.strips(y, y + R.MENU_ROW_H) & ~R.MENU_M == 0, y
+    assert R.strips(R.MENU_MORE_UP_Y, R.MENU_MORE_DN_Y + 6) & ~R.MENU_M == 0
+
+
+def test_plain_renderer_always_sends_the_whole_frame():
+    # the ripple field keeps no record of what changed: every frame goes out
+    # whole, as the 4 bands, also in a frozen MENU
+    _need_fb()
+    r = Renderer()
+    cap = FrameCapture()
+    for kw in (_warm(), MENU_KW):
+        _run(r, cap, kw, 500)
+        n0 = cap.pushes
+        _run(r, cap, kw, 500, t0=T0 + 600)
+        assert r.sent == R.ALL and cap.pushes - n0 == 11 * R.NB
+
+
+def test_a_failed_push_resends_the_whole_frame():
+    # a push that raises leaves the panel unknown: the next frame goes out whole
+    _need_fb()
+    from ui.themes import ThemedRenderer
+
+    class Flaky(FrameCapture):
+        fail = False
+
+        def push_strip(self, y0, h, buf):
+            if self.fail:
+                raise OSError(5)
+            FrameCapture.push_strip(self, y0, h, buf)
+
+    r = ThemedRenderer("tide")
+    cap = Flaky()
+    kw = rs.hunt(0, dist_band="~40")
+    _run(r, cap, kw, 1000, step=100)
+    assert r.sent != R.ALL                       # Tide's still water: a few strips
+    cap.fail = True
+    try:
+        _fr(r, make_params(t_ms=T0 + 1100, **kw), cap)
+        assert False, "the push did not raise"
+    except OSError:
+        pass
+    cap.fail = False
+    _fr(r, make_params(t_ms=T0 + 1200, **kw), cap)
+    assert r.sent == R.ALL and cap.buf == r.buf
+    _fr(r, make_params(t_ms=T0 + 1300, **kw), cap)
+    assert r.sent != R.ALL and cap.buf == r.buf
+
+
 def test_core_dot_level_in_frame():
     _need_fb()
     r = Renderer()

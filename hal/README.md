@@ -31,7 +31,8 @@ palette), then push them with `push_strip(y0, h, buf)` (a full-width strip)
 or `push_frame(fb)` (115,200 B sent as strip-sized writes in one CS-low burst;
 the slice list is cached, so it allocates nothing). A strip that starts where
 the last one ended continues its window (CS stays low, no new command), so
-strips top to bottom (the renderer sends 4 bands of 240x60) cost what `push_frame` does (44.1 ms on the watch, against
+strips top to bottom (the renderer sends 4 bands of 240x60 when the whole
+frame changed, else only the 24-row strips that changed) cost what `push_frame` does (44.1 ms on the watch, against
 52.4 ms with a window per strip and 37.3 ms as one write; the wire alone takes
 34.6 ms at 26.67 MHz). Every write is copied from the PSRAM heap into an
 internal DMA buffer by ESP-IDF, so a write costs about 0.7 ms on top of the

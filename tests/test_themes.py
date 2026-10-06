@@ -24,6 +24,7 @@ except ImportError:
 
 if HAVE_FB:
     import micropython
+    from tools import render_snapshots as rs
     from tools import render_themes as rt
     from ui.renderer import FrameCapture, Renderer
     from ui.themes import NAMES, ThemedRenderer, make
@@ -314,6 +315,136 @@ def test_contract_arcade():
 def test_contract_fireflies():
     _need_fb()
     _contract("fireflies")
+
+
+# ---- the panel: a frame pushes only the strips that changed (ui-spec §4A rule 6) ----------
+def _overlay_items():
+    """Overlay changes over fields that may hold still: chevrons nudging and
+    flipping, the readout's band, chip and word text, the StatusStrip, a
+    toast rising and falling, the LAST chip's mark, bump icons, runes
+    turning, the MENU scrolling. 20 fps where a motion is short."""
+    h = rs.hunt
+    lost = dict(rs._lost, banner=("LOST 0:12", "warn", True))
+    rows2 = ("SUN: OFF", "BUZZ: FULL", "PLACE: OUT", "THEME: TIDE")
+    seen = dict(rs._pair, sub="seen", speed_px_s=0, wavelength_px=0, runes=rs.RUNES,
+                top_text="SAME RUNES?")
+    return [
+        ("chevrons", [(0, h(1, glyph="chevrons", trend=1, dist_band="~20")),
+                      (700, h(1, glyph="chevrons", trend=1, trend_strong=True, dist_band="~20")),
+                      (1400, h(1, glyph="chevrons", trend=-1, dist_band="~20"))],
+         tuple(range(0, 2101, 100))),
+        ("slot_text", [(0, h(0, dist_band="~40")), (500, h(0, dist_band="60+")),
+                       (900, h(0, dist_band="60+", top_text="LOOK UP")),
+                       (1300, h(0, dist_band="60+", word="TURN")),
+                       (1700, h(0, dist_band="~40", status=(9, 64, 1, True, True))),
+                       (2100, h(0, dist_band="~40", status=(9, 63, 2, True, False)))],
+         tuple(range(0, 2501, 100))),
+        ("toast", [(0, h(1, dist_band="~20")),
+                   (300, h(1, dist_band="~20", banner=("FRIEND IS SCANNING", "info", False))),
+                   (1200, h(1, dist_band="~20"))], tuple(range(0, 1801, 50))),
+        ("lost_chip", [(0, lost), (900, dict(lost, trend=1)), (1500, dict(lost, banner=None))],
+         tuple(range(0, 2101, 100))),
+        ("bump_icons", [(0, h(3, glyph="bump", bump_icons=0, dist_band="<3", word="BUMP!")),
+                        (500, h(3, glyph="bump", bump_icons=1, dist_band="<3", word="BUMP!")),
+                        (900, h(3, glyph="bump", bump_icons=3, dist_band="<3", word="BUMP!"))],
+         tuple(range(0, 1401, 100))),
+        ("runes", [(0, dict(rs._pair, sub="looking", glyph="glow", word="LOOKING")),
+                   (300, seen), (1000, dict(seen, sub="confirmed"))], tuple(range(0, 1501, 50))),
+        ("menu_scroll", [(0, dict(rs._menu, sub="0v", menu_rows=rs.MENU_ROWS)),
+                         (500, dict(rs._menu, sub="1v", menu_rows=rs.MENU_ROWS)),
+                         (900, dict(rs._menu, sub="3^", menu_rows=rows2)),
+                         (1300, h(2, dist_band="~10"))], tuple(range(0, 1801, 100))),
+    ]
+
+
+def _panel(name):
+    """Every fixture, transition and overlay item with the overlays on, into
+    a panel that keeps only what was pushed (FrameCapture): after each frame
+    it must hold the frame drawn. Steady frames allocate nothing. Returns
+    the mean number of strips pushed per frame."""
+    r = ThemedRenderer(name)
+    cap = FrameCapture()
+    _, phases, run_ms = rt.fixture("near")     # warm the renderer's one-off buffers
+    rt.run(r, cap, phases, run_ms)
+    n = sent = 0
+    for fx, phases, times in _items() + _overlay_items():
+        r.reset()
+        k_was = -1
+        age = 0
+        for i in range(len(times)):
+            t = times[i]
+            p = rt.params_at(phases, t)
+            k = _phase_of(phases, t)
+            age = age + 1 if k == k_was else 0
+            k_was = k
+            if age >= 3 and i > 0 and t - times[i - 1] <= WAKE_MS:
+                assert _frame_locked(r, p, cap, rt.T0 + t), (name, fx, t, "allocated")
+            else:
+                r.frame(p, cap, rt.T0 + t)
+            if cap.buf != r.buf:
+                assert False, (name, fx, t, "sent", hex(r.sent), "stale", _changed(cap.buf, r.buf))
+            n += 1
+            m = r.sent
+            while m:
+                sent += m & 1
+                m >>= 1
+    return sent / n
+
+
+def test_panel_ripple():
+    _need_fb()
+    assert _panel("ripple") > 9                 # its rings cross nearly every strip each frame
+
+
+def test_panel_sonar():
+    _need_fb()
+    _panel("sonar")
+
+
+def test_panel_tide():
+    _need_fb()
+    _panel("tide")
+
+
+def test_panel_warp():
+    _need_fb()
+    _panel("warp")
+
+
+def test_panel_arcade():
+    _need_fb()
+    _panel("arcade")
+
+
+def test_panel_fireflies():
+    _need_fb()
+    _panel("fireflies")
+
+
+def test_still_frames_send_little():
+    # a frozen MENU sends nothing once its dim has settled; a field that moves
+    # in a few places sends only those strips (Tide's surface, a few flies)
+    _need_fb()
+    cap = FrameCapture()
+    for n in NAMES:
+        r = ThemedRenderer(n)
+        _, phases, run_ms = rt.fixture("menu")
+        rt.run(r, cap, phases, 2400)
+        for t in range(2500, 3001, 100):
+            r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+            assert r.sent == 0, (n, t, hex(r.sent))
+    for n in ("tide", "fireflies"):
+        r = ThemedRenderer(n)
+        _, phases, run_ms = rt.fixture("far")
+        rt.run(r, cap, phases, 300)
+        k = 0
+        for t in range(400, run_ms + 1, 100):
+            r.frame(rt.params_at(phases, t), cap, rt.T0 + t)
+            m = r.sent
+            while m:
+                k += m & 1
+                m >>= 1
+        assert k * 100 < 5 * (run_ms - 300), (n, k)     # fewer than half the strips
 
 
 def test_deterministic():

@@ -1,4 +1,4 @@
-"""Frame renderer: one RenderParams -> a 240x240 frame, sent as 4 bands of 240x60.
+"""Frame renderer: one RenderParams -> a 240x240 frame, sent as the strips that changed.
 
 The renderer reads *only* RenderParams (ui-spec §3). It owns the time-based
 state the contract leaves to it: ring spawns and positions, crossfades, iris
@@ -7,12 +7,18 @@ motion and phase timers. The whole frame is composed off-screen first (the
 field blitted through the palette band by band, then every overlay drawn once
 over the full frame: framebuf fills a polygon or ellipse over all its rows
 whatever the clip, so drawing per strip paid for each one in every strip it
-touched), then pushed band by band with ``display.push_strip(y0, h, buf)``
-(hal/st7789.py API) top to bottom, so the panel takes them as one window and
-the new frame sweeps down the panel in one push (~40 ms) instead of over the
-whole draw. ``display.service()``, if the display has one, runs after each
-band blit and after the overlays (the runtime's motor and touch servicing;
-its ``push_strip`` services after each push).
+touched), then pushed with ``display.push_strip(y0, h, buf)`` (hal/st7789.py
+API) top to bottom, so the panel takes it as one window and the new frame
+sweeps down the panel in one push (~40 ms whole) instead of over the whole
+draw. Only the 24-row strips that changed since the last frame pushed go out
+(ui-spec §4A rule 6): the field's (a theme reports them, ``_field_dirty``;
+the plain ripple field counts as all) plus each overlay slot's old and new
+strips when what it draws changed (``_ov_dirty``). A frame in which every
+strip changed goes out as the 4 bands of 240x60; otherwise each run of
+changed strips is one push. A new display, a reset, a dark spell and a push
+that raised send everything. ``display.service()``, if the display has one,
+runs after each band blit and after the overlays (the runtime's motor and
+touch servicing; its ``push_strip`` services after each push).
 
     r = Renderer()
     beats = r.frame(params, display, ticks_ms())    # display=None: state only
@@ -24,6 +30,8 @@ its ``push_strip`` services after each push).
                              # (None: none scheduled), so a caller can start
                              # it on time at any frame rate (app/runtime.py)
     r.hb_t0                  # the spawn time of the beat just returned
+    r.sent                   # the strips the last drawn frame pushed (bit k:
+                             # rows 24k..24k+23; ALL: the whole frame)
 
 With the screen off (``display=None``) the field keeps time; the first drawn
 frame after that is the current state with no intro (§8): no arrow scale-in,
@@ -60,8 +68,11 @@ from ui.field import (COS, EASE_IC, EASE_OC, FL_A, FL_B, GL_A, GL_B, PU_A, PU_B,
                       V7, RingMap, RippleField, ZONE_LEAD, ZONE_TRAIL, ease, q8)
 
 W = const(240)
-BH = const(60)             # band height: field blits and pushes go a band at a time
+BH = const(60)             # band height: field blits (and whole-frame pushes) go a band at a time
 NB = const(4)              # bands per frame
+SH = const(24)             # push strip height: a frame sends the strips that changed
+NS = const(10)             # strips per frame (as a theme's dirty strips, ui/themes/base.py)
+ALL = const(0x3FF)         # every strip
 
 # ---- ids: index in T.SCREENS / T.GLYPHS (tests/test_renderer.py checks the consts) ----
 S_PAIRING = const(0)
@@ -92,6 +103,16 @@ IRIS_R = (_IR["none"], _IR["seeker"], _IR["chevrons"], _IR["arrow"], _IR["scan"]
 # culling boxes (for drawing a band of rows): tests/test_renderer.py checks they cover every glyph
 G_Y0 = (0, 90, 76, 52, 96, 94, 79, 94, 103, 63, 114)
 G_Y1 = (0, 150, 165, 190, 145, 147, 162, 147, 137, 152, 126)
+
+
+def strips(y0, y1):
+    """The strips rows y0..y1 - 1 touch, as a bit mask (0 when empty)."""
+    if y1 <= y0:
+        return 0
+    return ((1 << ((y1 - 1) // SH + 1)) - 1) & ~((1 << (y0 // SH)) - 1)
+
+
+G_M = tuple(strips(G_Y0[g], G_Y1[g]) for g in range(len(G_Y0)))   # each glyph's strips
 
 T_NONE = const(0)
 T_STATUS = const(1)
@@ -144,6 +165,8 @@ SUN_FLOOR = const(256)     # sun mode: floor >= 1.0 and the LUT lifted one stop 
 SUN_LIFT = const(9)
 MENU_Y = T.MENU_ROWS_Y
 MENU_ROW_H = T.MENU_ROW_H
+MENU_Y0 = const(32)                         # the MENU's opaque backplate, rows 32..203
+MENU_Y1 = const(204)
 MENU_MORE_X = 207                           # "more rows" triangles (ui-spec MENU)
 MENU_MORE_UP_Y = 36
 MENU_MORE_DN_Y = 195
@@ -151,6 +174,12 @@ _TRI_UP = _arr("h", (0, 5, 3, 0, 6, 5))
 _TRI_DN = _arr("h", (0, 0, 6, 0, 3, 5))
 _DIGITS = ("0", "1", "2", "3")
 _NO_EVENTS = ()
+# overlay slots' strips: top chip / StatusStrip, bottom pill (a toast moves
+# up to TOAST_PX below it), MENU backplate (its rows and arrows lie inside)
+TOP_M = strips(tx.TOP_Y, tx.TOP_Y + tx.TOP_H)
+BOT_M = strips(tx.BOT_Y, tx.BOT_Y + tx.BOT_H + TOAST_PX)
+MENU_M = strips(MENU_Y0, MENU_Y1)
+_NK = const(19)            # overlay keys per frame (_ov_dirty)
 
 
 def _wrap_q4(d):
@@ -193,11 +222,19 @@ class Renderer:
         self.hb_next = None             # ... and its pattern
         self._binq = bytearray(12)      # bins as Q8 (255 = none)
         self._bino = [0] * 12           # the objects they came from (0 -> Q8 0)
+        self._runs_buf = None           # the buffer ``_runs`` views (bench_hmlcd swaps buf)
+        self._runs = None
+        self._make_runs()
+        self._kn = [None] * _NK         # overlay keys: this frame's, the last drawn one's
+        self._ko = [None] * _NK
+        self._bk_d = self._bk_c = self._bk_s = 0    # prep_arrow's arguments this frame
+        self.sent = ALL
         self.reset()
 
     def reset(self):
         self.field.reset()
         self.hb_t0 = self.hb_next_t = self.hb_next = None
+        self._full = True               # the next drawn frame goes out whole
         self._iv = self._gv = self._ad = None
         self._iq = self._gq = self._adq = 0
         self._scr = -1
@@ -393,6 +430,7 @@ class Renderer:
         """First drawn frame after display=None frames: the current state with
         no intro (§8). The arrow sits at its angle (or is gone: one that
         expired while dark never shrinks on wake), a banner is at rest."""
+        self._full = True
         self._a_grow = False
         self._a_shrink = False
         self._morphed = False
@@ -515,7 +553,10 @@ class Renderer:
                     scale = 256 - ease(EASE_OC, age, ARROW_OUT_MS)
                     self.arrow = scale > 8
         if self.arrow:
-            self.beam = gl.prep_arrow((self._a_q + 8) >> 4, self._a_cone, scale)
+            self._bk_d = d = (self._a_q + 8) >> 4
+            self._bk_c = self._a_cone
+            self._bk_s = scale
+            self.beam = gl.prep_arrow(d, self._a_cone, scale)
         elif scr == S_SCANNING and sub == "result":
             self._plan_morph(p, t)
         # sweep / pacer
@@ -622,7 +663,10 @@ class Renderer:
         self._a_style = 1
         self._a_cone = 0
         self.arrow = True
-        self.beam = gl.prep_arrow(a, 0, 26 + ((230 * e) >> 8))
+        self._bk_d = a
+        self._bk_c = 0
+        self._bk_s = s = 26 + ((230 * e) >> 8)
+        self.beam = gl.prep_arrow(a, 0, s)
 
     def _word_col(self, p, scr, sub):
         w = p.word
@@ -697,9 +741,9 @@ class Renderer:
                 tx.draw_word(self.tc, fb, y0, self.bot_s, self.bot_c)
             else:
                 tx.draw_readout(self.tc, fb, y0, self.bot_s, self.bot_mark, self.bot_slot)
-        if scr == S_MENU and y1 > 32 and y0 < 204:
+        if scr == S_MENU and y1 > MENU_Y0 and y0 < MENU_Y1:
             # opaque backplate: no frozen ring arcs show in the 4 px gaps
-            gl.rrect(fb, 24, 32 - y0, 192, 172, 8, BG_BASE)
+            gl.rrect(fb, 24, MENU_Y0 - y0, 192, MENU_Y1 - MENU_Y0, 8, BG_BASE)
             sel = p.sub
             k_sel = -1                                # sub = visible index + optional "^"/"v"
             if sel:
@@ -805,15 +849,166 @@ class Renderer:
         if display is not self._disp:
             self._disp = display
             self._service = getattr(display, "service", None)
+            self._full = True           # a new panel: its content is unknown
         svc = self._service
         self._field(svc)
         self._strip(p, t, 0, self.fb)
         if svc is not None:
             svc()
-        bands = self.bands
-        for k in range(NB):
-            display.push_strip(k * BH, BH, bands[k])
+        m = self._field_dirty() | self._ov_dirty(p, t)
+        if self._full:
+            m = ALL
+        self.sent = m
+        self._full = True               # until every push is out: one that raises resends all
+        if m == ALL:
+            bands = self.bands
+            for k in range(NB):
+                display.push_strip(k * BH, BH, bands[k])
+        elif m:
+            runs = self._runs
+            if self._runs_buf is not self.buf:
+                runs = self._make_runs()
+            k = 0
+            while k < NS:
+                if (m >> k) & 1:
+                    j = k + 1
+                    while j < NS and (m >> j) & 1:
+                        j += 1
+                    display.push_strip(k * SH, (j - k) * SH, runs[k][j - k - 1])
+                    k = j
+                else:
+                    k += 1
+        self._full = False
         return ev
+
+    def _make_runs(self):
+        """Views of ``buf`` for every run of strips: runs[k][n - 1] is the n
+        strips from strip k (built once per buffer: slicing allocates)."""
+        mv = memoryview(self.buf)
+        n = W * SH * 2
+        self._runs = runs = [[mv[k * n:(k + j) * n] for j in range(1, NS - k + 1)]
+                             for k in range(NS)]
+        self._runs_buf = self.buf
+        return runs
+
+    def _field_dirty(self):
+        """The field's strips that changed since the last drawn frame: the
+        ripple field keeps no record, so all (ThemedRenderer asks its theme)."""
+        return ALL
+
+    def _ov_dirty(self, p, t):
+        """The strips whose overlays may differ from the last drawn frame's.
+
+        Per slot (glyph, top, bottom, MENU) this frame's keys, the kind drawn
+        and every value its drawing reads (the glyph and text drawers are
+        pure functions of their arguments), go in a preallocated list; a slot
+        whose keys changed adds its old and new strips. While the scan wedge
+        is up, or was, everything (it sweeps over all the slots). Reads the
+        plan: once per drawn frame, after ``_plan``. Allocates nothing."""
+        k = self._kn
+        scr = self._scr
+        # glyph slot (0..4): what _strip's glyph layer draws
+        g = -1
+        a = b = c = d = None
+        if self.arrow:
+            g = G_ARROW
+            a = self._a_style
+            b = self._bk_d
+            c = self._bk_c
+            d = self._bk_s
+        else:
+            g = self.g
+            if g == G_GLOW or g == G_SEEKER or g == G_TURN or g == G_CHECK or g == G_DOTS:
+                pass                    # nothing drawn, or always the same
+            elif g == G_CHEV:
+                a = p.trend
+                b = p.trend_strong
+                c = gl.chevron_nudge(t)
+            elif g == G_COUNT:
+                a = p.countdown
+            elif g == G_RUNES:
+                a = p.runes
+                b = self._sub == "confirmed"
+                if self._sub == "seen":
+                    age = ticks_diff(t, self._sub_t0)
+                    c = 3 if age < 150 else (2 if age < 300 else (1 if age < 450 else 0))
+            elif g == G_BATT:
+                st = p.status
+                a = st[0] if st is not None else None
+            elif g == G_BUMP:
+                a = p.bump_icons
+        k[0] = g
+        k[1] = a
+        k[2] = b
+        k[3] = c
+        k[4] = d
+        # top slot (5..9)
+        top = self.top
+        a = b = c = d = None
+        if top == T_STATUS:
+            st = p.status
+            a = st[0]
+            b = st[1]
+            c = st[2]
+            d = st[4]
+        elif top != T_NONE:
+            a = self.top_s
+            b = self.top_c
+            if top == T_LAST:
+                c = p.trend
+        k[5] = top
+        k[6] = a
+        k[7] = b
+        k[8] = c
+        k[9] = d
+        # bottom slot (10..14)
+        bot = self.bot
+        a = b = c = d = None
+        if bot == B_TOAST:
+            a = self.bot_s
+            b = self.bot_c
+            c = self.bot_dy
+        elif bot == B_WORD:
+            a = self.bot_s
+            b = self.bot_c
+        elif bot == B_READOUT:
+            a = self.bot_s
+            c = self.bot_mark
+            d = self.bot_slot
+        k[10] = bot
+        k[11] = a
+        k[12] = b
+        k[13] = c
+        k[14] = d
+        # MENU (15..17), wedge (18)
+        menu = scr == S_MENU
+        k[15] = menu
+        k[16] = p.menu_rows if menu else None
+        k[17] = p.sub if menu else None
+        k[18] = self.sweep or self.pacer
+        o = self._ko
+        self._ko = k                    # this frame's keys are the next one's old
+        self._kn = o
+        if k[18] or o[18]:
+            return ALL
+        m = 0
+        for i in range(5):
+            if k[i] != o[i]:
+                m = (G_M[k[0]] if k[0] >= 0 else 0) | (G_M[o[0]] if o[0] is not None and o[0] >= 0 else 0)
+                break
+        for i in range(5, 10):
+            if k[i] != o[i]:
+                m |= TOP_M
+                break
+        for i in range(10, 15):
+            if k[i] != o[i]:
+                m |= BOT_M
+                break
+        for i in range(15, 18):
+            if k[i] != o[i]:
+                m |= MENU_M
+                break
+        return m
 
     def _field(self, svc):
         """The field into the four bands, ``svc`` (display.service or None)

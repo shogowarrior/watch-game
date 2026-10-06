@@ -26,14 +26,15 @@ The look borrows the feel of an ancient-tech proximity sensor: a green glow and 
 ring_map  GS8 index map   idx = floor(hypot(x-119.5, y-119.5))  -> 0..168
           (the viper blit reads one quadrant, 14.4 KB, mirrored both ways)
 palette   RGB565 FrameBuffer 256x1  rebuilt every frame (entries 0..169; the map uses 0..168)
-frame     RGB565 FrameBuffer 240x240 (115,200 B), drawn whole, sent as 4 bands of 240x60
+frame     RGB565 FrameBuffer 240x240 (115,200 B), drawn whole, sent as the 24-row strips that changed
 
 per frame:
   palette[i] = LUT[ramp][ round(v(i,t) / 7 * 63) ]      # radial function -> colour
   for each of the 4 bands:
     band.blit(ring_map rows, 0, 0, -1, palette)          # background, C (viper) speed
   draw every overlay once over the frame (poly / fill_rect / ellipse / glyph blits)
-  for each of the 4 bands: display.push_strip(y0, 60, band)   # one window, top to bottom
+  m = theme's changed strips | strips of each overlay slot that changed      # bit k: rows 24k..24k+23
+  for each run of set bits in m: display.push_strip(y0, h, rows)   # top to bottom; all 10: one window
 ```
 
 - **Field value**, in ramp units 0–7: `v(i,t) = clamp(0,7, vignette(i) · (floor + glow_amp·e^(-(i/glow_r)²) + pulse_amp·Σ fadein(r_k)·profile(i − r_k(t))))`. The full form, with the core dot, the halo outside an open iris, ghost rings and temporal anti-aliasing, is in ui-spec §4.

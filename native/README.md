@@ -119,7 +119,8 @@ read. `hal/*.py` count in `test/traced.txt`'s hash like the game's Python.
 frame lock), tx and haptic stages in the Python's order, and `idle()` sleeps to
 the next deadline, ticking the motor every ms while a pattern plays. A frame is
 drawn in 24-row strips into two buffers in turn; between strips the motor is
-serviced and touch sampled, as the Python does between its four bands.
+serviced and touch sampled, as the Python does between its four bands. (The Python now pushes only the
+24-row strips that changed, ui-spec §4A rule 6; the C++ still pushes every strip.)
 `test/test_runtime.cpp` runs the scenarios of `tests/test_app_runtime.py` on
 the same fake parts, each test named after its Python twin: two watches
 pairing, hunting, bumping and changing the menu for a minute, slow frames,

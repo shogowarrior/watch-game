@@ -11,6 +11,9 @@ Prints where the time goes:
     whole frame) and push (SPI, 4 bands in one window)
   * push: one frame sent as 10 windowed strips, as one window of 10, 4 and
     1 writes
+  * themes: per field theme (ui/themes), its load time, then ms per frame
+    (drawn and pushed: only the strips that changed go out) and how many of
+    the 10 strips each frame sent, on FAR, HOT bump-ready and a frozen MENU
   * overlap: whether a second thread can send strips while this one draws:
     ms per frame of 10 strips, each after 3 ms of viper work, sent inline,
     from a send thread, and from a send thread with the drawing split into
@@ -147,6 +150,48 @@ def bench_push(display, r):
         out.append(_d(_us(), t0) / 10000)
     print("push ms: 10 windows %.1f, 1 window x 10 writes %.1f, x 4 writes %.1f, "
           "x 1 write %.1f" % tuple(out))
+
+
+def bench_themes(display):
+    """Per theme: load time, ms per frame and strips sent per frame."""
+    from ui.themes import NAMES, ThemedRenderer
+    menu = dict(_FIELD, screen="MENU", zone=2, intensity=0.55, speed_px_s=80,
+                pulse_period_ms=1000, glow_r_px=42, sub="1v",
+                menu_rows=("RESUME", "SUN: OFF", "BUZZ: FULL", "PLACE: OUT"))
+    cases = []
+    for name, kw in FIXTURES[:2]:
+        d = dict(_FIELD)
+        d.update(kw)
+        cases.append((name, make_params(**d)))
+    cases.append(("MENU frozen", make_params(**menu)))
+    print("themes    load s  fixture         ms/frame   fps  strips/10")
+    r = ThemedRenderer("ripple")
+    for n in NAMES:
+        gc.collect()
+        a = _us()
+        r.set_theme(n)
+        load = _d(_us(), a) / 1e6
+        for name, p in cases:
+            r.reset()
+            t = 100000
+            for _ in range(15):             # rings in flight, crossfades and the dim settled
+                r.frame(p, display, t)
+                t += 100
+            gc.collect()
+            sent = 0
+            t0 = _us()
+            for _ in range(N):
+                r.frame(p, display, t)
+                t += 100
+                m = r.sent
+                while m:
+                    sent += m & 1
+                    m >>= 1
+            ms = _d(_us(), t0) / N / 1000
+            print("%-9s %6.1f  %-15s %8.1f  %4.1f  %9.1f" % (n, load, name, ms, 1000 / ms, sent / N))
+            load = 0.0
+    r = None
+    gc.collect()
 
 
 def _spin_fn():
@@ -304,6 +349,9 @@ def main():
     r = bench_render(board.display)
     bench_kernels(r)
     bench_push(board.display, r)
+    r = None
+    bench_themes(board.display)
+    r = Renderer()
     bench_overlap(board.display, r)
     bench_imu(board.i2c0)
     bench_loop(board)

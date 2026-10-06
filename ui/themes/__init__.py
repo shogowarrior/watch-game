@@ -15,7 +15,8 @@ palette) and ``_field`` (the theme blits each band, and draws its own layer,
 where the renderer blits the ring map). Everything else, the field's state,
 ring schedule, heartbeats, the plan and every overlay, is the renderer's
 own. Ripple through it is pixel-identical to the plain Renderer
-(tests/test_themes.py). With ``follow`` (the game's renderers) each
+(tests/test_themes.py). The theme's changed strips (``dirty``) decide, with
+the overlays', which strips of each frame are pushed (``_field_dirty``). With ``follow`` (the game's renderers) each
 ``frame`` call reads ``RenderParams.theme`` (ui-spec §3; the MENU THEME row
 sets it) and queues that theme when it differs from the last one asked for;
 without it (previews, tests) only ``set_theme`` and ``queue_theme`` switch.
@@ -203,6 +204,12 @@ class _ThemedRenderer(Renderer or object):
     def _strip(self, p, t, y0, fb, h=240):     # h: Renderer._strip default (W)
         if self.overlays:
             Renderer._strip(self, p, t, y0, fb, h)
+
+    def _field_dirty(self):
+        return self.theme.dirty         # the theme's changed strips (base.py contract)
+
+    def _ov_dirty(self, p, t):
+        return Renderer._ov_dirty(self, p, t) if self.overlays else 0
 
     def frame(self, p, display=None, now=None):
         """Renderer.frame with the theme drawing the field (same clock,
