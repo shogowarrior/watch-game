@@ -1,4 +1,4 @@
-# native/arduino: graphics libraries compared
+# native/arduino: the game and graphics libraries on Arduino-ESP32
 
 One PlatformIO env per graphics library. Each compiles `src/bench_main.cpp`
 (setup, loop, I2C) and its own `src/env_<library>.cpp`, runs the shared bench
@@ -6,8 +6,8 @@ One PlatformIO env per graphics library. Each compiles `src/bench_main.cpp`
 in one table.
 
 All envs run on Arduino-ESP32 2.0.17 (IDF 4.4), so only the library differs.
-`radio-pingpong` and `platform-check` are not display envs: they check the
-ESP-NOW radio and the rest of the game's hardware (below).
+`game` runs the game itself, and `radio-pingpong` and `platform-check` check
+the ESP-NOW radio and the rest of the game's hardware (below).
 
 | Env | Library | How a frame goes out |
 |---|---|---|
@@ -38,6 +38,12 @@ LVGL, in what it costs to own the frame.
 - **Reset reason under QEMU.** Arduino's bootloader runs into TG0/TG1 watchdog
   resets there, so the app's first boot reads `esp_reset_reason()` 6 (task
   watchdog). `src/task_watchdog.cpp` also checks a marker in RTC memory.
+
+- **Static RAM.** Arduino-ESP32 2.0.17's prebuilt libraries keep Bluetooth on,
+  which reserves the first 56 KB of the ESP32's static data RAM, leaving about
+  124 KB: too little for the game loop's 105 KB of state. `hm::esp::start_game`
+  takes it from the heap instead, whose largest internal block is about 110 KB
+  at that point.
 
 ## Check and build
 
@@ -120,3 +126,28 @@ QEMU has none of the devices, so there the check passes at the watchdog:
 `python3 native/tools/qemu_run.py native/arduino --env platform-check --until
 "Task watchdog got triggered"` (its reboot also reaches `HM watchdog
 rebooted=1`, but `qemu_run.py` fails any reboot).
+
+## The game (`game`)
+
+`src/game_main.cpp` starts the task watchdog (8 s, then a panic and a reboot),
+I2C0 and I2C1 (`src/wire_i2c.h`) and the panel's SPI bus (the shared
+`hm/spi_lcd_bus.h`: spi_master, DMA), then hands them to `hm::esp::start_game`
+(`native/esp32_shared`). That is the ESP-IDF build's bring-up and loop
+(`native/idf/game`): the parts in `hal/board.py`'s order and an `HM parts` line,
+then the loop on core 1 with an `HM fps` line every 10 s and one `HM mem` line.
+
+```sh
+python3 native/tools/qemu_run.py native/arduino --env game-qemu --until "HM mem"   # no radio; pixels go nowhere
+```
+
+On watch A (watch B keeps MicroPython's game, which speaks the same beacons):
+
+```sh
+A=/dev/cu.usbserial-022152D1
+pio run -d native/arduino -e game -t upload --upload-port $A
+python3 native/tools/capture.py $A logs/game-arduino-A.log --until "HM mem" --seconds 40
+```
+
+Expected: `HM parts pmu=1 display=1 imu=1 touch=1 haptics=1 radio=1
+lcd_hz=40000000` (26666667 if the bus refuses 40 MHz), then an `HM fps` line
+and the `HM mem` line, with no `HM error` and no reboot.

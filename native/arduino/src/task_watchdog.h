@@ -5,7 +5,8 @@
 
 namespace task_watchdog {
 
-bool start(uint32_t timeout_s);   // from the task to watch: setup() watches loop()
+bool init(uint32_t timeout_s);    // the timeout, and a panic when it runs out; tasks add themselves
+bool start(uint32_t timeout_s);   // init, then watch the calling task: setup() watches loop()
 void feed();
 int reset_reason();               // esp_reset_reason() of this boot
 // For a check that starves the watchdog on purpose: starve() marks RTC memory,

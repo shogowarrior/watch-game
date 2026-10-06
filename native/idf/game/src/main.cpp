@@ -17,14 +17,7 @@ namespace {
 
 #ifdef HM_QEMU
 constexpr const char* VARIANT = "idf-game-qemu";
-// QEMU's SPI has no DMA, so a real push never finishes.
-struct NullBus final : hm::LcdBus {
-  bool set_clock(uint32_t) override { return true; }
-  void command(uint8_t, const uint8_t*, size_t) override {}
-  void pixels(uint8_t, const uint16_t*, size_t) override {}
-  void wait() override {}
-};
-NullBus lcd;
+hm::esp::NullLcdBus lcd;
 constexpr bool WITH_RADIO = false;
 #else
 constexpr const char* VARIANT = "idf-game";
