@@ -76,8 +76,9 @@ in one message with the current default marked. Don't build on an assumption.
   `/theme` (app/settings.py) when the MENU closes, and `Runtime.begin` loads
   the saved theme whole before `run` arms the watchdog. `ui/renderer.py`
   keeps only the hook (`Renderer._field`). The simulator page has a Field theme
-  box per watch (kept in the browser). Still to do: the C++ port of the sixth
-  row and `RenderParams.theme`. One step, the theme module's own
+  box per watch (kept in the browser). The C++ game has the THEME row and
+  `RenderParams.theme`, but the native builds draw Ripple only and neither load
+  nor save `/theme` (native/README.md). One step, the theme module's own
   compile, cannot be split (5-9 ms on desktop, roughly 1-2 s on the watch):
   precompiling the theme modules to .mpy with mpy-cross at deploy would remove
   it, but the watch runs pure .py today, so that is the owner's call.
