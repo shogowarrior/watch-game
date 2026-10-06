@@ -13,8 +13,10 @@ RTC_NOINIT_ATTR uint32_t marker;   // kept across a panic reboot, random after p
 
 }  // namespace
 
-// IDF 4.4: a second init updates the timeout and makes it panic.
-bool start(uint32_t timeout_s) { return esp_task_wdt_init(timeout_s, true) == ESP_OK && esp_task_wdt_add(nullptr) == ESP_OK; }
+// IDF 4.4: a second init (Arduino makes the first) updates the timeout and makes it panic.
+bool init(uint32_t timeout_s) { return esp_task_wdt_init(timeout_s, true) == ESP_OK; }
+
+bool start(uint32_t timeout_s) { return init(timeout_s) && esp_task_wdt_add(nullptr) == ESP_OK; }
 
 void feed() { esp_task_wdt_reset(); }
 

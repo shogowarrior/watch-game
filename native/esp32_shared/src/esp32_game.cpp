@@ -1,5 +1,6 @@
 #include "hm/esp32_game.h"
 
+#include <new>
 #include <optional>
 
 #include "esp_heap_caps.h"
@@ -39,6 +40,7 @@ std::optional<Ft6336> touch;
 AppMotor motor;
 AppRadio radio;
 app::Parts parts;
+void* rt_mem = nullptr;   // the Runtime's block, taken before Wi-Fi splits the heap (start_game)
 
 void bring_up() {
   const bool lines = lines_begin();
@@ -75,7 +77,7 @@ void bring_up() {
 
 void game_task(void*) {
   bring_up();
-  static runtime::Runtime rt(parts, clock_, FPS_LOG_MS);   // ~105 KB: static in internal RAM (DMA reads its strips)
+  runtime::Runtime& rt = *new (rt_mem) runtime::Runtime(parts, clock_, FPS_LOG_MS);   // lives as long as the task
   esp_task_wdt_add(nullptr);
   rt.begin();
   const ticks_t t0 = clock_.now_ms();
@@ -97,6 +99,14 @@ void game_task(void*) {
 
 void start_game(const GameBuses& b) {
   buses = b;
+  // ~105 KB in internal RAM, as DMA reads its strips: from the heap, as Arduino's static
+  // DRAM cannot hold it (its Bluetooth reserve takes the start of that region).
+  rt_mem = heap_caps_aligned_alloc(alignof(runtime::Runtime), sizeof(runtime::Runtime), MALLOC_CAP_DMA);
+  if (!rt_mem) {
+    logf("HM error what=runtime_mem need=%u largest=%u", (unsigned)sizeof(runtime::Runtime),
+         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+    return;
+  }
   xTaskCreatePinnedToCore(game_task, "hm_game", STACK, nullptr, PRIO, nullptr, 1);
 }
 

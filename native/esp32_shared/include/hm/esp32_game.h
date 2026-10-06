@@ -30,5 +30,14 @@ struct GameBuses {
 // Starts the game task; returns at once. Call once.
 void start_game(const GameBuses& b);
 
+// The panel bus of the QEMU builds: Espressif's QEMU has no SPI DMA, so a real
+// push never finishes; this one sends the pixels nowhere.
+struct NullLcdBus final : LcdBus {
+  bool set_clock(uint32_t) override { return true; }
+  void command(uint8_t, const uint8_t*, size_t) override {}
+  void pixels(uint8_t, const uint16_t*, size_t) override {}
+  void wait() override {}
+};
+
 }  // namespace esp
 }  // namespace hm
