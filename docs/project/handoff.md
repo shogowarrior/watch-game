@@ -53,8 +53,8 @@ in one message with the current default marked. Don't build on an assumption.
 
   It runs unchanged on CPython, on MicroPython 1.29 (WebAssembly) and in the
   web simulator.
-- **Tests:** `python3 tests/runner.py` gives 711 passed; `node tools/mpy/run.mjs
-  tests/runner.py` gives 691 passed. The held-out bake-off (seeds 100-129)
+- **Tests:** `python3 tests/runner.py` gives 771 passed; `node tools/mpy/run.mjs
+  tests/runner.py` gives 857 passed. The held-out bake-off (seeds 100-129)
   still ranks kalman2 first, at 0.660.
 - **Review:** four whole-repo review rounds ran on 2026-10-02/03. Every finding
   was verified by an independent skeptic before it was fixed. Confirmed
@@ -91,7 +91,9 @@ in one message with the current default marked. Don't build on an assumption.
    USB serial link, the bridge's `--serial` reader and the private Wi-Fi setup
    (`tools/wifi_setup.py`, which keeps the password out of the repo) followed
    in parallel tracks, tested end to end with `tools/debug_server.py --demo`
-   and `--demo --serial`. How to use it:
+   and `--demo --serial`. Its **Knocks** panel (2026-10-04) shows each bump
+   spike per watch: matched with the other watch's within 0.4 s, or why not
+   (`tools/knocks.py`). How to use it:
    [docs/hardware-setup.md](../hardware-setup.md) §7 (USB first). Still to do:
    one `review-fix-round` with `changed` set to the files it touched, and
    question 7 above.
