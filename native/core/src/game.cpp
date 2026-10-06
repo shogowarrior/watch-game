@@ -40,6 +40,24 @@ bool in_zone_names(const char* scr) {
   return false;
 }
 
+// A counted spike at spike_t makes the touch that landed at t_down a knock's
+// (screen to screen): from KNOCK_TOUCH_BEFORE_MS before to
+// KNOCK_TOUCH_AFTER_MS after the touch-down.
+bool knock(opt_ticks spike_t, ticks_t t_down) {
+  if (!spike_t) return false;
+  const int32_t d = ticks_diff(*spike_t, t_down);
+  return -T::KNOCK_TOUCH_BEFORE_MS <= d && d <= T::KNOCK_TOUCH_AFTER_MS;
+}
+
+// LINK_LOST banners: fixed words (no running clock, ui-spec §6 LINK-LOST)
+rp::Banner sticky(const char* text, rp::Severity sev) {
+  rp::Banner b;
+  b.text = rp::Text(text);
+  b.severity = sev;
+  b.sticky = true;
+  return b;
+}
+
 }  // namespace
 
 const char* name(Mode m) { return MODE_NAMES[m]; }
@@ -96,9 +114,11 @@ void Game::reset(ticks_t t_ms) {
   toast_until_.reset();
   hint_ = nullptr;
   hint_until_ = t_ms;
+  teach_far_ = false;
   last_trend_ = 0;
   last_trend_t_.reset();
   lost_trend = 0;
+  lost_hint_ = false;
   left_t_.reset();
   held_ = hp::NONE;
   hz_ = meter.expected_hz;
@@ -108,6 +128,25 @@ void Game::reset(ticks_t t_ms) {
   br_since_.reset();
   bump_ready = false;
   br_fired_ = false;
+  felt_on_ = false;
+  felt_t0_ = t_ms;
+  fm_.reset();
+  fq_.reset();
+  fm_seen_.reset();
+  fq_seen_.reset();
+  fq_conf_ = false;
+  touch_t_.reset();
+  spike_touched_.reset();
+  felt_ = nullptr;
+  howto.reset();
+  look_t_.reset();
+  howto_hinted_ = false;
+  howto_shut_.reset();
+  ign_s_ = nullptr;
+  ign_td_ = 0;
+  ign_knock_ = false;
+  ign_t_.reset();
+  felt_until_ = t_ms;
   still_since_.reset();
   still_done_ = false;
   peer_sweep_ = false;
@@ -168,6 +207,7 @@ bool Game::on_accel_tap(ticks_t t_ms) {
   if (blanked(t_ms)) return false;
   spike_t_ = t_ms;
   bump_t = t_ms;
+  if (touch_t_ && knock(t_ms, *touch_t_)) spike_touched_ = t_ms;
   taps = (taps + 1) & 7;
   tap_hot_ = mode == HUNT && px.zone() == X::HOT;
   return true;
@@ -180,6 +220,7 @@ bool Game::bump_armed() const {
 }
 
 void Game::on_touch_down(ticks_t t_ms) {
+  note_touch(t_ms);
   if (screen_on && !power_off && !touch_block_ && ticks_diff(t_ms, wake_t_) >= T::WAKE_TOUCH_IGNORE_MS)
     touch_burst(t_ms);
 }
@@ -188,24 +229,22 @@ void Game::on_wake(ticks_t t_ms) {
   if (!screen_on) wake(t_ms);
 }
 
-// A counted spike makes the touch that landed at t_down a knock's (screen to
-// screen): from KNOCK_TOUCH_BEFORE_MS before to KNOCK_TOUCH_AFTER_MS after the touch-down.
-bool Game::knock(ticks_t t_down) const {
-  if (!spike_t_) return false;
-  const int32_t d = ticks_diff(*spike_t_, t_down);
-  return -T::KNOCK_TOUCH_BEFORE_MS <= d && d <= T::KNOCK_TOUCH_AFTER_MS;
-}
-
 void Game::on_gesture(ticks_t t_ms, int code, int32_t x, int32_t y, opt_ticks t_down) {
   if (code == 0) return;
   if (!screen_on || power_off || bye_t_) return;
   const ticks_t td = t_down ? *t_down : t_ms;
+  note_touch(td);
   resolve_held(t_ms, true);
-  if (knock(td)) {   // a knock or a finger's own spike (§8)
+  if (knock(spike_t_, td)) {   // a knock or a finger's own spike (§8)
     if (!peer_spiked(*spike_t_)) held_g_ = Held{code, x, y, td, *spike_t_};   // waits for the partner's word
     return;
   }
   gesture(t_ms, code, x, y, td);
+}
+
+void Game::note_touch(ticks_t td) {
+  touch_t_ = td;
+  if (knock(spike_t_, td)) spike_touched_ = spike_t_;
 }
 
 bool Game::peer_spiked(ticks_t s) const {
@@ -238,6 +277,11 @@ void Game::gesture(ticks_t t_ms, int code, int32_t x, int32_t y, ticks_t td) {
     menu.scroll(t_ms, code == gestures::SWIPE_U ? 1 : -1);
     return;
   }
+  if (code == gestures::SWIPE_L || code == gestures::SWIPE_R) {
+    if (!menu.is_open && mode == PAIRING && pair.sub == P::LOOKING && !inter_until_ && !inter_pending_)
+      howto_flip(code == gestures::SWIPE_L ? 1 : -1);
+    return;
+  }
   if (code != gestures::TAP) return;
   if (menu.is_open) {
     menu_apply(t_ms, menu.tap(t_ms, y));
@@ -246,7 +290,7 @@ void Game::gesture(ticks_t t_ms, int code, int32_t x, int32_t y, ticks_t td) {
   const int32_t dx = x - T::CENTER[0];
   const int32_t dy = y - T::CENTER[1];
   if (dx * dx + dy * dy > T::TAP_R_MAX_PX * T::TAP_R_MAX_PX) return;
-  primary(t_ms, false);
+  if (!primary(t_ms, false)) ignored(t_ms, td);
 }
 
 void Game::on_button(ticks_t t_ms, bool long_) {
@@ -257,12 +301,16 @@ void Game::on_button(ticks_t t_ms, bool long_) {
   }
   if (bye_t_) return;   // shutting down: BYE only
   input_t_ = t_ms;
+  if (unseen_ && !long_) {
+    unseen_ = false;    // lit by an event, wrist still down: a look (§8)
+    return;
+  }
   if (long_)
     long_press(t_ms);
   else if (menu.is_open)
     menu_apply(t_ms, menu.next(t_ms));
-  else
-    primary(t_ms, true);
+  else if (!primary(t_ms, true))
+    ignored(t_ms, t_ms);
 }
 
 // Rain/sleeve filter: >= 3 touch-downs in 1 s block touches for 2 s.
@@ -271,19 +319,29 @@ void Game::touch_burst(ticks_t t_ms) {
   if (touches_.full_within(t_ms, T::TOUCH_BURST_WINDOW_MS)) {
     touch_block_ = ticks_add(t_ms, T::TOUCH_BURST_IGNORE_MS);
     touches_.clear();
+    ign_s_ = nullptr;   // a burst is no deliberate tap
   }
 }
 
-void Game::primary(ticks_t t_ms, bool button) {
+// The tap / short-press action of this screen; false if it did nothing (an
+// ignored tap or press, §8 Ignored taps).
+bool Game::primary(ticks_t t_ms, bool button) {
   if (mode == PAIRING) {
-    if (pair.sub == P::SPLIT)
+    if ((pair.sub == P::LOOKING || pair.sub == P::SEEN) && howto_shown(t_ms)) {
+      if (button) howto.reset();   // a press closes the cards; it never confirms
+      return true;                 // runes the player has not seen (§6 PAIRING)
+    }
+    if (pair.sub == P::SPLIT) {
       pair.set_ready(t_ms);
-    else
-      pair.confirm(t_ms);
-  } else if (mode == HUNT) {
-    if (arrow && arrow->tap()) return;
+      if (pair.ready && toast_is(T_NEW_ROUND)) toast_on_ = false;   // its READY word shows at once (§6 Round start)
+      return true;
+    }
+    return pair.confirm(t_ms);
+  }
+  if (mode == HUNT) {
+    if (arrow && arrow->tap()) return true;
     if (px.zone() == X::HOT) {
-      if (!button) return;   // HOT: the screen is where watches knock (§8)
+      if (!button) return false;   // HOT: the screen is where watches knock (§8)
       if (press_t_ && 0 <= ticks_diff(t_ms, *press_t_) && ticks_diff(t_ms, *press_t_) <= T::HOT_SCAN_PRESS_MS &&
           !(peer.fresh(t_ms) && peer.pressed())) {
         press_t_.reset();    // double press: scan, not a fallback bump
@@ -291,13 +349,98 @@ void Game::primary(ticks_t t_ms, bool button) {
       } else {
         press_t_ = t_ms;     // fallback bump press
       }
-      return;
+      return true;
     }
     start_scan(t_ms);
-  } else if (mode == SCANNING) {
-    scan.cancel(t_ms);
+    return true;
+  }
+  if (mode == SCANNING) return scan.cancel(t_ms);
+  if (mode == FOUND) {   // the button only: a tap or a knock never skips the result
+    if (button && ticks_diff(t_ms, *found_t) >= T::FOUND_CELEBRATE_MS) {
+      new_round(t_ms);
+      return true;
+    }
+  }
+  return false;
+}
+
+// ---- how-to cards and ignored taps (ui-spec §6 PAIRING, §8) --------------------
+
+// A card is open, was on the last frame, or closed by itself moments ago: a
+// press or tap then is about the card, not the runes.
+bool Game::howto_shown(ticks_t t_ms) const {
+  if (howto.open()) return true;
+  if (params && params->sub == rp::Sub::HOWTO) return true;
+  return howto_shut_ && ticks_diff(t_ms, *howto_shut_) < T::HOWTO_PRESS_GUARD_MS;
+}
+
+void Game::howto_flip(int32_t d) {
+  if (howto.flip(d)) {   // just opened: the hint has done its job
+    howto_known_ = true;
+    if (toast_is(T_SWIPE_HOWTO)) toast_on_ = false;
+    if (ign_s_ == T_SWIPE_HOWTO) ign_s_ = nullptr;
+  }
+}
+
+void Game::howto_close(ticks_t t_ms) {
+  if (howto.open()) {
+    howto.reset();
+    howto_shut_ = t_ms;
+  }
+}
+
+// The toast an ignored tap or press raises on this screen, or nullptr.
+const char* Game::ignored_text(ticks_t t_ms) const {
+  if (inter_until_ || inter_pending_) return nullptr;   // SAVER ON owns the screen
+  if (mode == PAIRING) {
+    if (pair.sub == P::LOOKING && !howto.open()) return T_SWIPE_HOWTO;
+  } else if (mode == HUNT) {
+    const std::optional<rp::RenderParams>& p = params;   // only over the readout (no word, no banner)
+    if (px.zone() == X::HOT && p && !p->word && !p->banner && p->dist_band) return T_PRESS_2X;
   } else if (mode == FOUND) {
-    if (ticks_diff(t_ms, *found_t) >= T::FOUND_CELEBRATE_MS) new_round(t_ms);
+    if (ticks_diff(t_ms, *found_t) >= T::FOUND_CELEBRATE_MS) return T_PRESS_BUTTON;
+  }
+  return nullptr;
+}
+
+// A deliberate tap or press that did nothing: its toast waits out the knock
+// wait (resolve_ignored); at most one per IGNORED_TOAST_GAP_MS.
+void Game::ignored(ticks_t t_ms, ticks_t td) {
+  if (ign_t_ && ticks_diff(t_ms, *ign_t_) < T::IGNORED_TOAST_GAP_MS) return;
+  if (ign_s_) return;
+  const char* s = ignored_text(td);   // judged where the finger landed: a held celebrate tap stays silent
+  if (s) {
+    ign_s_ = s;
+    ign_td_ = td;
+    ign_knock_ = false;
+  }
+}
+
+// Raise a waiting ignored-tap toast KNOCK_WAIT_MS after its touch landed,
+// unless it was a knock: a partner spike in the knock window (or in HOT our
+// own, which the felt-it check speaks for), latched as reports arrive.
+void Game::resolve_ignored(ticks_t t_ms) {
+  const char* s = ign_s_;
+  if (!s) return;
+  const ticks_t td = ign_td_;
+  if (knock(peer.tap_t, td) || (mode == HUNT && knock(spike_t_, td))) ign_knock_ = true;
+  if (ticks_diff(t_ms, td) < T::KNOCK_WAIT_MS) return;
+  ign_s_ = nullptr;
+  if (ign_knock_ || toast_on_ || menu.is_open || !screen_on || bye_t_ || ignored_text(t_ms) != s) return;
+  ign_t_ = t_ms;
+  toast_set(s, rp::Severity::INFO);
+  if (s == T_SWIPE_HOWTO) howto_hinted_ = true;
+}
+
+// An ignored-tap or hint toast still up when its screen no longer calls for
+// it is dropped (§8 Ignored taps). PRESS 2X TO SCAN also goes when a word
+// takes the bottom slot (tick checks the frame); every way out of FOUND
+// replaces or clears PRESS THE BUTTON already.
+void Game::drop_stale_ignored() {
+  if (toast_is(T_SWIPE_HOWTO)) {
+    if (mode != PAIRING || pair.sub != P::LOOKING) toast_on_ = false;
+  } else if (toast_is(T_PRESS_2X)) {
+    if (mode != HUNT || px.zone() != X::HOT) toast_on_ = false;
   }
 }
 
@@ -306,6 +449,27 @@ void Game::wake(ticks_t t_ms) {
   wake_t_ = t_ms;
   input_t_ = t_ms;
   down_since_.reset();
+  unseen_ = false;
+}
+
+// Event wake (ui-spec §8): the screen lights now and stays lit ms whatever the
+// tilt. A dark screen wakes as on a wrist raise (boost, 300 ms touch filter)
+// but keeps its wrist-down clock, so a wrist that stayed lowered goes dark
+// when the hold ends, and it counts as unseen until the wrist is raised (a
+// short press only wakes it). A later event extends the hold, never shortens
+// it. At <= 5 % only FOUND (critical_ok) lights the screen (LOW-BATTERY:
+// haptics carry the game); nothing while shutting down.
+void Game::light(ticks_t t_ms, int32_t ms, bool critical_ok) {
+  if (power_off || bye_t_) return;
+  if (!critical_ok && critical()) return;
+  if (!screen_on) {
+    screen_on = true;
+    unseen_ = true;
+    wake_t_ = t_ms;
+  }
+  input_t_ = t_ms;
+  const ticks_t u = ticks_add(t_ms, ms);
+  if (!lit_until_ || ticks_diff(u, *lit_until_) > 0) lit_until_ = u;
 }
 
 // ---- haptics / toasts ----------------------------------------------------------
@@ -338,6 +502,11 @@ void Game::hint_set(ticks_t t_ms, const char* text) {
   hint_until_ = ticks_add(t_ms, T::HINT_CHIP_MS);
 }
 
+// The hint chip still showing, or nullptr.
+const char* Game::hint_text(ticks_t t_ms) const {
+  return hint_ && ticks_diff(hint_until_, t_ms) > 0 ? hint_ : nullptr;
+}
+
 // Start a waiting toast or SAVER ON interstitial once it can be seen: not
 // under the MENU, a toast not during the sweep, the interstitial not in a scan.
 void Game::show_pending(ticks_t t_ms) {
@@ -347,6 +516,7 @@ void Game::show_pending(ticks_t t_ms) {
   if (inter_pending_ && !scanning) {
     inter_pending_ = false;
     inter_until_ = ticks_add(t_ms, T::BATT_INTERSTITIAL_MS);
+    howto.reset();   // SAVER ON is never merged with a card
   }
 }
 
@@ -369,12 +539,15 @@ const rp::RenderParams& Game::tick(ticks_t t_ms) {
       case FOUND: tick_found(t_ms); break;
       case LINK_LOST: tick_lost(t_ms); break;
     }
+    update_felt(t_ms);
+    drop_stale_ignored();
     menu.tick(t_ms);
     const hp::Haptic h = held_;
     if (h != hp::NONE && !menu.is_open) {
       held_ = hp::NONE;
       emit(t_ms, h);
     }
+    resolve_ignored(t_ms);
     show_pending(t_ms);
     if (mode != HUNT) peer_sweep_ = false;
     set_expected(t_ms);
@@ -382,6 +555,11 @@ const rp::RenderParams& Game::tick(ticks_t t_ms) {
   state_byte = state_byte_(t_ms);
   menu.window(sun, buzz, indoor);
   params = params_(t_ms);
+  if (toast_is(T_PRESS_2X) && params->word) {
+    toast_on_ = false;                    // BUMP!, HOLD STILL or an arrow word took the slot (§8)
+    if (ign_t_ == t_ms) ign_t_.reset();   // raised this tick, never shown: no gap spent
+    params = params_(t_ms);
+  }
   return *params;
 }
 
@@ -389,11 +567,17 @@ const rp::RenderParams& Game::tick(ticks_t t_ms) {
 void Game::expire(ticks_t t_ms) {
   if (toast_on_ && toast_until_ && ticks_diff(*toast_until_, t_ms) <= 0) toast_on_ = false;
   if (hint_ && ticks_diff(hint_until_, t_ms) <= 0) hint_ = nullptr;
+  if (felt_ && ticks_diff(felt_until_, t_ms) <= 0) felt_ = nullptr;
   if (inter_until_ && ticks_diff(*inter_until_, t_ms) <= 0) inter_until_.reset();
   blank_.expire(t_ms);
+  if (lit_until_ && ticks_diff(*lit_until_, t_ms) <= 0) lit_until_.reset();
   if (touch_block_ && ticks_diff(*touch_block_, t_ms) <= 0) touch_block_.reset();
   touches_.expire(t_ms, T::TOUCH_BURST_WINDOW_MS);
   if (spike_t_ && ticks_diff(t_ms, *spike_t_) > KNOCK_KEEP_MS) spike_t_.reset();
+  if (touch_t_ && ticks_diff(t_ms, *touch_t_) > KNOCK_KEEP_MS) touch_t_.reset();
+  if (ign_t_ && ticks_diff(t_ms, *ign_t_) >= T::IGNORED_TOAST_GAP_MS) ign_t_.reset();
+  if (howto_shut_ && ticks_diff(t_ms, *howto_shut_) >= T::HOWTO_PRESS_GUARD_MS) howto_shut_.reset();
+  look_t_ = cap(t_ms, look_t_);
   if (unrel_t_ && ticks_diff(t_ms, *unrel_t_) >= UNRELIABLE_PIN_MS) unrel_t_.reset();
   if (press_t_ && ticks_diff(t_ms, *press_t_) > T::FALLBACK_PRESS_WINDOW_MS) press_t_.reset();
   if (bump_t && ticks_diff(t_ms, *bump_t) > S::TAP_KEEP_MS) {
@@ -412,6 +596,7 @@ void Game::expire(ticks_t t_ms) {
   down_since_ = cap(t_ms, down_since_);
   still_since_ = cap(t_ms, still_since_);
   br_since_ = cap(t_ms, br_since_);
+  felt_t0_ = cap(t_ms, felt_t0_);
   hold_t_ = cap(t_ms, hold_t_);
   peer.expire(t_ms, STALE_MS);
   meter.expire(t_ms);   // rolls the delivery window: its stamp never wraps either
@@ -460,9 +645,16 @@ void Game::forget_trend() {
   lost_trend = 0;
 }
 
-// TAP TO SCAN for 4 s on entering FAR or NEAR (no arrow shown).
+// TAP TO SCAN for 4 s on entering FAR or NEAR (no arrow shown, no other hint
+// showing); the round's first FAR says FASTER IS CLOSER.
 void Game::scan_hint(ticks_t t_ms) {
-  if (!arrow) hint_set(t_ms, T_TAP_TO_SCAN);
+  if (arrow || !hint_free()) return;
+  if (teach_far_ && px.zone() == X::FAR && !peer_sweep_ && !menu.is_open) {
+    teach_far_ = false;
+    hint_set(t_ms, T_FASTER_CLOSER);
+  } else {
+    hint_set(t_ms, T_TAP_TO_SCAN);
+  }
 }
 
 // Past pairing, a fresh partner showing PAIRING for PARTNER_LEFT_MS has left
@@ -476,6 +668,7 @@ void Game::partner_left(ticks_t t_ms) {
     reset(t_ms);
     toast_set(T_FRIEND_LEFT, rp::Severity::WARN);
     emit(t_ms, hp::NOPE);
+    light(t_ms, T::EVENT_LIT_MS);
   }
 }
 
@@ -489,8 +682,20 @@ void Game::tick_pairing(ticks_t t_ms) {
     consume_bump();
     pair.bump(t_ms);
   }
+  const P::Sub was = pair.sub;
   emit(t_ms, pair.update(t_ms));
-  if (pair.toast) toast_set(pair.toast, rp::Severity::INFO);
+  if (pair.toast)
+    toast_set(pair.toast, rp::Severity::INFO);   // CAL SKIPPED keeps the slot
+  else if (was == P::CALIBRATE && pair.sub == P::SPLIT)
+    toast_set(T_NEW_ROUND, rp::Severity::INFO);
+  if (pair.sub == P::LOOKING) {
+    looking_hint(t_ms);
+  } else {   // the partner is seen: the cards close
+    look_t_.reset();
+    howto_hinted_ = false;
+    howto_close(t_ms);
+    if (pair.sub == P::CALIBRATE) howto_known_ = true;
+  }
   if (pair.p1m && pair.p1m != p1m_) {
     p1m_ = pair.p1m;
     est->calibrate(*pair.p1m);
@@ -500,10 +705,28 @@ void Game::tick_pairing(ticks_t t_ms) {
     update_px(t_ms);
   } else if (pair.sub == P::DONE) {
     round_t0 = t_ms;
+    teach_far_ = true;
+    if (toast_is(T_NEW_ROUND)) toast_on_ = false;   // the split ended early: not into the hunt
+    hint_set(t_ms, T_FIND_FRIEND);                  // before the zone hint: HOT's LOOK UP wins
     if (peer.live3(t_ms) && px.zone() && !peer_gone())
       enter_hunt(t_ms, false);
     else
       enter_searching(t_ms);
+  }
+}
+
+// SWIPE: HOW TO PLAY once, HOWTO_HINT_MS into a looking spell, until the cards
+// were opened or a round started since power-on; never over another toast,
+// under the MENU or SAVER ON, or with the screen off (§6 PAIRING).
+void Game::looking_hint(ticks_t t_ms) {
+  if (!look_t_) {
+    look_t_ = t_ms;
+    return;
+  }
+  if (howto_hinted_ || howto_known_ || howto.open() || ticks_diff(t_ms, *look_t_) < T::HOWTO_HINT_MS) return;
+  if (screen_on && !toast_on_ && !menu.is_open && !bye_t_ && !inter_until_ && !inter_pending_) {
+    howto_hinted_ = true;
+    toast_set(T_SWIPE_HOWTO, rp::Severity::INFO);
   }
 }
 
@@ -537,7 +760,7 @@ void Game::enter_hunt(ticks_t t_ms, bool fanfare) {
   if (z == X::FAR || z == X::NEAR)
     scan_hint(t_ms);
   else if (z == X::HOT)
-    hint_set(t_ms, T_LOOK_AROUND);
+    enter_hot(t_ms);
   br_since_.reset();
   bump_ready = false;
   br_fired_ = false;
@@ -558,21 +781,32 @@ void Game::tick_hunt(ticks_t t_ms) {
       burst_ = true;
       emit(t_ms, hp::CLOSER);
       if (z == X::HOT)
-        hint_set(t_ms, T_LOOK_AROUND);
+        enter_hot(t_ms);
       else if (z == X::NEAR)
         scan_hint(t_ms);
     } else {
       emit(t_ms, hp::FARTHER);
-      if (hint_ == T_LOOK_AROUND) hint_ = nullptr;
+      if (hint_ == T_LOOK_UP) hint_ = nullptr;
       if (z == X::FAR || z == X::NEAR) scan_hint(t_ms);
     }
   }
+  if (teach_far_ && z == X::FAR && !hint_ && !peer_sweep_ && !menu.is_open)
+    scan_hint(t_ms);   // the first FAR, once FIND YOUR FRIEND has gone
   // hidden by the MENU or SAVER ON: the pacer must not run unseen (clock pauses)
   update_arrow(t_ms, true, menu.is_open || inter_until_.has_value());
   update_bump_ready(t_ms);
+  const A::Arrow* a = arrow;
+  if (bump_ready && a && a->glyph == rp::Glyph::ARROW && a->sub == rp::Sub::WALK)
+    arrow = nullptr;   // the bump view takes it, silently (§6 HOT)
   update_still_hint(t_ms);
   update_peer_scan(t_ms);
   check_found(t_ms);
+}
+
+// HOT entry: LOOK UP for 4 s; on battery the screen lights (§8).
+void Game::enter_hot(ticks_t t_ms) {
+  hint_set(t_ms, T_LOOK_UP);
+  light(t_ms, T::EVENT_LIT_MS);
 }
 
 void Game::update_arrow(ticks_t t_ms, bool link_ok, bool hidden) {
@@ -592,9 +826,10 @@ void Game::update_bump_ready(ticks_t t_ms) {
     if (!br_since_) br_since_ = t_ms;
     if (ticks_diff(t_ms, *br_since_) >= T::BUMP_READY_HOLD_MS) {
       bump_ready = true;
-      if (!br_fired_) {
-        br_fired_ = true;
+      if (!br_fired_ && friend_ready(t_ms)) {
+        br_fired_ = true;   // "bump now": once both can count it
         emit(t_ms, hp::DOUBLE);
+        light(t_ms, T::EVENT_LIT_MS);
       }
     }
   } else {
@@ -609,7 +844,7 @@ void Game::update_still_hint(ticks_t t_ms) {
   if (z != X::HOT && !arrow && me.activity() == ACT_STILL) {
     if (!still_since_) {
       still_since_ = t_ms;
-    } else if (!still_done_ && ticks_diff(t_ms, *still_since_) >= T::HINT_STILL_MS) {
+    } else if (!still_done_ && hint_free() && ticks_diff(t_ms, *still_since_) >= T::HINT_STILL_MS) {
       still_done_ = true;
       hint_set(t_ms, T_TAP_TO_SCAN);
     }
@@ -655,10 +890,121 @@ bool Game::pressed(ticks_t t_ms) const {
   return press_t_ && 0 <= ticks_diff(t_ms, *press_t_) && ticks_diff(t_ms, *press_t_) <= T::FALLBACK_PRESS_WINDOW_MS;
 }
 
-void Game::check_found(ticks_t t_ms) {
-  if (px.zone() != X::HOT || !peer.fresh(t_ms)) return;
+// The partner's watch can count a bump: heard within PEER_FRESH_MS and its
+// screen in HOT or FOUND (the bump rule's own test, ui-spec §6 HOT).
+bool Game::friend_ready(ticks_t t_ms) const {
+  if (!peer.fresh(t_ms)) return false;
   const int32_t ps = peer.screen();
-  if (ps != S::SC_HOT && ps != S::SC_FOUND) return;
+  return ps == S::SC_HOT || ps == S::SC_FOUND;
+}
+
+// Our last counted spike is within BUMP_WINDOW_MS of the partner's q.
+bool Game::my_spiked(ticks_t q) const {
+  if (!bump_t) return false;
+  const int32_t d = ticks_diff(*bump_t, q);
+  return -T::BUMP_WINDOW_MS <= d && d <= T::BUMP_WINDOW_MS;
+}
+
+bool Game::felt_ctx() const {
+  if (mode == HUNT) return px.zone() == X::HOT;
+  return mode == PAIRING && (pair.sub == P::SEEN || pair.sub == P::CONFIRMED);
+}
+
+// ONLY YOU FELT IT / FRIEND FELT IT: a spike the other watch did not report
+// within BUMP_WINDOW_MS, judged KNOCK_WAIT_MS after it, so players learn how
+// firm a bump must be (ui-spec §6 HOT). In HOT touches play no part. In
+// PAIRING a spike a touch went with gets no verdict: an own spike with a
+// finger landing in the knock window, or a partner spike after which its
+// confirm turns on (judged FELT_CONFIRM_GRACE_MS later), was a confirming tap
+// or a screen knock (§6 PAIRING).
+void Game::update_felt(ticks_t t_ms) {
+  if (!felt_ctx()) {
+    if (felt_on_) {
+      felt_on_ = false;
+      fm_.reset();
+      fq_.reset();
+      felt_ = nullptr;
+      if (toast_is(T_ONLY_YOU) || toast_is(T_FRIEND_FELT)) toast_on_ = false;
+    }
+    return;
+  }
+  const opt_ticks m = bump_t;
+  const opt_ticks q = peer.tap_t;
+  if (!felt_on_) {
+    felt_on_ = true;
+    felt_t0_ = t_ms;
+    fm_seen_ = m;
+    fq_seen_ = q;
+  }
+  const bool hot = mode == HUNT;
+  if (m != fm_seen_) {
+    fm_seen_ = m;
+    if (m && ticks_diff(*m, felt_t0_) >= 0 && !peer_spiked(*m)) fm_ = m;
+  }
+  if (q != fq_seen_) {
+    if (!q || ticks_diff(*q, felt_t0_) < 0 || ticks_diff(t_ms, *q) > BUMP_FRESH_MS) {
+      fq_seen_ = q;   // none, or too old: never judged
+    } else if (peer.tap_hot() || !hot) {
+      fq_seen_ = q;
+      if (!my_spiked(*q)) {
+        fq_ = q;
+        fq_conf_ = pair.peer_confirmed;
+      }
+    }   // else its ST_TAP_HOT can trail the tap count by a beacon: look again
+  }
+  const opt_ticks fm = fm_;
+  if (fm) {
+    if (peer_spiked(*fm)) {
+      fm_.reset();
+    } else if (ticks_diff(t_ms, *fm) >= T::KNOCK_WAIT_MS) {
+      fm_.reset();   // HOT: FRIEND NOT READY already says why
+      if (hot) {
+        if (friend_ready(t_ms)) felt_say(t_ms, T_ONLY_YOU);
+      } else if (fm != spike_touched_) {
+        felt_say(t_ms, T_ONLY_YOU);
+      }
+    }
+  }
+  const opt_ticks fq = fq_;
+  if (fq) {
+    if (my_spiked(*fq)) {
+      fq_.reset();
+    } else if (hot) {
+      if (ticks_diff(t_ms, *fq) >= T::KNOCK_WAIT_MS) {
+        fq_.reset();
+        felt_say(t_ms, T_FRIEND_FELT);
+      }
+    } else if (ticks_diff(t_ms, *fq) >= T::KNOCK_WAIT_MS + T::FELT_CONFIRM_GRACE_MS) {
+      fq_.reset();
+      if (fq_conf_ || !pair.peer_confirmed) felt_say(t_ms, T_FRIEND_FELT);
+    }
+  }
+}
+
+void Game::felt_say(ticks_t t_ms, const char* text) {
+  if (mode == HUNT) {
+    felt_ = text;
+    felt_until_ = ticks_add(t_ms, T::TOAST_MS);
+  } else {
+    toast_set(text, rp::Severity::INFO);
+  }
+}
+
+// bump_icons for the bump view: who felt the last knock (lit for
+// BUMP_LIT_MS), and whether the friend's watch can count one.
+int32_t Game::bump_icons(ticks_t t_ms, bool ready) const {
+  int32_t v = 0;
+  const opt_ticks m = bump_t;
+  if (m && tap_hot_ && 0 <= ticks_diff(t_ms, *m) && ticks_diff(t_ms, *m) < T::BUMP_LIT_MS) v = rp::BI_ME;
+  if (!ready) return v | rp::BI_FRIEND_OFF;
+  const opt_ticks q = peer.tap_t;
+  if (q && peer.tap_hot() && 0 <= ticks_diff(t_ms, *q) && ticks_diff(t_ms, *q) < T::BUMP_LIT_MS) v |= rp::BI_FRIEND;
+  return v;
+}
+
+void Game::check_found(ticks_t t_ms) {
+  if (px.zone() != X::HOT || !friend_ready(t_ms)) return;
+  const int32_t ps = peer.screen();
   if (tap_hot_ && peer.tap_hot() && bump_match(t_ms)) {
     consume_bump();
     enter_found(t_ms);
@@ -691,9 +1037,11 @@ void Game::enter_found(ticks_t t_ms) {
   burst_ = true;
   emit(t_ms, hp::FOUND);
   int32_t s = round_t0 ? floordiv(ticks_diff(t_ms, *round_t0), 1000) : 0;
-  if (s > 99 * 60 + 59) s = 99 * 60 + 59;
+  S::fmt_found(s, found_word_, sizeof found_word_);
+  if (s > T::FOUND_TIME_MAX_S) s = T::FOUND_TIME_MAX_S;
   snprintf(time_text_, sizeof time_text_, "TIME %d:%02d", (int)floordiv(s, 60), (int)floormod(s, 60));
   time_on_ = true;
+  light(t_ms, T::FOUND_LIT_MS, true);
 }
 
 void Game::tick_found(ticks_t t_ms) {
@@ -709,7 +1057,9 @@ void Game::new_round(ticks_t t_ms) {
   forget_trend();
   hint_ = nullptr;
   press_t_.reset();
+  ign_s_ = nullptr;
   consume_bump();
+  toast_set(T_NEW_ROUND, rp::Severity::INFO);
 }
 
 // SCANNING
@@ -799,7 +1149,9 @@ void Game::enter_lost(ticks_t t_ms) {
   last_trend_t_.reset();
   bump_ready = false;
   hint_ = nullptr;
+  lost_hint_ = false;
   emit(t_ms, hp::LOST);
+  light(t_ms, T::EVENT_LIT_MS);
   est->reset();
   px.rearm();
   update_arrow(t_ms, false);
@@ -807,6 +1159,12 @@ void Game::enter_lost(ticks_t t_ms) {
 
 void Game::tick_lost(ticks_t t_ms) {
   update_arrow(t_ms, false);
+  if (!lost_hint_) {
+    const std::optional<int32_t> age = peer.age(t_ms);
+    const int32_t el = age ? *age : ticks_diff(t_ms, mode_t) + T::LINK_LOST_AFTER_MS;
+    // from the last packet; once shown it stays (a stray packet takes nothing back)
+    lost_hint_ = el >= T::LOST_HINT_AFTER_MS;
+  }
   if (peer.live3(t_ms) && est->dist_m && !peer_gone()) {
     update_px(t_ms);
     if (px.zone()) {
@@ -817,28 +1175,11 @@ void Game::tick_lost(ticks_t t_ms) {
   }
 }
 
-rp::Banner Game::lost_banner(ticks_t t_ms) const {
-  rp::Banner b;
-  b.sticky = true;
-  if (peer.goodbye) {
-    b.text = rp::Text(T_FRIEND_OFF);
-    b.severity = rp::Severity::CRITICAL;
-    return b;
-  }
-  b.severity = rp::Severity::WARN;
-  if (peer.battery && *peer.battery <= T::BATT_BANNER_PCT) {
-    b.text = rp::Text(T_FRIEND_LOW);
-    return b;
-  }
-  const std::optional<int32_t> age = peer.age(t_ms);
-  const int32_t el = age ? *age : ticks_diff(t_ms, mode_t) + T::LINK_LOST_AFTER_MS;
-  char mss[S::MSS_LEN];
-  S::fmt_mss(el, mss, sizeof mss);
-  char s[TEXT_N];
-  snprintf(s, sizeof s, "LOST %s%s", mss,
-           el >= T::LOST_HINT_AFTER_MS ? (lost_trend > 0 ? " KEEP ON" : " GO BACK") : "");
-  b.text = rp::Text(s);
-  return b;
+rp::Banner Game::lost_banner() const {
+  if (peer.goodbye) return sticky(T_FRIEND_OFF, rp::Severity::CRITICAL);
+  if (peer.battery && *peer.battery <= T::BATT_BANNER_PCT) return sticky(T_FRIEND_LOW, rp::Severity::WARN);
+  if (!lost_hint_) return sticky(T_SIGNAL_LOST, rp::Severity::WARN);
+  return sticky(lost_trend > 0 ? T_LOST_KEEP_ON : T_LOST_GO_BACK, rp::Severity::WARN);
 }
 
 // MENU
@@ -889,11 +1230,13 @@ void Game::power(ticks_t t_ms) {
   if (fu && !fu_prev_ && !screen_on) wake(t_ms);   // a wrist raise on a lit screen is no new wake (§8)
   fu_prev_ = fu;
   if (!screen_on) return;
+  if (!lowered()) unseen_ = false;   // the wrist is up: an event-lit screen has been seen
   if (usb || !lowered() || keep_on()) {
     down_since_.reset();
     return;
   }
   if (!down_since_) down_since_ = t_ms;
+  if (lit_until_) return;   // event wake: lit whatever the tilt; the clock runs on (§8)
   const int32_t lim = critical() ? T::BATT_SCREEN_OFF_MS : T::WRIST_DOWN_MS;
   if (ticks_diff(t_ms, *down_since_) >= lim) screen_on = false;
 }
@@ -910,6 +1253,7 @@ void Game::battery_(ticks_t t_ms) {
     const int32_t lv = bat_level_;
     if (b <= T::BATT_SHUTDOWN_PCT) {
       menu.close();   // shutting down: BYE is shown, NOPE plays
+      howto.reset();
       if (mode == SCANNING) scan.cancel(t_ms);   // and no sweep (20 Hz, F_SWEEP) runs on
       bye_t_ = t_ms;
       goodbye_left = T::GOODBYE_BEACONS;
@@ -1050,6 +1394,7 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
   hp::Haptic hb = hp::NONE;
   int32_t every = 1;
   std::optional<rp::Runes> runes;
+  std::optional<int32_t> bump;
   if (mode == PAIRING) {
     glyph = rp::Glyph::RUNES;
     if (pair.runes) {
@@ -1063,16 +1408,29 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
       sub = rp::Sub::LOOKING;
       speed = FP_SPEED;
       period = FP_PERIOD;
-      top = "PAIR";
-      word = "LOOKING";
+      live = false;   // no partner yet: no live rings
+      if (howto.card) {
+        const howto::Card& c = howto::CARDS[howto.card - 1];
+        sub = rp::Sub::HOWTO;
+        top = c.top_text;
+        word = c.word;
+        glyph = c.glyph;
+        runes = c.runes;
+        cd = c.countdown;
+        trend = c.trend;
+        bump = c.bump_icons;
+      } else {
+        top = T_START_OTHER;
+        word = "LOOKING";
+      }
     } else if (pair.sub == P::SEEN) {
       sub = rp::Sub::SEEN;
       top = "SAME RUNES?";
-      word = "TAP = YES";
+      word = W_BUMP_YES;
     } else if (pair.sub == P::CONFIRMED) {
       sub = rp::Sub::CONFIRMED;
-      top = "WAITING";
-      word = "WAITING";
+      top = T_WAITING_FRIEND;
+      word = W_YOURE_IN;
     } else if (pair.sub == P::CALIBRATE) {
       sub = rp::Sub::CALIBRATE;
       glyph = rp::Glyph::COUNTDOWN;
@@ -1116,6 +1474,7 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
     glyph = rp::Glyph::SEEKER;
     live = false;
     word = ticks_diff(t_ms, mode_t) >= T::SEARCHING_WALK_ABOUT_MS ? W_WALK_ABOUT : W_SEARCHING;
+    top = hint_text(t_ms);   // FIND YOUR FRIEND as the round starts
   } else if (mode == HUNT) {
     const int32_t z = *px.zone();
     zone = z;
@@ -1133,7 +1492,12 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
       glow_r = T::FIELD_SCAN_SWEEP_GLOW_R;   // the live-mirror halo (§5.7)
       if (mirror.value) inten = *mirror.value;
     }
-    if (a && a->glyph == rp::Glyph::ARROW) {
+    const bool arrow_on = a && a->glyph == rp::Glyph::ARROW;
+    const bool ready = friend_ready(t_ms);
+    if (bump_ready && !arrow_on) {
+      glyph = rp::Glyph::BUMP;   // a walk arrow was dropped for it (§6 HOT)
+      bump = bump_icons(t_ms, ready);
+    } else if (arrow_on) {
       glyph = rp::Glyph::ARROW;
       adeg = a->arrow_deg;
       cone = a->cone_deg;
@@ -1150,11 +1514,16 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
         if (!top) top = T_FRIEND_SCANNING;
         if (!word) word = W_HOLD_STILL;
       }
+      if (!top && felt_) top = felt_;
       if (bump_ready) {
-        if (!word) word = W_BUMP;
-        if (!top) top = T_TAP_WATCHES;
+        if (!ready) {
+          if (!top) top = T_FRIEND_NOT_READY;
+        } else {
+          if (!word) word = W_BUMP;
+          if (!top) top = T_BUMP_WRISTS;
+        }
       }
-      if (!top && hint_ && ticks_diff(hint_until_, t_ms) > 0) top = hint_;
+      if (!top) top = hint_text(t_ms);
     }
   } else if (mode == SCANNING) {
     sub = SUBS[scan.sub()];
@@ -1191,8 +1560,13 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
     period = T::FOUND_PERIOD_MS;
     glow_r = T::GLOW_R_FOUND;
     glyph = rp::Glyph::CHECK;
-    if (time_on_) top = time_text_;
-    word = sub == rp::Sub::CELEBRATE ? W_FOUND : W_AGAIN;
+    if (sub == rp::Sub::CELEBRATE) {
+      if (time_on_) top = time_text_;
+      word = W_FOUND;
+    } else {
+      top = T_PLAY_AGAIN;
+      if (time_on_) word = found_word_;
+    }
   } else {   // LINK_LOST
     ramp = rp::ramp_of(T::FIELD_LINK_LOST_0);
     speed = T::FIELD_LINK_LOST_2;
@@ -1205,7 +1579,7 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
     band = lost_band_;
     stale = band.has_value();
     trend = lost_trend;   // the LAST chip's last-trend mark (§6)
-    banner = lost_banner(t_ms);
+    banner = lost_banner();
   }
   // modifiers: low-battery interstitial, goodbye word, toasts
   if (inter_until_ && ticks_diff(*inter_until_, t_ms) > 0 && mode != SCANNING) {
@@ -1213,6 +1587,7 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
     adeg.reset();
     cone.reset();
     style = rp::ArrowStyle::NONE;
+    bump.reset();
     if (sub == rp::Sub::REVEAL || sub == rp::Sub::TURN || sub == rp::Sub::WALK) sub = rp::Sub::NONE;
     sweep.reset();
     cd.reset();
@@ -1243,6 +1618,7 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
     for (int k = 0; k < rp::MENU_VISIBLE; k++) rows.rows[k] = rp::Text(menu.rows[k]);
     p.menu_rows = rows;
     runes.reset();
+    bump.reset();
     glyph = rp::Glyph::GLOW;
     adeg.reset();
     cone.reset();
@@ -1281,6 +1657,7 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
   p.trend_strong = strong;
   p.countdown = cd;
   p.runes = runes;
+  p.bump_icons = bump;
   p.dist_band = band;
   p.dist_stale = stale;
   p.word = rp::opt_text(word);

@@ -2,3 +2,5 @@
 lvgl/sdkconfig.*
 !lvgl/sdkconfig.defaults
 lvgl/managed_components/
+game/sdkconfig.*
+!game/sdkconfig.defaults

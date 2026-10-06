@@ -1,4 +1,4 @@
-// The watch's parts as the game loop (hm::app::Runtime, a port of
+// The watch's parts as the game loop (hm::runtime::Runtime, a port of
 // app/runtime.py) uses them: the methods of hal/*.py that app/runtime.py
 // calls, with a status return where the Python raises OSError (the core is
 // built without exceptions).
@@ -8,9 +8,9 @@
 // those buses (hm::I2c, hm::LcdBus), the backlight and motor PWM, the radio
 // (hm::esp::EspNowRadio on both ESP32 builds) and the clock, then loops:
 //
-//     hm::app::Runtime rt(parts, clock);
+//     static hm::runtime::Runtime rt(parts, clock);   // hm/runtime.h
 //     rt.begin();
-//     for (;;) { feed_watchdog(); rt.idle(rt.step()); }
+//     for (;;) { feed_watchdog(); int32_t w = rt.step(); if (w > 0) rt.idle(w); }
 //
 // native/test fakes every part (as tests/test_app_runtime.py does). A part
 // that is absent is a null pointer in Parts, as Runtime(parts=...) leaves it
@@ -77,8 +77,8 @@ struct Display {
 struct Imu {
   static constexpr int FIFO_FRAMES = 170;   // 1024-byte FIFO, 6 bytes a frame
   virtual ~Imu() = default;
-  virtual int fifo_read_mg() = 0;           // frames now in fifo_mg (x, y, z each, milli-g)
-  virtual bool set_odr(int32_t hz) = 0;     // and empty the FIFO; odr is the rate set
+  virtual int fifo_read_mg() = 0;           // frames now in fifo_mg (x, y, z each, milli-g); -1: a bus error
+  virtual bool set_odr(int32_t hz) = 0;     // and empty the FIFO; odr is the rate the chip is at
   int16_t fifo_mg[3 * FIFO_FRAMES] = {};
   int32_t odr = 100;
   int z_sign = 1;                           // hal/pins.py BMA423_Z_SIGN

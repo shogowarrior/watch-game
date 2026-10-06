@@ -26,17 +26,17 @@ static_assert((int)Screen::PAIRING == S_PAIRING && (int)Screen::SEARCHING == S_S
                   (int)Screen::MENU == S_MENU,
               "screen ids");
 constexpr int G_GLOW = 0, G_SEEKER = 1, G_CHEV = 2, G_ARROW = 3, G_COUNT = 4, G_TURN = 5, G_CHECK = 6,
-              G_RUNES = 7, G_BATT = 8, G_DOTS = 9;
+              G_RUNES = 7, G_BATT = 8, G_BUMP = 9, G_DOTS = 10;
 static_assert((int)rp::Glyph::GLOW == G_GLOW && (int)rp::Glyph::ARROW == G_ARROW &&
-                  (int)rp::Glyph::BATTERY == G_BATT && G_DOTS == rp::N_GLYPHS,
+                  (int)rp::Glyph::BATTERY == G_BATT && (int)rp::Glyph::BUMP == G_BUMP && G_DOTS == rp::N_GLYPHS,
               "glyph ids");
 // iris radius per glyph id (§2; countdown, turn, battery: as scan)
 constexpr int32_t IRIS_R[] = {T::IRIS_R_NONE, T::IRIS_R_SEEKER, T::IRIS_R_CHEVRONS, T::IRIS_R_ARROW,
                               T::IRIS_R_SCAN, T::IRIS_R_SCAN, T::IRIS_R_NONE, T::IRIS_R_RUNES,
-                              T::IRIS_R_SCAN, T::IRIS_R_RUNES};
+                              T::IRIS_R_SCAN, T::IRIS_R_BUMP, T::IRIS_R_RUNES};
 // culling boxes (for drawing a strip of rows)
-constexpr int G_Y0[] = {0, 90, 76, 52, 96, 94, 79, 94, 103, 114};
-constexpr int G_Y1[] = {0, 150, 165, 190, 145, 147, 162, 147, 137, 126};
+constexpr int G_Y0[] = {0, 90, 76, 52, 96, 94, 79, 94, 103, 63, 114};
+constexpr int G_Y1[] = {0, 150, 165, 190, 145, 147, 162, 147, 137, 152, 126};
 
 constexpr int T_NONE = 0, T_STATUS = 1, T_CHIP = 2, T_LAST = 3;
 constexpr int B_NONE = 0, B_TOAST = 1, B_WORD = 2, B_READOUT = 3;
@@ -95,6 +95,7 @@ int32_t wrap_q4(int32_t d) { return d > 2880 ? d - 5760 : (d < -2880 ? d + 5760 
 
 bool has_text(const rp::OptText& s) { return s && s->s[0]; }
 bool is(const rp::OptText& s, const char* v) { return s && *s == v; }
+bool starts(const rp::OptText& s, const char* v) { return s && strncmp(s->s, v, strlen(v)) == 0; }
 // Python's == on two str-or-None.
 bool same(const rp::OptText& a, const rp::OptText& b) { return a ? (b && strcmp(a->s, b->s) == 0) : !b; }
 
@@ -176,7 +177,7 @@ haptic_patterns::Haptic Renderer::step(const RP& p, ticks_t t) {
   int32_t pu = F::PU_A + ((F::PU_B * iq) >> 8);
   const int32_t gq = (int32_t)(p.glow_r_px * 256);
   if (scr == S_PAIRING) {
-    if (sub == Sub::LOOKING) {
+    if (sub == Sub::LOOKING || sub == Sub::HOWTO) {   // a how-to card keeps the looking field
       pu = PU_LOOKING;
     } else if (sub == Sub::SEEN || sub == Sub::CONFIRMED) {
       fl = SEEN_FL;
@@ -503,7 +504,7 @@ void Renderer::plan_morph(const RP& p, ticks_t t) {
 
 uint16_t Renderer::word_col(const RP& p) const {
   if (scr_ == S_SEARCHING) return GREY[7];
-  if (is(p.word, U::W_FOUND)) return ACC_FOUND;
+  if (starts(p.word, U::W_FOUND)) return ACC_FOUND;   // FOUND and FOUND 1:48 (§6 FOUND)
   if (is(p.word, U::W_BUMP)) return PROX[7];
   if (scr_ == S_PAIRING && sub_ == Sub::LOOKING) return TEXT_SEC;
   return TEXT_PRI;
@@ -581,6 +582,9 @@ void Renderer::draw_strip(const RP& p, int y0, int h, uint16_t* px) {
         break;
       case G_BATT:
         draw_battery(fb, p.status.own_pct);
+        break;
+      case G_BUMP:
+        if (p.bump_icons) draw_bump(fb, *p.bump_icons);
         break;
       case G_DOTS:
         draw_dots(fb);

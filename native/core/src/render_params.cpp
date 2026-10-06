@@ -13,7 +13,7 @@ const char* const FIELDS[N_FIELDS] = {
     // ripple field
     "ramp", "intensity", "speed_px_s", "pulse_period_ms", "wavelength_px", "glow_r_px", "ring_live", "burst",
     // centre glyph
-    "glyph", "arrow_deg", "cone_deg", "arrow_style", "trend", "trend_strong", "countdown", "runes",
+    "glyph", "arrow_deg", "cone_deg", "arrow_style", "trend", "trend_strong", "countdown", "runes", "bump_icons",
     // text slots
     "dist_band", "dist_stale", "word", "top_text", "banner", "status", "menu_rows",
     // scanning
@@ -25,7 +25,7 @@ const char* const FIELDS[N_FIELDS] = {
 namespace {
 
 const char* const SUB_NAMES[N_SUBS] = {
-    "looking", "seen", "confirmed", "calibrate", "split", "ready", "sweep", "result", "reveal", "turn", "walk",
+    "looking", "seen", "confirmed", "calibrate", "split", "howto", "ready", "sweep", "result", "reveal", "turn", "walk",
     "celebrate",
     "0", "0^", "0v", "0^v", "1", "1^", "1v", "1^v", "2", "2^", "2v", "2^v", "3", "3^", "3v", "3^v",
 };
@@ -168,7 +168,7 @@ void text(Out& o, const char* name, const OptText& t, int maxlen, const char* ch
 bool valid_sub(Screen screen, Sub sub) {
   switch (screen) {
     case Screen::PAIRING:
-      return sub >= Sub::LOOKING && sub <= Sub::SPLIT;
+      return sub >= Sub::LOOKING && sub <= Sub::HOWTO;
     case Screen::SCANNING:
       return sub == Sub::READY || sub == Sub::SWEEP || sub == Sub::RESULT;
     case Screen::FAR:
@@ -208,6 +208,7 @@ int validate(const RenderParams& rp, void (*emit)(void*, const char*), void* ctx
   const Screen sc = rp.screen;
   const Sub sub = rp.sub;
   const char* scn = name(sc);
+  const bool howto = sc == Screen::PAIRING && sub == Sub::HOWTO;
 
   // screen (t_ms is unsigned, so never < 0)
   if (scn == nullptr) {
@@ -259,6 +260,9 @@ int validate(const RenderParams& rp, void (*emit)(void*, const char*), void* ctx
   if (ok && (sc == Screen::SEARCHING || sc == Screen::LINK_LOST) && spd > 0) {
     o.e("speed_px_s: %s rings must be inward (<= 0)", scn);
   }
+  if (sc == Screen::PAIRING && (sub == Sub::LOOKING || sub == Sub::HOWTO) && (rp.ring_live || (ok && spd > 0))) {
+    o.e("ring_live/speed_px_s: no live or outward rings in PAIRING %s (no partner)", name(sub));
+  }
   if (!in(rp.glow_r_px, 0.0, T::GLOW_R_MAX_PX)) o.e("glow_r_px: must be 0..%g", T::GLOW_R_MAX_PX);
 
   // centre glyph
@@ -284,18 +288,26 @@ int validate(const RenderParams& rp, void (*emit)(void*, const char*), void* ctx
   } else if (g == Glyph::ARROW) {
     o.e("glyph: 'arrow' needs arrow_deg/cone_deg/arrow_style");
   }
-  if (g == Glyph::CHEVRONS && !(sc == Screen::FAR || sc == Screen::NEAR || sc == Screen::WARM)) {
-    o.e("glyph: 'chevrons' only in FAR/NEAR/WARM");
+  if (g == Glyph::CHEVRONS && !(sc == Screen::FAR || sc == Screen::NEAR || sc == Screen::WARM) && !howto) {
+    o.e("glyph: 'chevrons' only in FAR/NEAR/WARM (and the howto card 3)");
   }
   const int32_t tr = rp.trend;
   if (tr < -1 || tr > 1) {
     o.e("trend: must be -1, 0 or +1");
   } else if (tr != 0 &&
-             !(sc == Screen::FAR || sc == Screen::NEAR || sc == Screen::WARM || sc == Screen::LINK_LOST)) {
+             !(sc == Screen::FAR || sc == Screen::NEAR || sc == Screen::WARM || sc == Screen::LINK_LOST) &&
+             !(howto && tr == 1 && g == Glyph::CHEVRONS)) {
     o.e("trend: must be 0 in %s", scn);
   }
   if (rp.trend_strong && tr == 0) o.e("trend_strong: needs a non-zero trend");
   else if (rp.trend_strong && sc == Screen::LINK_LOST) o.e("trend_strong: must be False in LINK_LOST");
+  else if (rp.trend_strong && howto) o.e("trend_strong: must be False on a howto card");
+  if (howto) {
+    if (!(g == Glyph::RUNES || g == Glyph::COUNTDOWN || g == Glyph::CHEVRONS || g == Glyph::BUMP)) {
+      o.e("glyph: a howto card is runes, countdown, chevrons or bump");
+    }
+    if (!rp.top_text || !rp.word) o.e("top_text/word: a howto card has both");
+  }
   const std::optional<int32_t> cn = rp.countdown;
   if (cn && !(0 <= *cn && *cn <= T::COUNTDOWN_MAX)) {
     o.e("countdown: must be None or int 0..%d", (int)T::COUNTDOWN_MAX);
@@ -306,8 +318,18 @@ int validate(const RenderParams& rp, void (*emit)(void*, const char*), void* ctx
     for (int i = 0; rok && i < 3; i++) rok = 0 <= rp.runes->ids[i] && rp.runes->ids[i] <= 7;
     if (!rok) o.e("runes: must be None or 3 rune ids 0..7");
     else if (sc != Screen::PAIRING) o.e("runes: only in PAIRING");
-  } else if (g == Glyph::RUNES && (sub == Sub::SEEN || sub == Sub::CONFIRMED)) {
+  } else if (g == Glyph::RUNES && (sub == Sub::SEEN || sub == Sub::CONFIRMED || sub == Sub::HOWTO)) {
     o.e("runes: glyph 'runes' needs them in %s", name(sub));
+  }
+  const std::optional<int32_t> bi = rp.bump_icons;
+  if (bi && !(0 <= *bi && *bi <= BUMP_ICONS_MAX)) {
+    o.e("bump_icons: must be None or int 0..%d", (int)BUMP_ICONS_MAX);
+  } else if ((g == Glyph::BUMP) != bi.has_value()) {
+    o.e("bump_icons: set exactly when glyph is 'bump'");
+  } else if (bi && !howto) {
+    if (sc != Screen::HOT) o.e("glyph: 'bump' only in HOT (and on the howto card 4)");
+    if (sub != Sub::NONE) o.e("glyph: 'bump' needs sub None");
+    if ((*bi & BI_FRIEND_OFF) && rp.word == W_BUMP) o.e("word: BUMP! while the friend cannot count a bump");
   }
 
   // text slots
@@ -464,6 +486,8 @@ int dump(const RenderParams& rp, char* buf, int cap) {
   } else {
     for (int i = 0; i < rp.runes->n && i < 3; i++) w.f(i ? "|%d" : "%d", (int)rp.runes->ids[i]);
   }
+  w.f(" bump_icons=");
+  w.opt_int(rp.bump_icons);
   w.f(" dist_band=");
   w.s(band_name(rp.dist_band));
   w.f(" dist_stale=%d word=", rp.dist_stale);

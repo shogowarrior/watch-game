@@ -62,9 +62,12 @@ constexpr int32_t TAP_KEEP_MS = 70000;    // partner tap forgotten after this (>
 // (-1 for an unknown name, where the Python raises).
 int32_t screen_code(const char* name);
 
-// "m:ss" up to 9:59, then "10M+" (LINK_LOST timer), written into buf; returns buf.
-constexpr size_t MSS_LEN = 8;   // a buffer this long always fits
-const char* fmt_mss(int32_t ms, char* buf, size_t n);
+// FOUND result word for a round of s seconds (ui-spec §6 FOUND): "FOUND m:ss"
+// up to 9:59, then "FOUNDmm:ss" (no space), and "FOUND 1H+" past the 99:59
+// cap, written into buf; returns buf. At most 10 type.word characters, and
+// never an M for minutes (the readout's M means metres).
+constexpr size_t FOUND_LEN = 11;   // a buffer this long always fits
+const char* fmt_found(int32_t s, char* buf, size_t n);
 
 // Own motion inputs for one logic tick (from motion::MotionTracker or the sim).
 class MotionSnap {

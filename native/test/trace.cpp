@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
+
 namespace hmt {
 
 namespace {
@@ -278,6 +280,12 @@ std::string arg_list(const Json& a) {
   return s.size() >= 2 && s.front() == '[' ? s.substr(1, s.size() - 2) : s;
 }
 
+// A recorded "cb" or "dev" line as the call it records: blank_fn(...), imu.set_odr(...).
+std::string described(const Json& line) {
+  if (const Json* d = line.get("dev")) return d->str() + "." + line["m"].str() + "(" + arg_list(line["a"]) + ")";
+  return line["cb"].str() + "(" + arg_list(line["a"]) + ")";
+}
+
 }  // namespace
 
 const Json* Json::get(const char* key) const {
@@ -397,17 +405,31 @@ Json Jobj(const char* cls, std::vector<std::pair<std::string, Json>> fields) {
   return j;
 }
 
+Json Jraise(const char* type) { return Jobj(nullptr, {{"@raise", J(type)}}); }
+
 bool same(const Json& want, const Json& got, std::string* where) { return same_at(want, got, "", where); }
 
-Json Calls::take(const char* name, const Json& args) {
-  if (pending.empty()) throw Mismatch(std::string("the port called ") + name + "(" + arg_list(args) + "), Python didn't");
-  const Json c = pending.front();
+namespace {
+
+// The next pending line, if it is the call kind (cb or dev) named `call` and
+// made with args; else the difference.
+Json next_call(std::deque<Json>& pending, const char* kind, const std::string& name, const char* method,
+               const std::string& call, const Json& args) {
+  if (pending.empty()) throw Mismatch("the port called " + call + "(" + arg_list(args) + "), Python didn't");
+  Json c = std::move(pending.front());
   pending.pop_front();
-  std::string where;
-  if (c["cb"].str() != name || !same(c["a"], args, &where))
-    throw Mismatch(std::string("the port called ") + name + "(" + arg_list(args) + "), Python called " +
-                   c["cb"].str() + "(" + arg_list(c["a"]) + ")");
-  return c["r"];
+  const Json* k = c.get(kind);
+  if (!k || k->str() != name || (method && c["m"].str() != method) || c.get("kw") || !same(c["a"], args, nullptr))
+    throw Mismatch("the port called " + call + "(" + arg_list(args) + "), Python called " + described(c));
+  return c;
+}
+
+}  // namespace
+
+Json Calls::take(const char* name, const Json& args) { return next_call(pending, "cb", name, nullptr, name, args)["r"]; }
+
+Json Calls::device(const char* dev, const char* method, const Json& args) {
+  return next_call(pending, "dev", dev, method, std::string(dev) + "." + method, args);
 }
 
 bool python_changed() {
@@ -449,9 +471,9 @@ bool replay_erased(const char* cls, const std::vector<std::string>& ignore, cons
     try {
       if (!parse(line, rec, &err)) throw Mismatch("unreadable line: " + err);
       line.clear();
-      if (const Json* cb = rec.get("cb")) {
-        objs[(int)rec["o"].in()].calls.pending.push_back(rec);
-        what = cb->str();
+      if (rec.get("cb") || rec.get("dev")) {
+        what = described(rec);
+        objs[(int)rec["o"].in()].calls.pending.push_back(std::move(rec));
         continue;
       }
       const bool made = rec.get("new") != nullptr;
@@ -461,7 +483,11 @@ bool replay_erased(const char* cls, const std::vector<std::string>& ignore, cons
       if (const Json* set = rec.get("set")) {
         what = "#" + std::to_string(id) + " attributes written: " + dump(*set, 200);
         for (auto& kv : set->o) {
-          e.set(id, kv.first, kv.second);   // false for a property: the state check covers it
+          const bool done = e.set(id, kv.first, kv.second);   // false for a property: the state check covers it
+          if (kv.first.find('.') != std::string::npos) {   // a knob of a part it made (trace_game.py KNOBS)
+            if (!done) throw Mismatch("the port can't set " + kv.first);
+            continue;                                      // no state of its own: the part's trace checks it
+          }
           const Json* ref = kv.second.k == Json::OBJ ? kv.second.get("@ref") : nullptr;
           o.want[kv.first] = ref ? ref_to(*ref) : kv.second;   // state shows a traced object as its ref
         }
@@ -471,12 +497,12 @@ bool replay_erased(const char* cls, const std::vector<std::string>& ignore, cons
           e.make(id, rec["a"], o.calls);
         } else {
           const Json got = e.call(id, rec["m"].str(), rec["a"]);
-          if (!same(rec["r"], got, &where)) throw Mismatch("result: " + where);
+          const Json* err = rec.get("err");
+          if (!same(err ? Jraise(err->str().c_str()) : rec["r"], got, &where)) throw Mismatch("result: " + where);
           calls++;
         }
         if (!o.calls.pending.empty())
-          throw Mismatch("Python called " + o.calls.pending.front()["cb"].str() + "(" +
-                         arg_list(o.calls.pending.front()["a"]) + "), the port didn't");
+          throw Mismatch("Python called " + described(o.calls.pending.front()) + ", the port didn't");
         for (auto& kv : rec["s"].o) o.want[kv.first] = kv.second;
       }
       State s;
@@ -484,7 +510,7 @@ bool replay_erased(const char* cls, const std::vector<std::string>& ignore, cons
       for (auto& kv : s.fields)
         if (!o.want.count(kv.first)) throw Mismatch("state: the port shows " + kv.first + ", Python has no such field");
       for (auto& kv : o.want) {
-        if (ignored(kv.first)) continue;
+        if (ignored(kv.first) || std::find(s.skipped.begin(), s.skipped.end(), kv.first) != s.skipped.end()) continue;
         const Json* got = nullptr;
         for (auto& g : s.fields)
           if (g.first == kv.first) got = &g.second;

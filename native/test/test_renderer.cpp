@@ -83,7 +83,8 @@ bool set_field(rp_::RenderParams& p, const std::string& tok) {
       p.runes = rp_::Runes{(int32_t)parts.size(), {}};
       for (size_t i = 0; i < parts.size(); i++) p.runes->ids[i] = (int32_t)num(parts[i]);
     }
-  } else if (k == "dist_band") return rp_::band_from_name(none(v) ? nullptr : v.c_str(), &p.dist_band);
+  } else if (k == "bump_icons") p.bump_icons = opt_i(v);
+  else if (k == "dist_band") return rp_::band_from_name(none(v) ? nullptr : v.c_str(), &p.dist_band);
   else if (k == "dist_stale") p.dist_stale = num(v);
   else if (k == "word") p.word = text(v);
   else if (k == "top_text") p.top_text = text(v);

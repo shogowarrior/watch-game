@@ -3,6 +3,7 @@
 #include <string>
 
 #include "check.h"
+#include "game_probe.h"
 #include "hm/game.h"
 #include "port.h"
 
@@ -63,21 +64,6 @@ struct Rig {
   std::optional<game::Game> g;
 };
 
-// A test's calls of private methods.
-namespace hm {
-namespace game {
-struct Probe {
-  static void emit(Game& g, ticks_t t, hp::Haptic h) { g.emit(t, h); }
-  static void new_round(Game& g, ticks_t t) { g.new_round(t); }
-  static void toast_set(Game& g, const char* text, rp::Severity sev) { g.toast_set(text, sev); }
-  static void hint_set(Game& g, ticks_t t, const char* text) { g.hint_set(t, text); }
-  static int32_t state_byte(const Game& g, ticks_t t) { return g.state_byte_(t); }
-  static int32_t peer_hz(const Game& g) { return g.peer_hz(); }
-  static const char* screen(const Game& g) { return g.screen_(); }
-};
-}  // namespace game
-}  // namespace hm
-
 static bool recorded_blank(void* rig, ticks_t t) {
   return static_cast<Rig*>(rig)->calls->take("blank_fn", J(std::vector<Json>{J(t)})).flag();
 }
@@ -125,6 +111,7 @@ static Json J(const rp::RenderParams& p) {
       {"trend_strong", J(p.trend_strong)},
       {"countdown", J(p.countdown)},
       {"runes", runes},
+      {"bump_icons", J(p.bump_icons)},
       {"dist_band", J(rp::band_name(p.dist_band))},
       {"dist_stale", J(p.dist_stale)},
       {"word", Jtext(p.word)},
@@ -241,6 +228,8 @@ TEST(trace_game) {
     if (f == "buzz") return g.buzz = (int)v.in(), true;
     if (f == "battery") return g.battery = v.null() ? std::nullopt : std::optional<int32_t>((int32_t)v.in()), true;
     if (f == "rssi_last") return g.rssi_last = v.opt_num(), true;
+    if (f == "round_t0") return g.round_t0 = opt_tick(v), true;   // a test's long round
+    if (f == "pair.split_s") return g.pair.split_s = (int32_t)v.in(), true;   // a test's short split
     if (f == "menu_open" && !v.flag()) return g.menu.close(), true;   // a test's g.menu.close()
     if (f == "arrow") {   // a fresh A.make(...) put in by the test
       if (v.null()) return g.arrow = nullptr, true;

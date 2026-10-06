@@ -285,17 +285,6 @@ def test_manual_pairing_without_auto_pair():
     assert max(p.countdown for p in s._params) > AUTO_SPLIT_S     # the full split, not the demo cut
 
 
-def test_bump_unarmed_is_not_sensed():
-    s = TwoWatchSim(seed=1)
-    s.auto_pair = False
-    s.set_pose(1, 1.0, 0.0, 270.0)
-    assert not s.games[0].bump_armed() and not s.games[1].bump_armed()
-    s.bump()
-    while s.t_ms < 3000:
-        s.step(50)
-    assert [g.pair.sub for g in s.games] == ["seen", "seen"]
-
-
 def test_sideways_swipe_flips_howto_cards_until_paired():
     s = TwoWatchSim()
     s.auto_pair = False
@@ -309,6 +298,17 @@ def test_sideways_swipe_flips_howto_cards_until_paired():
     assert _run_until(s, lambda s: s.games[0].pair.sub == "seen", 5000)
     s.step(200)
     assert s.telemetry(0)["sub"] == "seen" and not s.games[0].howto.open
+
+
+def test_bump_unarmed_is_not_sensed():
+    s = TwoWatchSim(seed=1)
+    s.auto_pair = False
+    s.set_pose(1, 1.0, 0.0, 270.0)
+    assert not s.games[0].bump_armed() and not s.games[1].bump_armed()
+    s.bump()
+    while s.t_ms < 3000:
+        s.step(50)
+    assert [g.pair.sub for g in s.games] == ["seen", "seen"]
 
 
 def test_auto_pair_starts_quickly():

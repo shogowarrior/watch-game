@@ -84,6 +84,10 @@ def header():
         v = getattr(gl, n)
         assert v.typecode == "h" and len(v) % 2 == 0, n
         out.append(_arr("int16_t", n, list(v)))
+    out.append("// HOT bump view: the 3 rays' butt-ended strokes, then their round caps (x, y per cap)")
+    out.append("constexpr int16_t BUMP_RAYS[%d][8] = {%s};" % (len(gl.BUMP_RAYS), ", ".join(
+        "{%s}" % ", ".join(str(v) for v in q) for q in gl.BUMP_RAYS)))
+    out.append(_arr("int16_t", "BUMP_CAPS", [v for p in gl.BUMP_CAPS for v in p]))
     out.append("// scan bin k's culling rows: y0 (first) and y1 (one past the last)")
     out.append(_arr("uint8_t", "BIN_Y0", list(gl.BIN_Y0)))
     out.append(_arr("uint8_t", "BIN_Y1", list(gl.BIN_Y1)))

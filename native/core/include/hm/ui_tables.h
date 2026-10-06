@@ -23,6 +23,9 @@ constexpr int16_t MARK_UP[6] = {0, -6, 6, 5, -6, 5};
 constexpr int16_t MARK_DN_OUT[6] = {-6, -5, 6, -5, 0, 6};
 constexpr int16_t MARK_DN_IN[6] = {-3, -3, 3, -3, 0, 2};
 constexpr int16_t DIAMOND[8] = {0, -3, 3, 0, 0, 3, -3, 0};
+// HOT bump view: the 3 rays' butt-ended strokes, then their round caps (x, y per cap)
+constexpr int16_t BUMP_RAYS[3][8] = {{-5, -45, -10, -52, -14, -50, -9, -43}, {2, -46, 2, -55, -2, -55, -2, -46}, {9, -43, 14, -50, 10, -52, 5, -45}};
+constexpr int16_t BUMP_CAPS[12] = {-7, -44, -12, -51, 0, -46, 0, -55, 7, -44, 12, -51};
 // scan bin k's culling rows: y0 (first) and y1 (one past the last)
 constexpr uint8_t BIN_Y0[12] = {7, 18, 56, 111, 148, 175, 186, 175, 148, 111, 56, 18};
 constexpr uint8_t BIN_Y1[12] = {55, 66, 93, 130, 185, 223, 234, 223, 185, 130, 93, 66};

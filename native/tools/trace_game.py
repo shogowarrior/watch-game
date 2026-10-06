@@ -11,17 +11,28 @@ OUTDIR/<module>.<Class>.jsonl:
     {"new": 3, "a": [...]}                     # object 3 constructed with these arguments
     {"o": 3, "m": "update", "a": [...], "r": ..., "s": {...}}   # a call, its result, then state
     {"o": 3, "cb": "blank_fn", "a": [...], "r": ...}           # it called a function it was given
+    {"o": 3, "dev": "imu", "m": "set_odr", "a": [800], "r": ..., "s": {...}}   # it called a device's method
     {"o": 3, "set": {...}}                                     # its state changed between calls
 
 Arguments are bound to the signature and defaults are filled in, so every call
 lists every parameter in order. Only a method's outermost call on an object is
 recorded (one it makes on itself runs inside it), a private one too (a test
-that calls it). A function passed to a traced
-object is recorded each time the object calls it, before the line of the call
-it happened in, so a replay can answer it. A "set" line comes before a call
+that calls it). A call that raised OSError (a bus error, which the C++ returns
+as a status) has "err": "OSError" in place of "r"; other exceptions leave no
+line. A function passed to a traced object, or put by other code in an
+attribute named after one of its constructor's parameters (its "set" value is
+{"@fn": name}), is recorded each time the object calls it, before the line of
+the call it happened in, so a replay can answer it. So is each call the
+object's own code makes on a method of a device it was given (DEVICES: a
+test's stand-in for a hal part): "a" as passed, "r" or "err", and in "s" the
+device's public state that changed since this object's previous "dev" line
+(all of it on the first), written as arguments are (an array as a list), so
+a replay's fake device can answer it; in the object's own state the device
+shows as its class name only. A "set" line comes before a call
 when the object's state changed since its previous line: other code wrote its
 attributes, as the game does to the beacon it sends (objects in it are written
-with their fields, as arguments are). "s" holds the public attributes and
+with their fields, as arguments are), or a test set a KNOBS field of a part it
+made ("pair.split_s": 1). "s" holds the public attributes and
 properties that changed since the object's previous line (all of them after
 the constructor). Values: JSON numbers (a float is always
 written with a "." or an exponent, so ints and floats stay apart; NaN and
@@ -29,7 +40,7 @@ Infinity as such), {"b": "hex"} for bytes, {"@": "Class", ...fields} for
 other objects (namedtuples by field, the rest by public attribute; a
 test's stand-in class's own values too), and
 {"@ref": "module.Class#id"} for an object of a TRACED class (recorded in
-this test or not); in "s", an array or bytearray
+this test or not; a DEEP field's with its fields too); in "s", an array or bytearray
 is {"t": typecode, "n": length, "crc": CRC-32 of its bytes}. A test that fails
 under the recorder fails the run.
 
@@ -76,10 +87,24 @@ TRACED = (
     ("finder.session", "LiveMirror"),
     ("finder.pairing", "Calibrator"),
     ("finder.pairing", "Pairing"),
+    ("finder.howto", "HowTo"),
     ("finder.arrow", "Arrow"),
     ("finder.scan", "ScanSession"),
     ("finder.game", "Game"),
+    ("app.pacer", "FramePacer"),
+    ("app.imu_feed", "ImuFeed"),
 )
+# Constructor parameters whose object stands in for a hal part (a test's fake,
+# or a hal driver on fake buses): the calls the traced object makes on it are
+# recorded ("dev" lines).
+DEVICES = {"app.imu_feed.ImuFeed": ("imu",)}
+# State fields that hold a TRACED object written with its fields, not as a
+# ref: a part the object made, which no other trace of the test covers.
+DEEP = {"app.imu_feed.ImuFeed": ("tracker",)}
+# Fields of a part the object made that a test sets as a knob between calls
+# (the web sim's short split): such a write shows on the object's own trace
+# as a "set" line with the dotted name, so its replay sets the part it made.
+KNOBS = {"finder.game.Game": ("pair.split_s",)}
 
 MISSING = object()
 _ids = {}          # id(obj) -> "module.Class#n"
@@ -88,6 +113,10 @@ _count = {}
 _depth = {}        # id(obj) -> nesting of traced calls on it
 _last = {}         # id(obj) -> its last recorded state
 _out = {}          # "module.Class" -> open file
+_knob_last = {}    # id(obj) -> {dotted name: value} as of the end of its last recorded call
+_active = []       # id(obj) of each recorded call running now, innermost last (None: code not its own)
+_dev_owners = {}   # id(device) -> {id(obj): (class key, obj's number, parameter)}
+_dev_last = {}     # (id(obj), id(device)) -> the device's state at obj's last "dev" line
 
 
 def enc(v, depth=0, deep=False):
@@ -174,7 +203,8 @@ def _items(obj):
                 + [k for k, a in c.__dict__.items() if isinstance(a, property)
                    or t not in _traced and not callable(a) and not isinstance(a, (staticmethod, classmethod))]
                 if not k.startswith("_"))
-        names = _names[key] = sorted(fixed.union(k for k in key[1] if not k.startswith("_")))
+        names = _names[key] = sorted(fixed.union(   # a device's method wrappers are no state
+            k for k in key[1] if not k.startswith("_") and not getattr(d[k], "_hm_dev", False)))
     global _reading
     out = []
     _reading += 1   # a property that calls a method is no call to record
@@ -190,7 +220,12 @@ def _items(obj):
 
 
 def _state(obj):
-    return {k: enc(v) for k, v in _items(obj) if not _routine(v)}
+    sp = _deep.get(type(obj))
+    if sp is None:
+        return {k: enc(v) for k, v in _items(obj) if not _routine(v)}
+    deep, devs = sp
+    return {k: {"@": type(v).__name__} if k in devs else enc(v, deep=k in deep)
+            for k, v in _items(obj) if not _routine(v)}
 
 
 def _write(cls_key, rec):
@@ -204,6 +239,24 @@ def _changed(obj):
     return {k: v for k, v in now.items() if before.get(k, MISSING) != v}
 
 
+def _knobs(cls_key, obj):
+    """KNOBS of obj that changed since the end of its last recorded call."""
+    names = KNOBS.get(cls_key)
+    if not names:
+        return {}
+    last = _knob_last.setdefault(id(obj), {})
+    out = {}
+    for name in names:
+        v = obj
+        for part in name.split("."):
+            v = getattr(v, part)
+        if last.get(name, MISSING) != v:
+            if name in last:
+                out[name] = enc(v, deep=True)
+            last[name] = v
+    return out
+
+
 def _num(obj):
     return int(_ids[id(obj)].split("#")[1])
 
@@ -212,10 +265,86 @@ def _callback(cls_key, obj, name, f):
     """``f`` as passed to ``obj``: each call is recorded on obj's trace."""
     @functools.wraps(f)
     def call(*args, **kw):
-        r = f(*args, **kw)
+        _active.append(None)
+        try:
+            r = f(*args, **kw)
+        finally:
+            _active.pop()
         _write(cls_key, {"o": _num(obj), "cb": name, "a": [enc(x, deep=True) for x in args], "r": enc(r, deep=True)})
         return r
+    call._hm_cb = True
     return call
+
+
+def _new_fns(cls_key, obj):
+    """Functions other code put in obj's attributes named after its
+    constructor's parameters since its last line, wrapped by _callback as
+    such an argument is: {name: {"@fn": its name}}."""
+    out = {}
+    d = getattr(obj, "__dict__", {})
+    for p in _params[cls_key]:
+        f = d.get(p)
+        if f is not None and _routine(f) and not getattr(f, "_hm_cb", False):
+            setattr(obj, p, _callback(cls_key, obj, p, f))
+            out[p] = {"@fn": getattr(f, "__qualname__", "?")}
+    return out
+
+
+def _device(cls_key, obj, param, dev):
+    """``dev``, given to ``obj`` as ``param``: each call obj's own code makes
+    on one of its public methods is recorded on obj's trace (_dev_line)."""
+    owners = _dev_owners.get(id(dev))
+    if owners is None:
+        owners = _dev_owners[id(dev)] = {}
+        _keep.append(dev)
+        names = set(a for c in type(dev).__mro__ for a, v in vars(c).items() if isinstance(v, types.FunctionType))
+        names.update(a for a, v in vars(dev).items() if _routine(v))
+        for a in names:
+            if not a.startswith("_"):
+                setattr(dev, a, _dev_method(owners, dev, a, getattr(dev, a)))
+    owners[id(obj)] = (cls_key, _num(obj), param)
+
+
+def _dev_method(owners, dev, name, f):
+    @functools.wraps(f)
+    def call(*args, **kw):
+        k = _active[-1] if _active else None
+        rec = owners.get(k)
+        if rec is None:      # the test's own call, or one inside the device's
+            return f(*args, **kw)
+        _active.append(None)
+        try:
+            r = f(*args, **kw)
+        except OSError as e:
+            _dev_line(rec, k, dev, name, args, kw, "err", type(e).__name__)
+            raise
+        finally:
+            _active.pop()
+        _dev_line(rec, k, dev, name, args, kw, "r", enc(r, deep=True))
+        return r
+    call._hm_dev = True
+    return call
+
+
+def _dev_line(rec, owner, dev, name, args, kw, rk, rv):
+    cls_key, num, param = rec
+    before = _dev_last.get((owner, id(dev)), {})
+    now = {}
+    s = {}
+    for k, v in _items(dev):
+        if _routine(v):
+            continue
+        raw = isinstance(v, (array.array, bytearray))   # compared as bytes, encoded only when changed
+        key = now[k] = (getattr(v, "typecode", "B"), bytes(v)) if raw else enc(v, deep=True)
+        if before.get(k, MISSING) != key:
+            s[k] = enc(v, deep=True) if raw else key
+    _dev_last[(owner, id(dev))] = now
+    line = {"o": num, "dev": param, "m": name, "a": [enc(x, deep=True) for x in args]}
+    if kw:
+        line["kw"] = {k: enc(v, deep=True) for k, v in kw.items()}
+    line[rk] = rv
+    line["s"] = s
+    _write(cls_key, line)
 
 
 def _bind(cls_key, fn, obj, args, kw):
@@ -247,11 +376,17 @@ def _wrap_init(cls_key, fn):
             return fn(self, *args, **kw)
         n = _new_id(cls_key, self)
         b, a = _bind(cls_key, fn, self, args, kw)
+        for p in DEVICES.get(cls_key, ()):
+            if b.arguments.get(p) is not None:
+                _device(cls_key, self, p, b.arguments[p])
         _depth[k] = 1
+        _active.append(k)
         try:
             fn(*b.args, **b.kwargs)
         finally:
             _depth[k] = 0
+            _active.pop()
+        _knobs(cls_key, self)
         _write(cls_key, {"new": n, "a": a, "s": _changed(self)})
     return init
 
@@ -275,20 +410,32 @@ def _wrap(cls_key, name, fn):
         if _reading or _depth.get(k, 0) or k not in _ids:
             return fn(self, *args, **kw)
         written = _changed(self)
-        if written:   # deep, so a replay can rebuild an object put in an attribute
-            _write(cls_key, {"o": _num(self), "set": {f: enc(getattr(self, f), deep=True) for f in written}})
+        fns = _new_fns(cls_key, self)
+        knobs = _knobs(cls_key, self)
+        if written or fns or knobs:   # deep, so a replay can rebuild an object put in an attribute
+            fns.update((f, enc(getattr(self, f), deep=True)) for f in written)
+            fns.update(knobs)
+            _write(cls_key, {"o": _num(self), "set": fns})
         b, a = _bind(cls_key, fn, self, args, kw)
         _depth[k] = 1
+        _active.append(k)
         try:
             r = fn(*b.args, **b.kwargs)
+        except OSError as e:
+            _write(cls_key, {"o": _num(self), "m": name, "a": a, "err": type(e).__name__, "s": _changed(self)})
+            raise
         finally:
             _depth[k] = 0
+            _active.pop()
+            _knobs(cls_key, self)   # its own code's writes are no test's
         _write(cls_key, {"o": _num(self), "m": name, "a": a, "r": enc(r, deep=True), "s": _changed(self)})
         return r
     return method
 
 
 _wrappers = {}   # "module.Class" -> (class, {attr: (function, its wrapper, when not recorded)})
+_params = {}     # "module.Class" -> its constructor's parameter names
+_deep = {}       # class -> (its DEEP fields, its DEVICES fields), if it has any
 
 
 def install(outdir):
@@ -305,6 +452,9 @@ def install(outdir):
             elif not attr.startswith("__"):   # a test's call of a private method too
                 w[attr] = (fn, _wrap(key, attr, fn), fn)
         _wrappers[key] = (cls, w)
+        _params[key] = tuple(inspect.signature(w["__init__"][0]).parameters)[1:] if "__init__" in w else ()
+        if key in DEEP or key in DEVICES:
+            _deep[cls] = (DEEP.get(key, ()), DEVICES.get(key, ()))
 
 
 def record(keys, unwrap=False):
@@ -336,8 +486,12 @@ TESTS = (
     ("test_proximity", None), ("test_scan", None),
     ("test_arrow", ("finder.arrow.Arrow",)),
     ("test_episode", ("finder.arrow.Arrow", "finder.game.Game")),   # real estimates, scans and arrows
+    ("test_howto", ("finder.howto.HowTo",)),
     ("test_game", ("finder.pairing.Pairing", "finder.pairing.Calibrator", "finder.session.MotionSnap",
                    "finder.session.PeerView", "finder.session.LiveMirror", "finder.game.Game")),
+    ("test_pacer", ("app.pacer.FramePacer",)), ("scenario:pacer", ("app.pacer.FramePacer",)),
+    ("test_app_runtime", ("app.imu_feed.ImuFeed", "app.pacer.FramePacer")),   # its own tests and the loop's use
+    ("scenario:imu_feed", ("app.imu_feed.ImuFeed",)),
 )
 
 

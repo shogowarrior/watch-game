@@ -17,12 +17,14 @@ int32_t screen_code(const char* name) {
   return -1;
 }
 
-const char* fmt_mss(int32_t ms, char* buf, size_t n) {
-  const int32_t s = ms > 0 ? ms / 1000 : 0;
-  if (s > T::LOST_TIMER_MAX_S)
-    snprintf(buf, n, "10M+");
+const char* fmt_found(int32_t s, char* buf, size_t n) {
+  if (s < 0) s = 0;
+  if (s <= T::FOUND_WORD_MSS_MAX_S)
+    snprintf(buf, n, "FOUND %d:%02d", (int)(s / 60), (int)(s % 60));
+  else if (s <= T::FOUND_TIME_MAX_S)
+    snprintf(buf, n, "FOUND%d:%02d", (int)(s / 60), (int)(s % 60));
   else
-    snprintf(buf, n, "%d:%02d", (int)(s / 60), (int)(s % 60));
+    snprintf(buf, n, "FOUND 1H+");
   return buf;
 }
 

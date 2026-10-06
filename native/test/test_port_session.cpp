@@ -15,14 +15,32 @@ static Json motion_info(const MotionInfo& m) {
 }
 
 TEST(session_helpers) {
-  char buf[session::MSS_LEN];
-  CHECK(strcmp(session::fmt_mss(12000, buf, sizeof buf), "0:12") == 0);
-  CHECK(strcmp(session::fmt_mss(87000, buf, sizeof buf), "1:27") == 0);
-  CHECK(strcmp(session::fmt_mss(599999, buf, sizeof buf), "9:59") == 0);
-  CHECK(strcmp(session::fmt_mss(600000, buf, sizeof buf), "10M+") == 0);
-  CHECK(strcmp(session::fmt_mss(-5, buf, sizeof buf), "0:00") == 0);
   CHECK(session::screen_code("PAIRING") == session::SC_PAIRING && session::screen_code("HOT") == session::SC_HOT);
   CHECK(session::screen_code("LINK_LOST") == session::SC_LINK_LOST && session::screen_code("BYE") == -1);
+}
+
+// tests/test_session.py: test_fmt_found_table
+TEST(session_fmt_found_table) {
+  const struct {
+    int32_t s;
+    const char* want;
+  } table[] = {{-3, "FOUND 0:00"}, {0, "FOUND 0:00"},     {108, "FOUND 1:48"},  {599, "FOUND 9:59"},
+               {600, "FOUND10:00"}, {768, "FOUND12:48"}, {5999, "FOUND99:59"}, {6000, "FOUND 1H+"},
+               {21600, "FOUND 1H+"}};
+  char buf[session::FOUND_LEN];
+  for (const auto& r : table) CHECK(strcmp(session::fmt_found(r.s, buf, sizeof buf), r.want) == 0);
+}
+
+// tests/test_session.py: test_fmt_found_fits_the_word_slot (every value the
+// game can give: it caps the round at FOUND_TIME_MAX_S)
+TEST(session_fmt_found_fits_the_word_slot) {
+  char buf[session::FOUND_LEN + 4];   // room to see an over-long word
+  for (int32_t s = 0; s < T::FOUND_TIME_MAX_S + 120; s++) {
+    session::fmt_found(s, buf, sizeof buf);
+    CHECK((int32_t)strlen(buf) <= T::WORD_MAX_CHARS && strlen(buf) < session::FOUND_LEN);
+    for (const char* c = buf; *c; c++) CHECK(strchr(T::WORD_CHARS, *c) != nullptr);
+    CHECK(strchr(buf + 5, 'M') == nullptr);   // an M after FOUND reads as metres
+  }
 }
 
 // No Python test calls from_tracker (Game.set_tracker), so no trace has it.
