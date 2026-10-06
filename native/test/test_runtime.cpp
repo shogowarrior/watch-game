@@ -1013,3 +1013,46 @@ TEST(runtime_fps_line_off_by_default) {
   run(*rt, clock, 12000);
   CHECK(fps_lines(mark).empty());
 }
+
+// test_found_lights_face_down_panels_for_10s: ui-spec §8 Event wake: both
+// wrists down, both panels asleep; the bump's FOUND wakes both panels and
+// lights them for FOUND_LIT_MS, then they sleep.
+TEST(runtime_found_lights_face_down_panels_for_10s) {
+  MsClock clock(0);
+  SimRadio ra(clock, MAC_A), rb(clock, MAC_B);
+  connect(ra, rb, -50);
+  const uint32_t t0 = 16000;
+  const std::vector<Spike> spikes = {{2000, 100000, -2000}, {t0, 2, 3000}};   // face down from 2 s; the knock
+  Watch a(clock, &ra, spikes, {}, {{1000, app::EV_SHORT}});
+  Watch b(clock, &rb, spikes, {}, {{1100, app::EV_SHORT}});
+  Watch* ws[2] = {&a, &b};
+  for (Watch* w : ws) {
+    w->rt->begin();
+    w->rt->game->pair.split_s = 1;
+    w->rt->game->buzz = game::BUZZ_OFF;
+  }
+  const auto run_to = [&](uint32_t t_end) {
+    while (clock.now < t_end) {
+      int32_t w = 1000;
+      for (Watch* x : ws) {
+        const int32_t d = x->rt->step();
+        if (d < w) w = d;
+      }
+      clock.now += w > 0 ? w : 1;
+    }
+  };
+  const auto lit = [](const Watch* w) { return w->rt->screen_is_on && w->rt->bl_level && *w->rt->bl_level > 0.0; };
+  run_to(t0 - 100);
+  for (Watch* w : ws) CHECK(w->display.asleep && !w->rt->screen_is_on);
+  run_to(t0 + 600);
+  for (Watch* w : ws) CHECK(w->rt->game->mode == game::FOUND && lit(w) && !w->display.asleep);
+  ticks_t ft = 0;
+  for (Watch* w : ws) {
+    CHECK(w->rt->game->found_t);
+    if (w->rt->game->found_t && *w->rt->game->found_t > ft) ft = *w->rt->game->found_t;
+  }
+  run_to(ft + T::FOUND_LIT_MS - 200);
+  for (Watch* w : ws) CHECK(lit(w));
+  run_to(ft + T::FOUND_LIT_MS + 300);
+  for (Watch* w : ws) CHECK(w->display.asleep && w->rt->game->mode == game::FOUND);
+}

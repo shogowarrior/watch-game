@@ -63,6 +63,10 @@ device answers from the trace);
 field after every call exactly, as Python's `==`, and prints the first
 difference with its trace line, call, field, wanted and actual value. A bus
 error, an OSError in Python, is a status return in C++ (`false`, `-1`).
+A test that sets a field of a part the object made (`g.pair.split_s = 1`, a
+short split) shows on the object's own trace when that field is in
+`trace_game.py`'s `KNOBS`: a "set" line with the dotted name, which the
+replay requires the port's set handler to take.
 
 `test/traced.txt` holds a hash of the Python the default traces come from, as
 of the last run in which every port matched. While the Python differs from it,

@@ -483,7 +483,11 @@ bool replay_erased(const char* cls, const std::vector<std::string>& ignore, cons
       if (const Json* set = rec.get("set")) {
         what = "#" + std::to_string(id) + " attributes written: " + dump(*set, 200);
         for (auto& kv : set->o) {
-          e.set(id, kv.first, kv.second);   // false for a property: the state check covers it
+          const bool done = e.set(id, kv.first, kv.second);   // false for a property: the state check covers it
+          if (kv.first.find('.') != std::string::npos) {   // a knob of a part it made (trace_game.py KNOBS)
+            if (!done) throw Mismatch("the port can't set " + kv.first);
+            continue;                                      // no state of its own: the part's trace checks it
+          }
           const Json* ref = kv.second.k == Json::OBJ ? kv.second.get("@ref") : nullptr;
           o.want[kv.first] = ref ? ref_to(*ref) : kv.second;   // state shows a traced object as its ref
         }

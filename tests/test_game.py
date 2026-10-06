@@ -2421,7 +2421,7 @@ def test_found_lights_a_dark_screen_for_10s_whatever_the_tilt():
 def test_found_result_word_chip_and_button_only():
     r = hot_rig()
     g = r.g
-    g.round_t0 = r.t - 108000                   # a 1:48 round
+    g.round_t0 = ticks_add(r.t, -108000)        # a 1:48 round
     _found_by_press(r)
     assert r.p.sub == "celebrate" and r.p.top_text == "TIME 1:48" and r.p.word == "FOUND"
     g.on_button(r.t + 50)                       # celebrate: a press made with the bump is ignored

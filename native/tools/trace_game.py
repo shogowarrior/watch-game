@@ -31,7 +31,8 @@ a replay's fake device can answer it; in the object's own state the device
 shows as its class name only. A "set" line comes before a call
 when the object's state changed since its previous line: other code wrote its
 attributes, as the game does to the beacon it sends (objects in it are written
-with their fields, as arguments are). "s" holds the public attributes and
+with their fields, as arguments are), or a test set a KNOBS field of a part it
+made ("pair.split_s": 1). "s" holds the public attributes and
 properties that changed since the object's previous line (all of them after
 the constructor). Values: JSON numbers (a float is always
 written with a "." or an exponent, so ints and floats stay apart; NaN and
@@ -86,6 +87,7 @@ TRACED = (
     ("finder.session", "LiveMirror"),
     ("finder.pairing", "Calibrator"),
     ("finder.pairing", "Pairing"),
+    ("finder.howto", "HowTo"),
     ("finder.arrow", "Arrow"),
     ("finder.scan", "ScanSession"),
     ("finder.game", "Game"),
@@ -99,6 +101,10 @@ DEVICES = {"app.imu_feed.ImuFeed": ("imu",)}
 # State fields that hold a TRACED object written with its fields, not as a
 # ref: a part the object made, which no other trace of the test covers.
 DEEP = {"app.imu_feed.ImuFeed": ("tracker",)}
+# Fields of a part the object made that a test sets as a knob between calls
+# (the web sim's short split): such a write shows on the object's own trace
+# as a "set" line with the dotted name, so its replay sets the part it made.
+KNOBS = {"finder.game.Game": ("pair.split_s",)}
 
 MISSING = object()
 _ids = {}          # id(obj) -> "module.Class#n"
@@ -107,6 +113,7 @@ _count = {}
 _depth = {}        # id(obj) -> nesting of traced calls on it
 _last = {}         # id(obj) -> its last recorded state
 _out = {}          # "module.Class" -> open file
+_knob_last = {}    # id(obj) -> {dotted name: value} as of the end of its last recorded call
 _active = []       # id(obj) of each recorded call running now, innermost last (None: code not its own)
 _dev_owners = {}   # id(device) -> {id(obj): (class key, obj's number, parameter)}
 _dev_last = {}     # (id(obj), id(device)) -> the device's state at obj's last "dev" line
@@ -230,6 +237,24 @@ def _changed(obj):
     before = _last.get(id(obj), {})
     _last[id(obj)] = now
     return {k: v for k, v in now.items() if before.get(k, MISSING) != v}
+
+
+def _knobs(cls_key, obj):
+    """KNOBS of obj that changed since the end of its last recorded call."""
+    names = KNOBS.get(cls_key)
+    if not names:
+        return {}
+    last = _knob_last.setdefault(id(obj), {})
+    out = {}
+    for name in names:
+        v = obj
+        for part in name.split("."):
+            v = getattr(v, part)
+        if last.get(name, MISSING) != v:
+            if name in last:
+                out[name] = enc(v, deep=True)
+            last[name] = v
+    return out
 
 
 def _num(obj):
@@ -361,6 +386,7 @@ def _wrap_init(cls_key, fn):
         finally:
             _depth[k] = 0
             _active.pop()
+        _knobs(cls_key, self)
         _write(cls_key, {"new": n, "a": a, "s": _changed(self)})
     return init
 
@@ -385,8 +411,10 @@ def _wrap(cls_key, name, fn):
             return fn(self, *args, **kw)
         written = _changed(self)
         fns = _new_fns(cls_key, self)
-        if written or fns:   # deep, so a replay can rebuild an object put in an attribute
+        knobs = _knobs(cls_key, self)
+        if written or fns or knobs:   # deep, so a replay can rebuild an object put in an attribute
             fns.update((f, enc(getattr(self, f), deep=True)) for f in written)
+            fns.update(knobs)
             _write(cls_key, {"o": _num(self), "set": fns})
         b, a = _bind(cls_key, fn, self, args, kw)
         _depth[k] = 1
@@ -399,6 +427,7 @@ def _wrap(cls_key, name, fn):
         finally:
             _depth[k] = 0
             _active.pop()
+            _knobs(cls_key, self)   # its own code's writes are no test's
         _write(cls_key, {"o": _num(self), "m": name, "a": a, "r": enc(r, deep=True), "s": _changed(self)})
         return r
     return method
@@ -457,6 +486,7 @@ TESTS = (
     ("test_proximity", None), ("test_scan", None),
     ("test_arrow", ("finder.arrow.Arrow",)),
     ("test_episode", ("finder.arrow.Arrow", "finder.game.Game")),   # real estimates, scans and arrows
+    ("test_howto", ("finder.howto.HowTo",)),
     ("test_game", ("finder.pairing.Pairing", "finder.pairing.Calibrator", "finder.session.MotionSnap",
                    "finder.session.PeerView", "finder.session.LiveMirror", "finder.game.Game")),
     ("test_pacer", ("app.pacer.FramePacer",)), ("scenario:pacer", ("app.pacer.FramePacer",)),
