@@ -20,7 +20,11 @@ TEST(trace_menu) {
     if (m == "tap") return J(u.tap(tick(a[0]), (int32_t)a[1].in()));
     if (m == "select") return J(u.select(tick(a[0]), (int)a[1].in()));
     if (m == "tick") return u.tick(tick(a[0])), J();
-    if (m == "window") return u.window(a[0].flag(), (int)a[1].in(), a[2].flag()), J();   // Python returns None
+    if (m == "window") {   // Python returns None
+      const int32_t th = render_params::theme_of(a[3].str().c_str());
+      if (th == render_params::N_THEMES) throw Mismatch("theme " + a[3].str());
+      return u.window(a[0].flag(), (int)a[1].in(), a[2].flag(), th), J();
+    }
     unported(m);
   };
   p.state = [](const menu::Menu& u, State& s) {

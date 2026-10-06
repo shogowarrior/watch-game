@@ -17,7 +17,7 @@ Arduino one is next. MicroPython (the rest of the repo) is untouched.
 | `idf/lvgl/` | PlatformIO: LVGL 9.5 through esp_lvgl_port 2.9 on the same `esp_lcd` bus (`bench-lvgl`). The field is an LVGL image a custom decoder fills from the ring map, so its pixels are the other builds' ones; the HOT chips are LVGL labels; and a third scene has LVGL draw rings itself as arcs. |
 | `micropython/` | `hmlcd`, a C user module for a custom MicroPython 1.29 build: the screen push on core 0 from internal DMA buffers, from the shared ST7789 code and `esp32_shared`'s spi_master bus. |
 | `test/` | Host tests (g++; the code under test with address and UB sanitizers) on fake hardware, plus the golden palettes and frames. `run.py` also builds the ports' portable code and tests (`idf/test/`), and replays the Python game's traces through the game port (`trace.h`, `test_port_*.cpp`) and the `hal/` drivers' bus traffic through the core drivers (`hal_replay.h`, `test_hal_*.cpp`), below. |
-| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU), `xcheck.py` (the core, and esp32_shared's plain headers, with the watch's compilers), `bench_report.py` (tables from bench logs), `golden/` (game vectors from `finder/`), `scenarios/` (fixed inputs the trace tests record), `trace_game.py` (records the Python game's calls for the trace tests), `trace_hal.py` (records the `hal/` drivers' bus traffic for the driver tests). |
+| `tools/` | `gen_tuning_h.py` (headers), `golden_field.py` (palettes from the real renderer), `capture.py` (serial log), `qemu_run.py` (boot a build in QEMU), `xcheck.py` (the core, and esp32_shared's plain headers, with the watch's compilers), `bench_report.py` (tables from bench logs), `golden/` (game vectors from `finder/`), `scenarios/` (fixed inputs the trace tests record), `trace_game.py` (records the Python game's calls for the trace tests), `trace_hal.py` (records the `hal/` drivers' bus traffic for the driver tests), `pio_reconfigure.py` (the ESP-IDF builds' pre-script: an existing build directory configures again when a shared component gains a source file, which PlatformIO alone misses). |
 
 Both builds use pins and settings from `hal/pins.py`: SPI on HSPI with SCK 18,
 MOSI 19, CS 5, DC 27 and no MISO (GPIO12 is the backlight), MADCTL 0xC0 with
@@ -125,8 +125,10 @@ the same fake parts, each test named after its Python twin: two watches
 pairing, hunting, bumping and changing the menu for a minute, slow frames,
 low battery, touches and gestures between strips, bus errors, the frame lock
 and the fps line. Not ported: telemetry and debug mode, the gc stage, the
-BMA423 feature engine (so no wrist-raise wake) and the stoppable watchdog
-(`hm/platform.h` says why).
+BMA423 feature engine (so no wrist-raise wake), the stoppable watchdog
+(`hm/platform.h` says why) and the field themes (`ui/themes/`, the saved
+`/theme`): the game has the MENU's THEME row and `RenderParams.theme`, but
+the C++ renderer draws Ripple whatever it says.
 
 Both ESP32 shells start the game through `esp32_shared`'s `hm/esp32_game.h`:
 the shell starts its buses (and the task watchdog, where its framework does

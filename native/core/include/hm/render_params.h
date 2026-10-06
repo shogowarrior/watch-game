@@ -28,7 +28,7 @@ namespace render_params {
 
 namespace hp = hm::haptic_patterns;
 
-constexpr int N_FIELDS = 35;
+constexpr int N_FIELDS = 36;
 extern const char* const FIELDS[N_FIELDS];
 
 // T::SCREENS order.
@@ -95,6 +95,18 @@ constexpr Ramp ramp_of(const char* s) {
   }
   return RAMP_N;
 }
+
+// The field theme (ui-spec §4A): an index into T::THEME_NAMES, the MENU's order.
+constexpr int N_THEMES = (int)(sizeof(T::THEME_NAMES) / sizeof(T::THEME_NAMES[0]));
+// The index of the theme called s; N_THEMES for none.
+constexpr int32_t theme_of(const char* s) {
+  for (int i = 0; i < N_THEMES; i++) {
+    if (streq(s, T::THEME_NAMES[i])) return i;
+  }
+  return N_THEMES;
+}
+constexpr int32_t THEME_DEFAULT = theme_of(T::THEME_DEFAULT);
+static_assert(THEME_DEFAULT < N_THEMES, "T::THEME_DEFAULT names a theme");
 
 // T.ZONE_HEARTBEAT (tuning.h has ZONE_HEARTBEAT_0..2 as strings and notes _3 as None).
 constexpr hp::Haptic ZONE_HEARTBEAT[4] = {hp::TICK, hp::TICK, hp::DOUBLE, hp::NONE};
@@ -199,6 +211,8 @@ struct RenderParams {
   double backlight = T::BACKLIGHT_NORMAL;
   bool sun = false;
   int32_t fps_cap = T::FPS_TARGET;
+  // look
+  int32_t theme = THEME_DEFAULT;   // theme_of(name), N_THEMES for none (validate rejects it); drawn as Ripple
 };
 // replace(rp, **kw) is a copy and plain assignment in C++.
 

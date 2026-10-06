@@ -131,6 +131,7 @@ bool set_field(rp_::RenderParams& p, const std::string& tok) {
   else if (k == "backlight") p.backlight = dbl(v);
   else if (k == "sun") p.sun = num(v);
   else if (k == "fps_cap") p.fps_cap = (int32_t)num(v);
+  else if (k == "theme") p.theme = rp_::theme_of(v.c_str());   // drawn as Ripple, as render_snapshots does
   else return false;
   return true;
 }

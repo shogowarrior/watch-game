@@ -25,9 +25,12 @@
 //
 // Not ported: the gc, telemetry and debug-sink stages, the watchdog (the
 // shell's), the BMA423 feature engine (hm/platform.h), the renderer-less
-// metronome (the renderer always exists) and stats(); the parts come up in the
-// shell, so a part that failed is just absent. The fps line is an "HM fps"
-// line (hm::logf, native/tools/bench_report.py). No allocation.
+// metronome (the renderer always exists), stats(), and the field themes: no
+// ThemedRenderer and no saved theme (app/settings.py), so the game starts on
+// the default and the Ripple renderer draws whatever the MENU's THEME row
+// says. The parts come up in the shell, so a part that failed is just absent.
+// The fps line is an "HM fps" line (hm::logf, native/tools/bench_report.py).
+// No allocation.
 #pragma once
 #include <stdint.h>
 

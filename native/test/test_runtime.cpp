@@ -2,8 +2,8 @@
 // the same fake parts and scenarios on a fake ms clock, with the real
 // Renderer drawing every frame (as on MicroPython). Each test names its
 // Python twin. What the port leaves out (telemetry and the debug sink, gc,
-// the feature engine, the metronome, the announced beat, stats()) has no
-// twin, nor have the tests that monkeypatch game.bump_armed (the HOT bump
+// the feature engine, the metronome, the announced beat, stats(), the themed
+// renderer and the saved theme) has no twin, nor have the tests that monkeypatch game.bump_armed (the HOT bump
 // test has a spike and a touch in one frame). The Python's 4 bands per frame
 // are STRIPS strips here; where a Python test hooks a game method to see
 // its calls, the C++ one reads the game's state or replays the touch samples

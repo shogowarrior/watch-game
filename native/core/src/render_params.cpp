@@ -20,6 +20,8 @@ const char* const FIELDS[N_FIELDS] = {
     "sweep",
     // output devices
     "haptic", "heartbeat", "heartbeat_every", "backlight", "sun", "fps_cap",
+    // look
+    "theme",
 };
 
 namespace {
@@ -411,6 +413,13 @@ int validate(const RenderParams& rp, void (*emit)(void*, const char*), void* ctx
   if (!(T::FPS_CAP_MIN <= rp.fps_cap && rp.fps_cap <= T::FPS_CAP_MAX)) {
     o.e("fps_cap: must be int %d..%d", (int)T::FPS_CAP_MIN, (int)T::FPS_CAP_MAX);
   }
+  if (!(0 <= rp.theme && rp.theme < N_THEMES)) {
+    char names[96];
+    int k = 0;
+    for (int i = 0; i < N_THEMES && k < (int)sizeof names; i++)
+      k += snprintf(names + k, sizeof names - k, i ? " %s" : "%s", T::THEME_NAMES[i]);
+    o.e("theme: must be one of %s", names);
+  }
   return o.n;
 }
 
@@ -536,7 +545,8 @@ int dump(const RenderParams& rp, char* buf, int cap) {
   w.s(hp::name(rp.heartbeat));
   w.f(" heartbeat_every=%d backlight=", (int)rp.heartbeat_every);
   w.flt(rp.backlight);
-  w.f(" sun=%d fps_cap=%d", rp.sun, (int)rp.fps_cap);
+  w.f(" sun=%d fps_cap=%d theme=", rp.sun, (int)rp.fps_cap);
+  w.s(0 <= rp.theme && rp.theme < N_THEMES ? T::THEME_NAMES[rp.theme] : "?");
   return w.len;
 }
 

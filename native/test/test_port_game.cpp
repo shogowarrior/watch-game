@@ -126,6 +126,7 @@ static Json J(const rp::RenderParams& p) {
       {"backlight", J(p.backlight)},
       {"fps_cap", J(p.fps_cap)},
       {"sun", J(p.sun)},
+      {"theme", J(rp::N_THEMES > p.theme && p.theme >= 0 ? T::THEME_NAMES[p.theme] : "?")},
   });
 }
 
@@ -152,6 +153,7 @@ TEST(trace_game) {
   p.call = [](Rig& r, const std::string& m, const Json& a) -> Json {
     game::Game& g = *r.g;
     if (m == "set_place") return g.set_place(a[0].flag()), J();
+    if (m == "set_theme") return g.set_theme(a[0].k == Json::STR ? a[0].str().c_str() : nullptr), J();   // else the default
     if (m == "reset") return g.reset(tick(a[0])), J();
     if (m == "restart_estimate") return g.restart_estimate(), J();
     if (m == "set_motion") {
@@ -200,6 +202,7 @@ TEST(trace_game) {
     s("battery", J(g.battery));
     s("sun", J(g.sun));
     s("buzz", J(g.buzz));
+    s("theme", J(T::THEME_NAMES[g.theme]));
     s("params", g.params ? J(*g.params) : J());
     s("goodbye_left", J(g.goodbye_left));
     s("power_off", J(g.power_off));

@@ -109,6 +109,9 @@ class Game {
 
   // ---- lifecycle
   void set_place(bool indoor);   // outdoor (default) or indoor/crowded: the path-loss exponent
+  // Field theme (ui-spec §4A Choosing): the theme called name (T::THEME_NAMES),
+  // anything else (nullptr too) the default. RenderParams.theme carries it.
+  void set_theme(const char* name);
   void reset(ticks_t t_ms);      // everything back to PAIRING looking (forget the partner)
   void restart_estimate();       // forget the range estimate and proximity
 
@@ -154,6 +157,7 @@ class Game {
   std::optional<int32_t> battery;
   bool sun = false;
   int buzz = BUZZ_FULL;
+  int32_t theme = rp::THEME_DEFAULT;   // field theme (set_theme): survives END ROUND
   std::optional<rp::RenderParams> params;
   howto::HowTo howto;
   int32_t goodbye_left = 0;

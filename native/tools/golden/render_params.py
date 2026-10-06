@@ -5,7 +5,7 @@ on valid frames and on a case for every rule the C++ types can break.
 A field token is ``name=value`` (see ``tok``): None is ``n``, bools 0/1, a
 space in text ``_``, tuple items joined by ``|`` (sweep bins by ``/``).
 
-    make <field tokens given to make_params> -> <all 35 field tokens>
+    make <field tokens given to make_params> -> <all 36 field tokens>
     validate <field tokens that differ from DEFAULTS, wavelength_px always> -> <count>
     error <message>          (one line per violation, in order, after its validate line)
 """
@@ -133,6 +133,8 @@ MAKES = (
     dict(screen="SEARCHING", sub="turn", sweep=(330.0, (None,) * 12, None, True), glyph="arrow",
          arrow_deg=300.0, cone_deg=59.9, arrow_style="outline", status=(80, 80, 3, True, True)),
     dict(screen="HOT", zone=3, glyph="bump", bump_icons=5, word="BUMP!", dist_band="<3"),
+    dict(screen="MENU", sub="3^v", ramp="grey", theme="fireflies",
+         menu_rows=("SUN: OFF", "BUZZ: FULL", "PLACE: OUT", "THEME: FIREFLIES")),
 )
 
 WAVELENGTHS = ((-36.0, 3200), (40.0, 2400), (56.0, 1600), (80.0, 1000), (120.0, 500), (0.0, 1000),
@@ -176,6 +178,8 @@ def validate_cases():
                        top_text="TIME 12:48", haptic="FOUND"),
         RP.make_params(screen="MENU", sub="2", ramp="grey",
                        menu_rows=("RESUME", "SUN: ON", "BUZZ: EVENTS", "PLACE: IN")),
+        RP.make_params(screen="MENU", sub="2^", ramp="grey", theme="fireflies",
+                       menu_rows=("BUZZ: FULL", "PLACE: OUT", "THEME: FIREFLIES", "END ROUND")),
         zone_frame(1, status=(80, 80, 3, True, True), sun=True),
         RP.make_params(**MAKES[5]),
         R(lost, trend=1),
@@ -267,6 +271,7 @@ def validate_cases():
         R(base, heartbeat="TICK"), R(base, heartbeat="FOUND"), R(base, heartbeat_every=3),
         R(base, heartbeat_every=2), R(base, heartbeat=None, heartbeat_every=0), R(_hot(), heartbeat="DOUBLE"),
         R(base, backlight=2.0), R(base, backlight=-0.5), R(base, fps_cap=30), R(base, fps_cap=4),
+        R(base, theme="sheen"), R(base, theme=None),   # the C++ holds either as no theme
         R(base, haptic="LOST"),
         # howto cards and the bump view (tests/test_render_params.py)
         RP.make_params(**dict(look, glyph="chevrons")), RP.make_params(**dict(look, ring_live=True)),
