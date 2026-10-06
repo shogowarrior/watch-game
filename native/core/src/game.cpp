@@ -84,6 +84,11 @@ void Game::set_place(bool indoor_) {
   est->set_exponent(indoor ? T::PATH_LOSS_N_INDOOR : T::PATH_LOSS_N);
 }
 
+void Game::set_theme(const char* name) {
+  const int32_t k = name ? rp::theme_of(name) : rp::N_THEMES;
+  theme = k < rp::N_THEMES ? k : rp::THEME_DEFAULT;
+}
+
 void Game::reset(ticks_t t_ms) {
   mode = PAIRING;
   mode_t = t_ms;
@@ -553,7 +558,7 @@ const rp::RenderParams& Game::tick(ticks_t t_ms) {
     set_expected(t_ms);
   }
   state_byte = state_byte_(t_ms);
-  menu.window(sun, buzz, indoor);
+  menu.window(sun, buzz, indoor, theme);
   params = params_(t_ms);
   if (toast_is(T_PRESS_2X) && params->word) {
     toast_on_ = false;                    // BUMP!, HOLD STILL or an arrow word took the slot (§8)
@@ -1202,6 +1207,8 @@ void Game::menu_apply(ticks_t t_ms, std::optional<int> act) {
     buzz = (buzz + 1) % (int)(sizeof menu::BUZZ_ROWS / sizeof menu::BUZZ_ROWS[0]);
   else if (*act == menu::PLACE)
     set_place(!indoor);
+  else if (*act == menu::THEME)
+    theme = (theme + 1) % rp::N_THEMES;
   else if (*act == menu::END)
     reset(t_ms);   // END ROUND confirmed: forget the partner
 }
@@ -1670,6 +1677,7 @@ rp::RenderParams Game::params_(ticks_t t_ms) {
   p.backlight = backlight(t_ms);
   p.fps_cap = saver() ? T::SAVER_FPS : T::FPS_TARGET;
   p.sun = sun;
+  p.theme = theme;
   return p;
 }
 

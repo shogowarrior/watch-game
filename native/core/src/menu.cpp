@@ -85,11 +85,12 @@ void Menu::tick(ticks_t t_ms) {
     confirm_t_.reset();
 }
 
-bool Menu::window(bool sun, int buzz, bool indoor) {
+bool Menu::window(bool sun, int buzz, bool indoor, int32_t theme) {
   const char** r = labels_;
   r[SUN] = sun ? SUN_ON : ROWS[SUN];
   r[BUZZ] = BUZZ_ROWS[buzz];
   r[PLACE] = indoor ? PLACE_IN : ROWS[PLACE];
+  r[THEME] = THEME_ROWS[theme];
   r[END] = confirm_t_ ? CONFIRM : ROWS[END];
   bool changed = false;
   for (int k = 0; k < VISIBLE; k++) {

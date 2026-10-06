@@ -1,9 +1,9 @@
-// finder/menu.py: MENU overlay state (ui-spec MENU), a 5-row list, 4 rows
+// finder/menu.py: MENU overlay state (ui-spec MENU), a 6-row list, 4 rows
 // visible, that scrolls.
 //
 // The Game owns one Menu. It opens and closes it, passes input on (next /
 // scroll / tap / select) and applies the row action those return (SUN, BUZZ,
-// PLACE, END once confirmed; RESUME only closes). END ROUND asks first: the
+// PLACE, THEME, END once confirmed; RESUME only closes). END ROUND asks first: the
 // first select arms "SURE? PRESS" for MENU_CONFIRM_MS; any other row, a swipe
 // or moving off the row cancels it. The menu closes itself MENU_AUTOCLOSE_MS
 // after the last input. window() rebuilds the labels and the visible rows at
@@ -14,21 +14,28 @@
 
 #include <optional>
 
+#include "hm/render_params.h"
 #include "hm/ticks.h"
 #include "hm/tuning.h"
 
 namespace hm {
 namespace menu {
 
-constexpr int N_ROWS = 5;
-constexpr const char* const ROWS[N_ROWS] = {"RESUME", "SUN: OFF", "BUZZ: FULL", "PLACE: OUT", "END ROUND"};
-constexpr int RESUME = 0, SUN = 1, BUZZ = 2, PLACE = 3, END = 4;   // row index = the action select returns
+constexpr int N_ROWS = 6;
+constexpr const char* const ROWS[N_ROWS] = {"RESUME", "SUN: OFF", "BUZZ: FULL", "PLACE: OUT", "THEME: RIPPLE",
+                                            "END ROUND"};
+constexpr int RESUME = 0, SUN = 1, BUZZ = 2, PLACE = 3, THEME = 4, END = 5;   // row index = the action select returns
 constexpr int VISIBLE = (int)(sizeof(T::MENU_ROWS_Y) / sizeof(T::MENU_ROWS_Y[0]));   // rows on screen
 constexpr int TOP_MAX = N_ROWS - VISIBLE;
 constexpr const char* CONFIRM = "SURE? PRESS";
 constexpr const char* const BUZZ_ROWS[3] = {"BUZZ: FULL", "BUZZ: EVENTS", "BUZZ: OFF"};   // index = game BUZZ_*
 constexpr const char* SUN_ON = "SUN: ON";
 constexpr const char* PLACE_IN = "PLACE: IN";
+// "THEME: " + T.THEME_LABELS[name], index = render_params theme (T::THEME_NAMES
+// order; ui-spec §4A Choosing). The trace replay checks the text.
+constexpr const char* const THEME_ROWS[] = {"THEME: RIPPLE", "THEME: SONAR",  "THEME: TIDE",
+                                            "THEME: WARP",   "THEME: ARCADE", "THEME: FIREFLIES"};
+static_assert(sizeof(THEME_ROWS) / sizeof(THEME_ROWS[0]) == render_params::N_THEMES, "a THEME row per theme");
 constexpr int SUB_LEN = 16;
 
 // Open flag, selected row sel, first visible row top, the END ROUND confirm
@@ -56,9 +63,10 @@ class Menu {
   // ---- per tick
   // Auto-close and the confirm timeout; caps the input stamp's age.
   void tick(ticks_t t_ms);
-  // Row labels for these settings (buzz: game BUZZ_*, 0..2), and the visible rows;
-  // returns true when a visible label changed (the Python builds a new rows tuple then).
-  bool window(bool sun, int buzz, bool indoor);
+  // Row labels for these settings (buzz: game BUZZ_*, 0..2; theme: a
+  // render_params theme), and the visible rows; returns true when a visible
+  // label changed (the Python builds a new rows tuple then).
+  bool window(bool sun, int buzz, bool indoor, int32_t theme = render_params::THEME_DEFAULT);
   // RenderParams.sub for MENU: the visible index of sel, then '^'/'v' when
   // rows are hidden above/below. Formats into a member buffer.
   const char* sub();

@@ -132,6 +132,7 @@ bool set_field(RenderParams& rp, const std::string& tok) {
   else if (k == "backlight") rp.backlight = dbl(v);
   else if (k == "sun") rp.sun = num(v);
   else if (k == "fps_cap") rp.fps_cap = (int32_t)num(v);
+  else if (k == "theme") rp.theme = rp_::theme_of(v.c_str());   // an unknown name or None: N_THEMES
   else return false;
   return true;
 }
@@ -266,7 +267,7 @@ TEST(test_render_params_make_wavelength_arrow_style_like_python) {
       styles++;
     }
   }
-  CHECK(makes == 11 && waves == 16 && styles == 19);
+  CHECK(makes == 12 && waves == 16 && styles == 19);
 }
 
 TEST(test_render_params_validate_like_python) {
@@ -297,7 +298,7 @@ TEST(test_render_params_validate_like_python) {
     }
   }
   CHECK(next == got.size());
-  CHECK(cases == 203 && errors == 218);
+  CHECK(cases == 206 && errors == 220);
 }
 
 // test_bump_icons_rules: the word validate checks is the game's.
