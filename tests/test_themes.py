@@ -17,7 +17,7 @@ from tests import Skip
 from ui import swap16
 
 try:
-    import framebuf  # noqa: F401
+    import framebuf
     HAVE_FB = True
 except ImportError:
     HAVE_FB = False
@@ -47,23 +47,30 @@ def _luma(c):
     return (299 * ((n >> 11) << 3) + 587 * (((n >> 5) & 63) << 2) + 114 * ((n & 31) << 3)) // 1000
 
 
-_LUMA = []                   # [bytearray(65536)]: _luma of every swapped RGB565 value
+_LUMA = []                   # [palette FrameBuffer, sample rows, their FrameBuffer]
+LSTEP = 7                    # _mean_luma samples every 7th row
 
 
 def _mean_luma(buf):
-    """Mean luma of every 7th pixel (a table lookup per pixel: the contract
-    calls this on every frame of every theme, so it must cost less than the
-    frame it checks)."""
+    """Mean luma of every 7th row, at C speed and allocating (almost)
+    nothing: a palette blit turns each swapped RGB565 value of the sampled
+    rows into its luma, and sum() adds them. The contract calls this on
+    every frame of every theme, so it must cost less than the frame it
+    checks (a pixel loop cost more), and on the wasm port nothing a test
+    allocates is freed until the run ends (gc.collect does nothing there)."""
     if not _LUMA:
         lut = bytearray(65536)
         for c in range(65536):
             lut[c] = _luma(c)
-        _LUMA.append(lut)
-    lut = _LUMA[0]
-    s = 0
-    for o in range(0, W * W * 2, 14):            # every 7th pixel
-        s += lut[buf[o] | (buf[o + 1] << 8)]
-    return s // ((W * W * 2 + 13) // 14)
+        # 65535 is the widest FrameBuffer; colour 0xffff reads lut[65535],
+        # which the buffer still holds
+        pal = framebuf.FrameBuffer(lut, 65535, 1, framebuf.GS8)
+        rows = bytearray(W * ((W + LSTEP - 1) // LSTEP))
+        _LUMA.extend((pal, rows, framebuf.FrameBuffer(rows, W, len(rows) // W, framebuf.GS8)))
+    pal, rows, rfb = _LUMA
+    n = len(rows) // W
+    rfb.blit(framebuf.FrameBuffer(buf, W, n, framebuf.RGB565, W * LSTEP), 0, 0, -1, pal)
+    return sum(rows) // len(rows)
 
 
 def _frame_locked(r, p, cap, now):
@@ -191,7 +198,8 @@ def _phase_of(phases, t):
     return k
 
 
-_REF = {}                    # item -> Ripple's mean luma per frame (the flash reference)
+_REF = {}                    # item -> Ripple's mean luma per frame (the flash reference;
+                             # test_contract_ripple fills it, a contract run alone renders it)
 
 
 def _ripple_lumas(fx, phases, times):
@@ -217,6 +225,7 @@ def _contract(name):
     for fx, phases, times in _items():
         ps = [rt.params_at(phases, t) for t in times]
         ref = _ripple_lumas(fx, phases, times) if name != "ripple" else None
+        mine = []
         r.reset()
         lum = -1
         k_was = -1
@@ -248,12 +257,15 @@ def _contract(name):
             # no full-field flash (§4A rule 5): per frame the mean luma moves
             # no more than Ripple's does on the same params, plus 12
             m = _mean_luma(cap.buf)
+            mine.append(m)
             if ref is not None and not wake:
                 d = m - lum
                 dr = ref[n] - ref[n - 1]
                 assert abs(d) <= abs(dr) + 12, (name, fx, t, lum, m, "ripple", ref[n - 1], ref[n])
             lum = m
             prev[:] = cap.buf
+        if ref is None:
+            _REF[fx] = mine                      # Ripple's run is the reference
 
 
 def test_frame_lock_catches_an_allocation():
@@ -391,15 +403,15 @@ def test_reset_is_fresh():
     _need_fb()
     ca = FrameCapture()
     cb = FrameCapture()
+    _, ph2, run2 = rt.fixture("hot")
     for n in NAMES:
+        b = ThemedRenderer(n, overlays=False)
+        rt.run(b, cb, ph2, run2)
         for fx in ("pairing_seen", "found_result", "searching", "far"):
             _, phases, run_ms = rt.fixture(fx)
             a = ThemedRenderer(n, overlays=False)
             rt.run(a, ca, phases, run_ms)
-            b = ThemedRenderer(n, overlays=False)
-            _, ph2, run2 = rt.fixture("hot")
-            rt.run(b, cb, ph2, run2)
-            rt.run(b, cb, phases, run_ms)
+            rt.run(b, cb, phases, run_ms)        # after HOT and the fixtures before it
             assert ca.buf == cb.buf, (n, fx)
 
 
