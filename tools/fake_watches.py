@@ -19,8 +19,10 @@ and both show HOT, they knock the watches together every 1.5 s: first a
 knock only A feels, then one B feels 0.6 s late, then matched ones until the
 round ends (``KNOCKS``), so the page's Knocks panel shows its verdicts. Each
 knock's spikes go to ``Game.on_accel_tap`` and the ``tap`` event, as
-app/runtime.py does. A taps FOUND for the next round, then walks away to
-about 40 m and back while B stands still, over and over. Beacons reach the
+app/runtime.py does. On the FOUND result A taps the screen (which only
+raises the PRESS THE BUTTON toast there) and presses the side key for the
+next round (BUTTON: PLAY AGAIN), then walks away to about 40 m and back
+while B stands still, over and over. Beacons reach the
 other game through a ``LinkMonitor``, as in app/runtime.py, so the link
 counters (sequence numbers, loss) are real too.
 """
@@ -59,7 +61,7 @@ PAUSE_S = 5.0              # A waits this long out there
 KNOCK_MS = 1500            # next to B, both in HOT: a knock this often
 KNOCKS = ((0, None), (0, 600), (0, 70))   # A's and B's spike, ms after each knock (None: missed);
                                           # the last one repeats until FOUND
-AGAIN_MS = 2000            # A taps FOUND this long after its celebration ends
+AGAIN_MS = 2000            # A plays again this long after its celebration ends
 TILT_FLAT = 5.0            # watch held flat, face up
 BATTERY = 90
 BATT_MV = 3950
@@ -98,6 +100,11 @@ class FakeWatch:
         self.game.on_gesture(t, TAP)
         self.tele.event(t, "touch", ("g", NAMES[TAP]), ("x", 120), ("y", 120))
 
+    def press(self, t):
+        """A short press of the side key."""
+        self.game.on_button(t)
+        self.tele.event(t, "btn", ("kind", "short"))
+
     def hear(self, t, sender, seq, rssi):
         """A beacon from ``sender`` with sequence number ``seq``: filled as it
         leaves that watch, then received as app/runtime.py does."""
@@ -127,8 +134,7 @@ class FakeWatch:
         pr.split_s = SPLIT_S
         if (g.mode == M_PAIRING and pr.sub == P.SEEN and not pr.confirmed
                 and ticks_diff(t, pr.t_sub) >= CONFIRM_MS):
-            g.on_button(t)
-            self.tele.event(t, "btn", ("kind", "short"))
+            self.press(t)
         p = g.tick(t)
         self.params = p
         on = g.screen_on
@@ -144,8 +150,8 @@ class FakeWatch:
 
 class Players:
     """The two players, once both games have left PAIRING: next to each other
-    in HOT they knock (``KNOCKS``) until FOUND; A taps FOUND for the next round
-    and walks its route. The first round starts next to each other."""
+    in HOT they knock (``KNOCKS``) until FOUND; A plays again from the FOUND
+    result and walks its route. The first round starts next to each other."""
 
     def __init__(self, world, watches):
         self.a = world.a
@@ -164,7 +170,8 @@ class Players:
         ga, gb = w[0].game, w[1].game
         if ga.mode == M_FOUND:
             if ticks_diff(t, ga.found_t) >= FOUND_CELEBRATE_MS + AGAIN_MS:
-                w[0].tap(t)        # TAP=AGAIN: B follows
+                w[0].tap(t)        # only a PRESS THE BUTTON toast (ui-spec §6 FOUND)
+                w[0].press(t)      # BUTTON: PLAY AGAIN: B follows
                 self.walk = True
                 self.n = 0
                 self.next_t = None
